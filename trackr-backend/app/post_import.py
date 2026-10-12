@@ -152,12 +152,12 @@ def _run_cycle_locked(
             logger.warning("post_import_snapshots_failed", exc_info=True)
             out["snapshots"] = {"error": type(exc).__name__, "complete": False}
 
-    out["more_work"] = _more_work(conn, out)
+    out["more_work"] = _more_work(conn, out, settings)
     out["progress"] = _progress(out)
     return out
 
 
-def _more_work(conn: Any, out: dict) -> bool:
+def _more_work(conn: Any, out: dict, settings: Settings | None = None) -> bool:
     prices = out.get("prices", {})
     prices_left = "error" in prices or (
         prices.get("pending", 0)
@@ -166,7 +166,7 @@ def _more_work(conn: Any, out: dict) -> bool:
     fno_left = bool(out.get("fno", {}).get("deferred"))
     snapshots_left = not out.get("snapshots", {}).get("complete", False)
     try:
-        reference_left = _reference_work_left(conn)
+        reference_left = _reference_work_left(conn, settings)
     except Exception:
         conn.rollback()
         logger.warning("post_import_reference_check_failed", exc_info=True)
@@ -191,14 +191,21 @@ def _progress(out: dict) -> bool:
     )
 
 
-def _reference_work_left(conn: Any) -> bool:
-    """Reference work runnable now, or an import not yet turned into tasks."""
+def _reference_work_left(conn: Any, settings: Settings | None = None) -> bool:
+    """Reference work THIS deployment can run now, or an import not yet turned into
+    tasks. NSE-API tasks do not count where ``nse_api_enabled`` is false: they wait for
+    ``app.nse_worker``, and counting them would keep a chain alive that cannot move them."""
+    from app.reference_worker import NSE_TASK_KINDS
+
+    nse_enabled = getattr(settings, "nse_api_enabled", True)
     with conn.cursor() as cur:
         cur.execute(
             """SELECT EXISTS (SELECT 1 FROM reference_sync_task
-                   WHERE state IN ('pending','retry','running') AND available_at <= now())
+                   WHERE state IN ('pending','retry','running') AND available_at <= now()
+                     AND (%s OR kind <> ALL(%s)))
                OR EXISTS (SELECT 1 FROM reference_sync_import
-                   WHERE scheduled_at IS NULL OR requested_at > scheduled_at)"""
+                   WHERE scheduled_at IS NULL OR requested_at > scheduled_at)""",
+            (nse_enabled, list(NSE_TASK_KINDS)),
         )
         found = bool(cur.fetchone()[0])
     conn.commit()

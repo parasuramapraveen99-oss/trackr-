@@ -36,7 +36,8 @@ class DemergerWatchOut(BaseModel):
 
 
 def _run(conn: Any, settings: Settings) -> dict[str, Any]:
-    if not settings.demerger_watch_enabled:
+    # Also skipped where NSE blocks this deployment: the watch reads NSE's notices API.
+    if not settings.demerger_watch_enabled or not settings.nse_api_enabled:
         return {"skipped": True, "logged": 0}
     return {"skipped": False, "logged": check_demerger_watch(conn)}
 

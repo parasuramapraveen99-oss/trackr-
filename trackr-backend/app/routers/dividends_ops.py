@@ -26,7 +26,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 
 from app.auth.ops import require_cron_secret, require_ops_key
-from app.config import Settings, get_settings
+from app.config import NSE_API_DISABLED_NOTE, Settings, get_settings
 from app.database import get_conn
 from app.db import dividend_events as de
 from app.db.dividend_reconcile import reconcile_pending_dividends
@@ -106,7 +106,10 @@ def refresh_dividends_cron(
 ) -> dict[str, Any]:
     """Same job, reachable by Vercel Cron: GET, gated by ``CRON_SECRET`` rather than
     ``X-Ops-Key``, since that is the only credential Vercel's scheduler sends. See
-    docs/DEPLOYMENT.md."""
+    docs/DEPLOYMENT.md. Skipped where ``nse_api_enabled`` is false (``app.nse_worker``
+    reads the same window from a machine NSE does not block)."""
+    if not settings.nse_api_enabled:
+        return {"fetched": 0, "error": NSE_API_DISABLED_NOTE, **_normalise({})}
     today = date.today()
     return _refresh_dividends(conn, today - timedelta(days=1), today, settings)
 

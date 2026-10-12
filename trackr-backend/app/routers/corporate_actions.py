@@ -14,6 +14,7 @@ unchanged. Nothing here writes to the ledger.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from datetime import date, timedelta
 from typing import Any
@@ -24,7 +25,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 
 from app.auth.dependencies import assert_owned_investor, get_current_user, require_owned_investor
 from app.auth.ops import require_cron_secret, require_ops_key
-from app.config import Settings, get_settings
+from app.config import NSE_API_DISABLED_NOTE, Settings, get_settings
 from app.database import get_conn, money
 from app.db import audit, repository
 from app.db import corporate_action_timeline as timeline_db
@@ -409,7 +410,13 @@ def refresh_corporate_actions_cron(
 ) -> dict[str, Any]:
     """Same job, reachable by Vercel Cron specifically: GET, gated by ``CRON_SECRET``
     rather than ``X-Ops-Key``, since that is the only credential Vercel's scheduler
-    sends and the only HTTP method it calls with. See docs/DEPLOYMENT.md."""
+    sends and the only HTTP method it calls with. See docs/DEPLOYMENT.md.
+
+    Skipped where ``nse_api_enabled`` is false: NSE blocks that deployment, and the same
+    window is read by ``app.nse_worker`` instead."""
+    if not settings.nse_api_enabled:
+        logging.getLogger(__name__).info("corporate_action_cron_skipped: %s", NSE_API_DISABLED_NOTE)
+        return {"fetched": 0, "verified": 0, "exceptions": 0, "conflicts": 0}
     today = date.today()
     return _refresh_corporate_actions(conn, today - timedelta(days=1), today, settings)
 

@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 
 from app.auth.ops import require_cron_secret, require_ops_key
+from app.config import NSE_API_DISABLED_NOTE, Settings, get_settings
 from app.database import get_conn
 from app.db import isin_change_circulars as icc_db
 from app.db import security_alias as alias_db
@@ -32,11 +33,19 @@ ops_router = APIRouter(prefix="/ops/security-alias", tags=["ops"])
 _POLL_WINDOW_DAYS = 10
 
 
-def _refresh_and_promote(conn: Any) -> dict[str, Any]:
+def _refresh_and_promote(conn: Any, nse_api_enabled: bool = True) -> dict[str, Any]:
     today = date.today()
-    feed_result = icc_db.refresh_isin_change_feed(
-        conn, today - timedelta(days=_POLL_WINDOW_DAYS), today, actor_uid=None
-    )
+    if nse_api_enabled:
+        feed_result = icc_db.refresh_isin_change_feed(
+            conn, today - timedelta(days=_POLL_WINDOW_DAYS), today, actor_uid=None
+        )
+    else:
+        # NSE blocks this deployment and every 403 would trip the feed's week-long
+        # breaker; app.nse_worker polls the circulars. Promotion is local and still runs.
+        feed_result = {
+            "fetched": 0, "aliases_created": 0, "skipped": 0, "breaker_open": False,
+            "error": NSE_API_DISABLED_NOTE,
+        }
     promotion = alias_db.promote_draft_aliases(conn, as_of=today, actor_uid=None)
     return {
         "feed": feed_result,
@@ -65,8 +74,10 @@ def refresh_security_aliases(conn: Any = Depends(get_conn)) -> dict[str, Any]:
     response_model=SecurityAliasRefreshOut,
     dependencies=[Depends(require_cron_secret)],
 )
-def refresh_security_aliases_cron(conn: Any = Depends(get_conn)) -> dict[str, Any]:
+def refresh_security_aliases_cron(
+    conn: Any = Depends(get_conn), settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
     """Same job, reachable by Vercel Cron specifically: GET, gated by ``CRON_SECRET``
     rather than ``X-Ops-Key``, since that is the only credential Vercel's scheduler
     sends and the only HTTP method it calls with."""
-    return _refresh_and_promote(conn)
+    return _refresh_and_promote(conn, nse_api_enabled=settings.nse_api_enabled)

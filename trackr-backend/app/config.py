@@ -36,6 +36,11 @@ _WEBHOOK_PROVIDER_REQUIRES: dict[str, tuple[str, ...]] = {
 _INGEST_DOMAIN_DEV_DEFAULT = "ingest.example.com"
 
 
+#: What a skipped NSE job reports where ``nse_api_enabled`` is false.
+NSE_API_DISABLED_NOTE = (
+    "NSE API disabled on this deployment (NSE_API_ENABLED=false); run app.nse_worker"
+)
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", case_sensitive=False, extra="ignore", hide_input_in_errors=True
@@ -172,6 +177,13 @@ class Settings(BaseSettings):
     # the daily crons and the import screen's /sync still advance the work.
     self_base_url: str | None = None
     vercel_project_production_url: str | None = None
+    # Whether THIS deployment may call nseindia.com/api (corporate actions, dividend
+    # notices, ISIN-change circulars, IPO/further-issue lists). NSE answers 403 to cloud
+    # data-centre IPs -- Vercel's included (measured 12 Oct 2026) -- and every 403 counts
+    # toward the ISIN-change feed's week-long circuit breaker. Set false there; the NSE work
+    # then waits for `python -m app.nse_worker` on a machine NSE does not block. Bhavcopy
+    # archives and NSDL are unaffected and keep running here.
+    nse_api_enabled: bool = True
 
     # --- web --------------------------------------------------------------------
     # Comma-separated in the environment; split into a list for CORSMiddleware.

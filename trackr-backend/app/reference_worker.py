@@ -507,6 +507,11 @@ def _rebuild_snapshot(conn, payload):
     upsert_snapshot(conn, investor_id, advised, snapshot)
 
 
+#: Task kinds that call nseindia.com/api. Left pending on a deployment with
+#: ``nse_api_enabled`` false, for ``app.nse_worker`` to run where NSE is reachable.
+NSE_TASK_KINDS = ("NSE", "GAP")
+
+
 def run_once(
     conn,
     settings: Settings,
@@ -549,10 +554,12 @@ def run_once(
                 cur.execute(
                     """SELECT kind,task_key,payload,attempts FROM reference_sync_task
                        WHERE state IN ('pending','retry') AND available_at <= now()
+                         AND (%s OR kind <> ALL(%s))
                        -- Derived snapshot rebuilds last: they are cheap, numerous, and
                        -- only correct once the identity/action work ahead of them is done.
                        ORDER BY (kind = 'SNAPSHOT'), available_at, kind, task_key
-                       LIMIT 1 FOR UPDATE SKIP LOCKED"""
+                       LIMIT 1 FOR UPDATE SKIP LOCKED""",
+                    (settings.nse_api_enabled, list(NSE_TASK_KINDS)),
                 )
                 row = cur.fetchone()
                 if row is None:
