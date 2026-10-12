@@ -16,9 +16,12 @@ objects. It reads; it computes nothing.
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from time import monotonic
 from typing import Any
 
 from app.engine import fno_types
@@ -32,6 +35,8 @@ from app.prices.fno_sources import (
     nse_fo_source,
 )
 from app.prices.pipe import NSE_BHAVCOPY_EARLIEST, trading_days
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,6 +360,67 @@ class FnoBook:
     contracts: list[fno_types.FnoContract]
     prices: list[fno_types.FnoPrice]
 
+
+
+def backfill_expiry_settlements(
+    conn: Any,
+    today: date | None = None,
+    sources_by_exchange: dict[str, Any] | None = None,
+    notifier: Notifier | None = None,
+    time_budget_seconds: float | None = None,
+    clock: Callable[[], float] = monotonic,
+) -> dict[str, int]:
+    """Fetch the exchange F&O file of every past expiry day a traded contract has no
+    price for -- the only place its final settlement price exists (ENGINE_SPEC section 15).
+
+    WHY. The heal fetches a contract's TRADE days and the daily cron looks back 7 days,
+    so an option bought before expiry and held through it -- its contract note ending
+    before the expiry -- had no expiry-day row, and stayed "expired, settlement price not
+    available" for ever (NIFTY 08-Sep-2026 PE, found 12 Oct 2026). Resumable: an
+    exchange-day already stored is skipped by ``backfill_fno_prices``; a failed day is
+    counted and retried next run. Stops claiming days once ``time_budget_seconds`` is spent.
+    """
+    today = today or date.today()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT c.exchange, c.expiry
+            FROM fno_trade t JOIN fno_contract c ON c.id = t.contract_id
+            WHERE c.expiry < %s
+              AND NOT EXISTS (SELECT 1 FROM fno_price p
+                              WHERE p.contract_id = c.id AND p.price_date = c.expiry)
+            ORDER BY c.expiry, c.exchange
+            """,
+            (today,),
+        )
+        missing = [(r[0], r[1]) for r in cur.fetchall()]
+    conn.commit()
+    if sources_by_exchange is None:
+        sources_by_exchange = {"NSE": nse_fo_source(), "BSE": bse_fo_source()}
+
+    fetched = failed = done = 0
+    began = clock()
+    for exchange, expiry in missing:
+        if time_budget_seconds is not None and clock() - began > time_budget_seconds:
+            break
+        done += 1
+        source = sources_by_exchange.get(exchange)
+        if source is None:
+            failed += 1
+            continue
+        try:
+            backfill_fno_prices(conn, expiry, expiry, sources=[source], notifier=notifier)
+            fetched += 1
+        except Exception:  # an archive outage must not stop the other days
+            conn.rollback()
+            failed += 1
+            logger.warning("fno_expiry_settlement_failed %s %s", exchange, expiry, exc_info=True)
+    return {
+        "missing": len(missing),
+        "fetched_days": fetched,
+        "deferred": len(missing) - done,
+        **({"failed_days": failed} if failed else {}),
+    }
 
 def load_fno_book(conn: Any, investor_id: str, as_of: date) -> FnoBook:
     """Every ``fno_trade`` row of the investor's accounts dated on or before ``as_of``,

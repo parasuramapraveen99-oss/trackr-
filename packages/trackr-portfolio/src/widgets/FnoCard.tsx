@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useAuth, useFetch, usePortfolioRefresh } from "@trackr/core";
 import type {
   FnoContractOut,
@@ -8,7 +9,15 @@ import type {
   FnoTaxResponse,
   FnoUnresolvedOut,
 } from "@trackr/core";
-import { formatDate, formatMoney, formatQuantity, signClass } from "@trackr/core";
+import {
+  Dec,
+  formatDate,
+  formatMoney,
+  formatQuantity,
+  parseDecimal,
+  signClass,
+  sumDecimals,
+} from "@trackr/core";
 import { Card } from "@trackr/ui";
 
 const label = {
@@ -73,6 +82,7 @@ export function FnoCard({ positions }: { positions: FnoPositionsState }) {
   const tax = useFetch<FnoTaxResponse>(base && `${base}/tax`, { as_of: asOf }, token);
   usePortfolioRefresh(realised.refetch);
   usePortfolioRefresh(tax.refetch);
+  const [showDetails, setShowDetails] = useState(false);
 
   // A failed read is shown, never hidden: hiding it would make an account WITH F&O trades
   // look like one without them.
@@ -90,8 +100,202 @@ export function FnoCard({ positions }: { positions: FnoPositionsState }) {
   const unresolved = [...p.excluded, ...p.expired_unresolved];
   const provisionalNote = realised.data?.matches.find((m) => m.provisional)?.note ?? null;
 
+  const years = tax.data?.years ?? [];
+  const closedYears = years.filter((y) => y.matches > 0);
+  // Exact decimal sums; null when any year is unreadable, shown as a dash, never a guess.
+  const totalPnl = tax.data ? sumDecimals(closedYears.map((y) => y.realised_pnl)) : null;
+  const totalCharges = tax.data ? sumDecimals(closedYears.map((y) => y.expenses)) : null;
+  const totalNet = tax.data ? sumDecimals(closedYears.map((y) => y.net_business_income)) : null;
+  // Bar lengths are drawing ratios, not money: |year| / largest |year|.
+  const largest = closedYears.reduce<Dec | null>((max, y) => {
+    const v = parseDecimal(y.realised_pnl)?.abs() ?? null;
+    return v && (!max || v.greaterThan(max)) ? v : max;
+  }, null);
+
   return (
     <Card title="Futures & options" subtitle="Kept apart from your stock returns, so they are not mixed in">
+      <div style={{ display: "flex", gap: 40, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div>
+          <span style={label}>Closed trades · profit / loss</span>
+          <div
+            className={totalPnl ? signClass(totalPnl.toString()) : undefined}
+            style={{ font: "var(--type-metric)", fontFamily: "var(--font-figure)", marginTop: 4 }}
+          >
+            {tax.loading && !tax.data ? "…" : totalPnl ? formatMoney(totalPnl.toString()) : "—"}
+          </div>
+          {totalCharges && totalNet && (
+            <div style={{ ...note, marginTop: 2 }}>
+              Charges {formatMoney(totalCharges.toString())} · after charges{" "}
+              <span className={signClass(totalNet.toString())}>{formatMoney(totalNet.toString())}</span>
+            </div>
+          )}
+        </div>
+        <div>
+          <span style={label}>Open now</span>
+          <div
+            className={p.positions.length ? signClass(p.unrealised_total) : undefined}
+            style={{ font: "var(--type-metric)", fontFamily: "var(--font-figure)", marginTop: 4 }}
+          >
+            {p.positions.length ? formatMoney(p.unrealised_total) : "None"}
+          </div>
+          <div style={{ ...note, marginTop: 2 }}>
+            {p.positions.length
+              ? `${p.positions.length} open position${p.positions.length === 1 ? "" : "s"}`
+              : "No open futures or options"}
+          </div>
+        </div>
+      </div>
+
+      {unresolved.length > 0 && (
+        <ul style={{ margin: "16px 0 0", padding: 0, listStyle: "none", display: "grid", gap: 6 }}>
+          {unresolved.map((u) => (
+            <li
+              key={`${u.account_id}-${u.contract_id}`}
+              style={{
+                font: "var(--type-body-sm)",
+                color: "var(--text-secondary)",
+                borderLeft: "3px solid var(--warning)",
+                background: "var(--surface-sunken)",
+                padding: "6px 10px",
+              }}
+            >
+              <strong style={{ fontWeight: 600, color: "var(--text-primary)" }}>
+                Not counted: {contractName(u)}
+              </strong>{" "}
+              ({u.side === "SHORT" ? "sold" : "bought"} {formatQuantity(u.quantity)}): {REASON[u.reason]}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div style={{ marginTop: 20 }}>
+        <span style={label}>Closed trades, by financial year</span>
+      </div>
+      {tax.error ? (
+        <p style={{ ...note, color: "var(--negative)" }}>{tax.error}</p>
+      ) : years.length === 0 ? (
+        <p style={note}>{tax.loading ? "Loading…" : "No closed trades yet."}</p>
+      ) : (
+        <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+          {years.map((y) => {
+            const value = parseDecimal(y.realised_pnl);
+            const share =
+              y.matches > 0 && value && largest && largest.greaterThan(0)
+                ? value.abs().div(largest).toNumber() * 50
+                : 0;
+            const loss = value?.isNegative() ?? false;
+            return (
+              <div
+                key={y.financial_year}
+                style={{ display: "grid", gridTemplateColumns: "64px 1fr 120px", alignItems: "center", gap: 12 }}
+              >
+                <span style={{ font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>{y.financial_year}</span>
+                {y.matches === 0 ? (
+                  <span style={{ font: "var(--type-body-sm)", color: "var(--text-tertiary)", gridColumn: "2 / 4" }}>
+                    No closed trades
+                  </span>
+                ) : (
+                  <>
+                    <div
+                      aria-hidden
+                      style={{ position: "relative", height: 14, background: "var(--surface-sunken)" }}
+                    >
+                      <div style={{ position: "absolute", left: "50%", top: -2, bottom: -2, width: 1, background: "var(--ledger-rule)" }} />
+                      <div
+                        style={{
+                          position: "absolute",
+                          top: 0,
+                          bottom: 0,
+                          [loss ? "right" : "left"]: "50%",
+                          width: `${Math.max(share, 0.5)}%`,
+                          background: loss ? "var(--negative)" : "var(--positive)",
+                        }}
+                      />
+                    </div>
+                    <span
+                      className={`tabular-nums ${signClass(y.realised_pnl)}`}
+                      style={{ font: "var(--type-body-sm)", textAlign: "right" }}
+                      title={`${y.matches} closed trade${y.matches === 1 ? "" : "s"}`}
+                    >
+                      {formatMoney(y.realised_pnl)}
+                    </span>
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {p.positions.length > 0 && (
+        <div style={{ marginTop: 20 }}>
+          <span style={label}>Open positions</span>
+          <ul style={{ margin: "8px 0 0", padding: 0, listStyle: "none", display: "grid", gap: 4 }}>
+            {p.positions.map((row) => (
+              <li
+                key={`${row.account_id}-${row.contract_id}`}
+                style={{ display: "flex", justifyContent: "space-between", gap: 12, font: "var(--type-body-sm)" }}
+              >
+                <span>
+                  {contractName(row)}{" "}
+                  <span style={{ color: "var(--text-tertiary)" }}>
+                    · {row.side === "SHORT" ? "sold" : "bought"} {formatQuantity(row.quantity)}
+                  </span>
+                </span>
+                <span className={`tabular-nums ${signClass(row.unrealised)}`}>{formatMoney(row.unrealised)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={() => setShowDetails((v) => !v)}
+        style={{
+          marginTop: 16,
+          background: "none",
+          border: "none",
+          padding: 0,
+          cursor: "pointer",
+          font: "var(--type-body-sm)",
+          color: "var(--text-secondary)",
+          textDecoration: "underline",
+        }}
+        aria-expanded={showDetails}
+      >
+        {showDetails ? "Hide details" : "View details (turnover, charges, STT)"}
+      </button>
+      {!showDetails && (
+        <p style={note}>Draft for your CA: F&amp;O profit is taxed as business income.</p>
+      )}
+      {showDetails && (
+        <FnoDetails
+          positions={p}
+          tax={tax}
+          realised={realised}
+          provisionalNote={provisionalNote}
+        />
+      )}
+    </Card>
+  );
+}
+
+/** The full figures behind the summary: open positions, and turnover, charges and STT
+ *  per financial year -- what a CA asks for. Unchanged from the earlier card. */
+function FnoDetails({
+  positions: p,
+  tax,
+  realised,
+  provisionalNote,
+}: {
+  positions: FnoPositionsResponse;
+  tax: ReturnType<typeof useFetch<FnoTaxResponse>>;
+  realised: ReturnType<typeof useFetch<FnoRealisedResponse>>;
+  provisionalNote: string | null;
+}) {
+  return (
+    <div style={{ marginTop: 12 }}>
       <span style={label}>Open positions</span>
       {p.positions.length === 0 ? (
         <p style={note}>You have no open futures or options right now.</p>
@@ -183,24 +387,11 @@ export function FnoCard({ positions }: { positions: FnoPositionsState }) {
       )}
       {provisionalNote && <p style={note}>Estimated expiry entries: {provisionalNote}</p>}
 
-      {unresolved.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <div style={label}>Left out of the figures above</div>
-          <ul style={{ margin: "6px 0 0", padding: 0, listStyle: "none", font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>
-            {unresolved.map((u) => (
-              <li key={`${u.account_id}-${u.contract_id}`}>
-                <strong style={{ fontWeight: 600 }}>{contractName(u)}</strong> ({u.side === "SHORT" ? "sold" : "bought"} {formatQuantity(u.quantity)}): {REASON[u.reason]}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
       <p style={note}>
         Draft only, please check with your CA. F&amp;O profit is taxed as business income. These
         figures have not been checked by a chartered accountant, and Trackr+ does not file
         your tax return.
       </p>
-    </Card>
+    </div>
   );
 }

@@ -1012,7 +1012,7 @@ def refresh_fno_prices_cron(
     can be published after this cron fires (NSE's 2026-09-30 file is stamped 17:56 IST),
     and an exchange-day already stored is skipped, so a late or missed file is picked up
     on the next run at the cost of one request per missing day."""
-    from app.db.fno_reference import backfill_fno_prices
+    from app.db.fno_reference import backfill_expiry_settlements, backfill_fno_prices
 
     today = date.today()
     days = backfill_fno_prices(
@@ -1021,7 +1021,12 @@ def refresh_fno_prices_cron(
         today,
         notifier=get_notifier(settings),
     )
-    return {"days": days}
+    # Plus any older expiry day a traded contract still has no price for: the 7-day
+    # window above can never reach one, and its settlement price exists only there.
+    expiries = backfill_expiry_settlements(
+        connection, notifier=get_notifier(settings), time_budget_seconds=150.0
+    )
+    return {"days": days, "expiry_settlements": expiries}
 
 
 @router.post(

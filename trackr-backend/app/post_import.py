@@ -55,6 +55,7 @@ CYCLE_BUDGET_SECONDS = 210.0
 #: is left after the reference step goes to snapshots.
 PRICE_SHARE_SECONDS = 60.0
 FNO_SHARE_SECONDS = 25.0
+FNO_EXPIRY_SHARE_SECONDS = 15.0
 REFERENCE_SHARE_SECONDS = 60.0
 #: Below this, starting another step risks overrunning the cycle.
 MIN_STEP_SECONDS = 15.0
@@ -149,6 +150,21 @@ def _run_cycle_locked(
         logger.warning("post_import_fno_heal_failed", exc_info=True)
         out["fno"] = {"error": type(exc).__name__}
 
+    try:
+        from app.db.fno_reference import backfill_expiry_settlements
+
+        # Expired contracts still need their expiry-day settlement price, which neither
+        # the heal (trade days) nor the daily cron (7-day lookback) ever fetches.
+        out["fno_expiry"] = backfill_expiry_settlements(
+            conn,
+            notifier=get_notifier(settings),
+            time_budget_seconds=min(FNO_EXPIRY_SHARE_SECONDS, max(left() - MIN_STEP_SECONDS, 0)),
+        )
+    except Exception as exc:  # the expired position stays left out and named; retried
+        conn.rollback()
+        logger.warning("post_import_fno_expiry_failed", exc_info=True)
+        out["fno_expiry"] = {"error": type(exc).__name__}
+
     if left() < MIN_STEP_SECONDS:
         out["reference"] = {"deferred": True}
     else:
@@ -185,7 +201,9 @@ def _more_work(conn: Any, out: dict, settings: Settings | None = None) -> bool:
         prices.get("pending", 0)
         > prices.get("fetched_days", 0) + prices.get("closed_days", 0)
     )
-    fno_left = bool(out.get("fno", {}).get("deferred"))
+    fno_left = bool(out.get("fno", {}).get("deferred")) or bool(
+        out.get("fno_expiry", {}).get("deferred")
+    )
     snapshots_left = not out.get("snapshots", {}).get("complete", False)
     try:
         reference_left = _reference_work_left(conn, settings)
@@ -206,6 +224,7 @@ def _progress(out: dict) -> bool:
             prices.get("closed_days", 0),
             fno.get("healed", 0),
             fno.get("still_rejected", 0),
+            out.get("fno_expiry", {}).get("fetched_days", 0),
             out.get("reference", {}).get("processed", 0),
             snapshots.get("snapshots_written", 0),
             snapshots.get("price_dates_fetched", 0),
