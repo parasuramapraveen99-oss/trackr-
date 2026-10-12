@@ -121,6 +121,9 @@ def drain(
         left = deadline - time.monotonic()
         try:
             with connect() as conn:
+                # Every batch, not once per run: a deployment still calling NSE (its
+                # NSE_API_ENABLED not yet false) re-trips the breaker within minutes.
+                reopen(conn)
                 result = run_once(
                     conn, settings, limit=500, time_budget_seconds=min(240.0, left)
                 )
