@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.auth.dependencies import require_owned_investor
@@ -14,11 +14,6 @@ from app.db.reference_sync import status
 from app.reference_worker import run_once
 
 router = APIRouter(tags=["reference-sync"])
-
-#: Leaves headroom inside the 300-second Vercel function limit (Hobby and Pro alike) for
-#: the task already running when the budget runs out.
-REFERENCE_CRON_BUDGET_SECONDS = 240.0
-REFERENCE_CRON_MAX_TASKS = 500
 
 
 @router.get(
@@ -92,13 +87,35 @@ def run(conn: Any = Depends(get_conn), settings: Settings = Depends(get_settings
 
 @router.get("/ops/reference-sync/run-cron", dependencies=[Depends(require_cron_secret)])
 def cron(conn: Any = Depends(get_conn), settings: Settings = Depends(get_settings)) -> dict:
-    """Scheduled in vercel.json. A full batch per call, bounded by time rather than by a
-    task count of one -- at one task per call the queue (one NSDL task per held ISIN
-    plus one NSE task per month of history) never drained in production."""
-    return run_once(
-        conn, settings, limit=REFERENCE_CRON_MAX_TASKS,
-        time_budget_seconds=REFERENCE_CRON_BUDGET_SECONDS,
+    """Scheduled in vercel.json: the daily backstop for the whole catch-up pipeline.
+
+    One bounded ``app.post_import`` cycle -- prices, F&O contract days, this worker's
+    queue, snapshots -- and, when work is left, the self-continuing chain
+    (``app.continuation``). Running only this worker here, as it once did, left a stalled
+    snapshot or price backlog waiting for a page that might never be opened."""
+    from app.continuation import continue_if_needed
+    from app.post_import import run_cycle
+
+    cycle = run_cycle(conn, settings)
+    continued = not cycle.get("busy") and continue_if_needed(
+        settings, more_work=cycle["more_work"], progress=cycle["progress"], hop=0
     )
+    return {"cycle": cycle, "continued": continued}
+
+
+@router.get("/ops/cycle/continue", status_code=202, dependencies=[Depends(require_cron_secret)])
+def continue_cycle(
+    background_tasks: BackgroundTasks,
+    hop: int = Query(default=1, ge=1),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    """The next link of a catch-up chain (``app.continuation``). Answers 202 at once and
+    runs the cycle as a background task, so the caller never waits for it; the cycle then
+    decides for itself whether to start link ``hop + 1``."""
+    from app.post_import import run_cycle_in_own_connection
+
+    background_tasks.add_task(run_cycle_in_own_connection, settings, hop)
+    return {"accepted": True, "hop": hop}
 
 
 @router.get("/ops/reference-sync/status", dependencies=[Depends(require_ops_key)])

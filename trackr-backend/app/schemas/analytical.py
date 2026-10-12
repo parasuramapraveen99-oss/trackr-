@@ -182,3 +182,5 @@ class SnapshotRunResponse(BaseModel):
     snapshots_written: int
     price_dates_fetched: int
     skipped_missing_price: list[SkippedSnapshotOut]
+    # False when a time-boxed run stopped before the target day; the rest resumes next run.
+    complete: bool = True

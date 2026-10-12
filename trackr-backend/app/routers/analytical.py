@@ -22,8 +22,10 @@ see ``_benchmark``.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from time import monotonic
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -1193,8 +1195,27 @@ def run_snapshots_cron(
     calls a fixed path with no query params), gated by ``CRON_SECRET`` instead of
     ``X-Ops-Key``. A wider historical backfill still goes through the POST route
     directly. See docs/DEPLOYMENT.md. ``_run_snapshots`` skips any (investor, date)
-    already snapshotted, so a duplicate cron invocation is a no-op, not a re-write."""
-    return catch_up_snapshots(connection, get_notifier(settings))
+    already snapshotted, so a duplicate cron invocation is a no-op, not a re-write.
+
+    Time-boxed under Vercel's 300 s limit: unbounded, a fresh investor's catch-up was
+    killed every day before saving anything. Left incomplete after progress, it hands
+    the rest to the self-continuing catch-up chain (``app.continuation``)."""
+    from app.continuation import continue_if_needed
+
+    result = catch_up_snapshots(
+        connection, get_notifier(settings), time_budget_seconds=SNAPSHOT_CRON_BUDGET_SECONDS
+    )
+    continue_if_needed(
+        settings,
+        more_work=not result["complete"],
+        progress=bool(result["snapshots_written"] or result["price_dates_fetched"]),
+        hop=0,
+    )
+    return result
+
+
+#: Leaves headroom inside Vercel's 300 s function limit for the day already in progress.
+SNAPSHOT_CRON_BUDGET_SECONDS = 200.0
 
 
 #: Indian market time. The day's bhavcopy is not reliably published before this, so a
@@ -1212,7 +1233,11 @@ def last_closed_trading_day(now: datetime | None = None) -> date:
 
 
 def catch_up_snapshots(
-    connection: Any, notifier: Notifier, now: datetime | None = None
+    connection: Any,
+    notifier: Notifier,
+    now: datetime | None = None,
+    time_budget_seconds: float | None = None,
+    clock: Callable[[], float] = monotonic,
 ) -> dict[str, Any]:
     """Bring ``portfolio_snapshot`` up to the last closed trading day, from the day after
     the newest stored row.
@@ -1222,15 +1247,44 @@ def catch_up_snapshots(
     history, and the chart then never drew a line. Catching up from the newest row closes
     any hole on the next run. A day whose bhavcopy is not yet published is retried on the
     next run automatically: it stays after the newest row until it can be priced.
+
+    ``time_budget_seconds`` is for serverless callers, which are killed at a hard limit.
+    One unbounded call for a fresh investor downloads every missing bhavcopy back to
+    SNAPSHOT_HISTORY_FLOOR before saving anything, so on Vercel it was killed at 300 s,
+    saved nothing, and the next run started over. With a budget the range is worked one
+    day at a time, oldest first, each day committed before the next begins; the run stops
+    claiming days once the budget is spent and ``complete`` says whether it reached the
+    target. The next run resumes after the newest stored row. Each day is computed by the
+    same ``_run_snapshots`` either way, so the stored values do not depend on the budget.
     """
     target = last_closed_trading_day(now)
     _catch_up_index_levels(connection, target)
     start = _catch_up_start(connection, target)
     if start is None:
-        return {"snapshots_written": 0, "price_dates_fetched": 0, "skipped_missing_price": []}
-    result = _run_snapshots(connection, start, target, notifier)
-    connection.commit()
-    return result
+        return {
+            "snapshots_written": 0, "price_dates_fetched": 0, "skipped_missing_price": [],
+            "complete": True,
+        }
+    if time_budget_seconds is None:
+        result = _run_snapshots(connection, start, target, notifier)
+        connection.commit()
+        return {**result, "complete": True}
+
+    began = clock()
+    totals: dict[str, Any] = {
+        "snapshots_written": 0, "price_dates_fetched": 0, "skipped_missing_price": [],
+        "complete": True,
+    }
+    for day in trading_days(start, target):
+        if clock() - began > time_budget_seconds:
+            totals["complete"] = False
+            break
+        result = _run_snapshots(connection, day, day, notifier)
+        connection.commit()
+        totals["snapshots_written"] += result["snapshots_written"]
+        totals["price_dates_fetched"] += result["price_dates_fetched"]
+        totals["skipped_missing_price"].extend(result["skipped_missing_price"])
+    return totals
 
 
 def _catch_up_index_levels(connection: Any, target: date) -> None:

@@ -166,6 +166,12 @@ class Settings(BaseSettings):
     # (app.routers.analytical), while ops_api_key keeps gating the POST routes a human
     # or a non-Vercel scheduler would call directly.
     cron_secret: str | None = None
+    # Where a catch-up cycle calls to start the next one (app.continuation). Vercel sets
+    # VERCEL_PROJECT_PRODUCTION_URL (host only, no scheme) on every deployment; SELF_BASE_URL
+    # (a full https URL) overrides it, e.g. behind a custom domain. Neither set -> no chain;
+    # the daily crons and the import screen's /sync still advance the work.
+    self_base_url: str | None = None
+    vercel_project_production_url: str | None = None
 
     # --- web --------------------------------------------------------------------
     # Comma-separated in the environment; split into a list for CORSMiddleware.

@@ -15,96 +15,211 @@ implementation of either:
      F&O contract master lacked their day: backfill exactly those days from the exchange
      F&O bhavcopy and re-resolve the rows (owner amendment, 8 Oct 2026). A no-op when
      nothing is waiting.
-  3. ``app.reference_worker.run_once`` with the remaining time budget -- NSDL identity,
-     NSE notices month by month, price-verified BONUS/SPLIT, alias promotion, replay.
+  3. ``app.reference_worker.run_once`` -- NSDL identity, NSE notices month by month
+     (corporate actions AND dividends), price-verified BONUS/SPLIT, alias promotion,
+     replay, gap resolution.
+  4. ``app.routers.analytical.catch_up_snapshots`` -- daily value history, one day at a
+     time, oldest first, each day committed.
 
-Run from two places: a background task straight after a batch is promoted, and
-``POST /investors/{id}/sync``, which the import screen repeats while reference status
-reads ``processing``. Both are bounded under Vercel's 300 s function limit, so a deep
-history simply takes a few cycles; every cycle is idempotent and the worker's advisory
-lock makes a concurrent cycle return ``busy`` rather than double-process.
+EVERY STEP GETS A SLICE OF ONE BUDGET, in that order. Before 12 Oct 2026 the snapshot
+catch-up ran unbounded between steps 2 and 3: on a fresh account it downloaded ~450 days
+of bhavcopies before saving anything, Vercel killed every cycle at 300 s, and step 3 --
+the only path to corporate actions, dividend history and gap closing -- never ran once.
+Corporate actions now run before snapshots, so snapshots value the corrected holdings.
+
+Run from: a background task straight after a batch is promoted; ``POST
+/investors/{id}/sync``, which the import screen repeats while reference status reads
+``processing``; and ``GET /ops/cycle/continue``, which a cycle that leaves work behind
+calls on itself (``app.continuation``) so catch-up finishes with no page open. One cycle
+at a time (``CYCLE_LOCK_KEY``): a concurrent call returns ``busy``. Every step is
+idempotent and resumable, so a deep history simply takes more cycles.
 """
 
 from __future__ import annotations
 
 import logging
-import time
+from collections.abc import Callable
+from time import monotonic
 from typing import Any
 
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
-#: Whole-cycle budget, under Vercel's 300 s function limit with room for the response.
-CYCLE_BUDGET_SECONDS = 240.0
-#: Prices go first but may not starve the corporate-action sweep of the whole cycle.
-PRICE_SHARE_SECONDS = 120.0
-#: Below this, starting a reference task risks overrunning the cycle.
-MIN_REFERENCE_SECONDS = 15.0
+#: Whole-cycle budget under Vercel's 300 s function limit. Budgets are checked between
+#: items, so one slow item (a bhavcopy day, an NSE month, the worker's scheduling pass)
+#: can overrun a slice: measured 12 Oct 2026, a cycle with a 240 s budget ran 286 s. The
+#: ~90 s left over is that margin.
+CYCLE_BUDGET_SECONDS = 210.0
+#: Per-step ceilings. Prices go first but may not starve the steps after them; whatever
+#: is left after the reference step goes to snapshots.
+PRICE_SHARE_SECONDS = 60.0
+FNO_SHARE_SECONDS = 25.0
+REFERENCE_SHARE_SECONDS = 60.0
+#: Below this, starting another step risks overrunning the cycle.
+MIN_STEP_SECONDS = 15.0
+#: Session advisory lock: one cycle at a time across every caller.
+CYCLE_LOCK_KEY = 7_401_064_002
 
 
-def run_cycle(conn: Any, settings: Settings, budget_seconds: float = CYCLE_BUDGET_SECONDS) -> dict:
+def run_cycle(
+    conn: Any,
+    settings: Settings | None,
+    budget_seconds: float = CYCLE_BUDGET_SECONDS,
+    clock: Callable[[], float] = monotonic,
+) -> dict:
+    """One bounded catch-up cycle. ``more_work`` says whether anything is still pending
+    after it; ``progress`` whether it moved anything forward -- together they decide
+    whether ``app.continuation`` starts the next cycle."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (CYCLE_LOCK_KEY,))
+        acquired = cur.fetchone()[0]
+    conn.commit()
+    if not acquired:
+        return {"busy": True, "more_work": False, "progress": False}
+    try:
+        return _run_cycle_locked(conn, settings, budget_seconds, clock)
+    finally:
+        try:
+            conn.rollback()
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (CYCLE_LOCK_KEY,))
+            conn.commit()
+        except Exception:  # a dead connection releases a session lock by itself
+            logger.warning("post_import_cycle_unlock_failed", exc_info=True)
+
+
+def _run_cycle_locked(
+    conn: Any, settings: Settings | None, budget_seconds: float, clock: Callable[[], float]
+) -> dict:
+    from app.db.imports import heal_fno_awaiting_master
     from app.prices.alerts import get_notifier
     from app.prices.history import backfill_price_history
     from app.reference_worker import run_once
+    from app.routers.analytical import catch_up_snapshots
 
-    began = time.monotonic()
+    began = clock()
+
+    def left() -> float:
+        return budget_seconds - (clock() - began)
+
     out: dict[str, Any] = {}
     try:
         out["prices"] = backfill_price_history(
             conn,
             notifier=get_notifier(settings),
-            time_budget_seconds=min(PRICE_SHARE_SECONDS, budget_seconds),
+            time_budget_seconds=min(PRICE_SHARE_SECONDS, left()),
         )
         conn.commit()
-    except Exception as exc:  # a price-source outage must not stop the sweep below
+    except Exception as exc:  # a price-source outage must not stop the steps below
         conn.rollback()
         logger.warning("post_import_prices_failed", exc_info=True)
         out["prices"] = {"error": type(exc).__name__}
 
-    # Right after an import the investor's value history should not wait for the next
-    # scheduled run: build any missing days now from whatever is settled.
     try:
-        from app.routers.analytical import catch_up_snapshots
-
-        out["snapshots"] = catch_up_snapshots(conn, get_notifier(settings))
-        conn.commit()
-    except Exception as exc:  # a snapshot failure must not stop the sweep below
-        conn.rollback()
-        logger.warning("post_import_snapshots_failed", exc_info=True)
-        out["snapshots"] = {"error": type(exc).__name__}
-
-    try:
-        from app.db.imports import heal_fno_awaiting_master
-
-        out["fno"] = heal_fno_awaiting_master(conn, notifier=get_notifier(settings))
+        out["fno"] = heal_fno_awaiting_master(
+            conn,
+            notifier=get_notifier(settings),
+            time_budget_seconds=min(FNO_SHARE_SECONDS, max(left() - MIN_STEP_SECONDS, 0)),
+        )
     except Exception as exc:  # flagged rows stay flagged; the next cycle retries them
         conn.rollback()
         logger.warning("post_import_fno_heal_failed", exc_info=True)
         out["fno"] = {"error": type(exc).__name__}
 
-    remaining = budget_seconds - (time.monotonic() - began)
-    if remaining < MIN_REFERENCE_SECONDS:
+    if left() < MIN_STEP_SECONDS:
         out["reference"] = {"deferred": True}
-        return out
-    try:
-        out["reference"] = run_once(
-            conn, settings, limit=500, time_budget_seconds=remaining - MIN_REFERENCE_SECONDS
-        )
-    except Exception as exc:  # failed tasks stay queued with backoff; report, don't raise
-        logger.warning("post_import_reference_failed", exc_info=True)
-        out["reference"] = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    else:
+        try:
+            out["reference"] = run_once(
+                conn, settings, limit=500,
+                time_budget_seconds=min(REFERENCE_SHARE_SECONDS, left() - MIN_STEP_SECONDS),
+            )
+        except Exception as exc:  # failed tasks stay queued with backoff; report, don't raise
+            conn.rollback()
+            logger.warning("post_import_reference_failed", exc_info=True)
+            out["reference"] = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+    if left() < MIN_STEP_SECONDS:
+        out["snapshots"] = {"deferred": True, "complete": False}
+    else:
+        try:
+            out["snapshots"] = catch_up_snapshots(
+                conn, get_notifier(settings), time_budget_seconds=left() - MIN_STEP_SECONDS
+            )
+        except Exception as exc:  # a snapshot failure must not hide the steps above
+            conn.rollback()
+            logger.warning("post_import_snapshots_failed", exc_info=True)
+            out["snapshots"] = {"error": type(exc).__name__, "complete": False}
+
+    out["more_work"] = _more_work(conn, out)
+    out["progress"] = _progress(out)
     return out
 
 
-def run_cycle_in_own_connection(settings: Settings) -> None:
+def _more_work(conn: Any, out: dict) -> bool:
+    prices = out.get("prices", {})
+    prices_left = "error" in prices or (
+        prices.get("pending", 0)
+        > prices.get("fetched_days", 0) + prices.get("closed_days", 0)
+    )
+    fno_left = bool(out.get("fno", {}).get("deferred"))
+    snapshots_left = not out.get("snapshots", {}).get("complete", False)
+    try:
+        reference_left = _reference_work_left(conn)
+    except Exception:
+        conn.rollback()
+        logger.warning("post_import_reference_check_failed", exc_info=True)
+        reference_left = False
+    return prices_left or fno_left or snapshots_left or reference_left
+
+
+def _progress(out: dict) -> bool:
+    prices = out.get("prices", {})
+    fno = out.get("fno", {})
+    snapshots = out.get("snapshots", {})
+    return any(
+        (
+            prices.get("fetched_days", 0),
+            prices.get("closed_days", 0),
+            fno.get("healed", 0),
+            fno.get("still_rejected", 0),
+            out.get("reference", {}).get("processed", 0),
+            snapshots.get("snapshots_written", 0),
+            snapshots.get("price_dates_fetched", 0),
+        )
+    )
+
+
+def _reference_work_left(conn: Any) -> bool:
+    """Reference work runnable now, or an import not yet turned into tasks."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT EXISTS (SELECT 1 FROM reference_sync_task
+                   WHERE state IN ('pending','retry','running') AND available_at <= now())
+               OR EXISTS (SELECT 1 FROM reference_sync_import
+                   WHERE scheduled_at IS NULL OR requested_at > scheduled_at)"""
+        )
+        found = bool(cur.fetchone()[0])
+    conn.commit()
+    return found
+
+
+def run_cycle_in_own_connection(settings: Settings, hop: int = 0) -> None:
     """Background-task entry point: the request's connection is gone by the time this
-    runs, so it opens its own against the same configured database."""
+    runs, so it opens its own against the same configured database. When work is left
+    and this cycle moved something forward, it starts the next cycle itself."""
+    from app.continuation import continue_if_needed
     from app.db.connection import connect
 
     try:
         with connect(settings.database_url) as conn:
             result = run_cycle(conn, settings)
-        logger.info("post_import_cycle", extra={"result": str(result)[:500]})
+        logger.info("post_import_cycle hop=%s result=%s", hop, str(result)[:500])
     except Exception:
         logger.warning("post_import_cycle_failed", exc_info=True)
+        return
+    if not result.get("busy"):
+        continue_if_needed(
+            settings, more_work=result["more_work"], progress=result["progress"], hop=hop
+        )

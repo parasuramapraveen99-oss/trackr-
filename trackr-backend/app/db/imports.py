@@ -25,9 +25,11 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from time import monotonic
 from typing import Any
 
 from app import isin as isin_rules
@@ -1199,6 +1201,7 @@ def heal_fno_awaiting_master(
     sources_by_exchange: dict[str, Any] | None = None,
     notifier: Any = None,
     now: datetime | None = None,
+    time_budget_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Close the one F&O staging gap public data can close (owner amendment, 8 Oct 2026):
     an F&O row rejected because the contract master held no bhavcopy for its day.
@@ -1240,7 +1243,10 @@ def heal_fno_awaiting_master(
         logger.info("fno_heal_skipped_locked")
         return {"skipped_locked": True}
     try:
-        return _heal_locked(conn, sources_by_exchange, notifier, now or datetime.now(UTC))
+        return _heal_locked(
+            conn, sources_by_exchange, notifier, now or datetime.now(UTC),
+            time_budget_seconds=time_budget_seconds,
+        )
     finally:
         try:
             conn.rollback()
@@ -1252,7 +1258,12 @@ def heal_fno_awaiting_master(
 
 
 def _heal_locked(
-    conn: Any, sources_by_exchange: dict[str, Any] | None, notifier: Any, now: datetime
+    conn: Any,
+    sources_by_exchange: dict[str, Any] | None,
+    notifier: Any,
+    now: datetime,
+    time_budget_seconds: float | None = None,
+    clock: Callable[[], float] = monotonic,
 ) -> dict[str, Any]:
     from app.prices import fno_sources
 
@@ -1286,7 +1297,13 @@ def _heal_locked(
         {(p["fno"]["exchange"], date.fromisoformat(p["fno"]["trade_date"])) for *_, p in due}
     )
     outcomes: dict[tuple[str, date], str | None] = {}
+    began = clock()
     for exchange, day in needed:
+        # A serverless caller is killed at a hard limit. Stop fetching once the budget is
+        # spent; a row whose day was not fetched is left untouched below -- no failed
+        # attempt, no backoff -- and the next run picks it up.
+        if time_budget_seconds is not None and clock() - began > time_budget_seconds:
+            break
         source = sources_by_exchange.get(exchange)
         if source is None:
             outcomes[(exchange, day)] = OUTCOME_FETCH_FAILED
@@ -1302,8 +1319,13 @@ def _heal_locked(
             logger.warning("fno_master_backfill_failed %s %s", exchange, day, exc_info=True)
 
     totals = {"healed": 0, "still_rejected": 0, "retrying": 0, "unhealable": 0}
+    worked = [
+        r
+        for r in due
+        if (r[4]["fno"]["exchange"], date.fromisoformat(r[4]["fno"]["trade_date"])) in outcomes
+    ]
     by_batch: dict[str, list[tuple]] = {}
-    for row in due:
+    for row in worked:
         by_batch.setdefault(str(row[1]), []).append(row)
     for batch_id, batch_rows in by_batch.items():
         try:
@@ -1322,6 +1344,7 @@ def _heal_locked(
         "not_due": len(rows) - len(due),
         "days": len(needed),
         "fetch_failures": sum(1 for o in outcomes.values() if o == OUTCOME_FETCH_FAILED),
+        "deferred": len(due) - len(worked),
         **totals,
         **({"stranded_promoted": stranded} if stranded else {}),
     }
