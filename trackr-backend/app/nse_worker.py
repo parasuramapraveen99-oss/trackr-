@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from collections.abc import Callable
 from datetime import date, timedelta
 from typing import Any
 
@@ -38,6 +39,8 @@ logger = logging.getLogger("nse_worker")
 _BREAKER_FEED = "nse_isin_change_circulars"
 #: Pause before retrying while the deployment's own cycle holds the worker lock.
 _BUSY_WAIT_SECONDS = 20
+#: Consecutive lost connections tolerated before giving up (the run can be repeated).
+_MAX_RECONNECTS = 5
 
 
 def load_settings(env_file: str) -> Settings:
@@ -93,14 +96,36 @@ def daily_feeds(conn: Any, settings: Settings, days: int) -> dict[str, Any]:
     return out
 
 
-def drain(conn: Any, settings: Settings, max_minutes: float) -> dict[str, int]:
+def drain(
+    connect: Callable[[], Any], settings: Settings, max_minutes: float
+) -> dict[str, int]:
+    """Run the reference queue, one fresh connection per batch. A long NSE task (one
+    month: up to 10 circular PDFs plus two notice feeds) can outlive a hosted database's
+    connection -- measured 12 Oct 2026, Neon closed one mid-run -- so a lost connection
+    is reconnected and the batch retried, up to ``_MAX_RECONNECTS`` in a row. A task
+    caught mid-run stays 'running' and is reset to pending by the next batch."""
+    import psycopg
+
     from app.reference_worker import run_once
 
     deadline = time.monotonic() + max_minutes * 60
     totals = {"processed": 0, "failed": 0, "waiting": 0}
+    reconnects = 0
     while time.monotonic() < deadline:
         left = deadline - time.monotonic()
-        result = run_once(conn, settings, limit=500, time_budget_seconds=min(240.0, left))
+        try:
+            with connect() as conn:
+                result = run_once(
+                    conn, settings, limit=500, time_budget_seconds=min(240.0, left)
+                )
+        except psycopg.OperationalError as exc:
+            reconnects += 1
+            print(f"  connection lost ({str(exc).splitlines()[0]}); reconnecting", flush=True)
+            if reconnects > _MAX_RECONNECTS:
+                raise
+            time.sleep(_BUSY_WAIT_SECONDS)
+            continue
+        reconnects = 0
         if result.get("busy"):
             print("  worker busy (the deployment's cycle holds it); waiting", flush=True)
             time.sleep(_BUSY_WAIT_SECONDS)
@@ -145,9 +170,10 @@ def main(argv: list[str] | None = None) -> int:
         reopen(conn)
         print(f"2/3 daily NSE feeds, last {args.days} days", flush=True)
         daily_feeds(conn, settings, args.days)
-        print(f"3/3 reference queue (up to {args.max_minutes:g} min)", flush=True)
-        totals = drain(conn, settings, args.max_minutes)
-        print(f"done: {totals}")
+    print(f"3/3 reference queue (up to {args.max_minutes:g} min)", flush=True)
+    totals = drain(lambda: connect(settings.database_url), settings, args.max_minutes)
+    print(f"done: {totals}")
+    with connect(settings.database_url) as conn:
         summary(conn)
     return 0
 
