@@ -1,0 +1,11 @@
+-- 018_cas_source.sql -- adds the CAS PDF adapter's source value.
+--
+-- app.ingest.cas_pdf.CasPdfAdapter (docs/INGESTION.md's Phase-2-deferred "CAS PDF"
+-- adapter, built now on an explicit scope override) emits Transaction rows tagged
+-- Source.CAS. txn_source is a native Postgres enum (001_core.sql), so the app-level
+-- enum change in app/engine/types.py needs a matching migration -- an app that
+-- inserts 'CAS' without this fails with "invalid input value for enum txn_source".
+--
+-- ADD VALUE cannot run in the same transaction that USES the new value (PostgreSQL
+-- restriction, harmless here -- this migration only adds the value).
+ALTER TYPE txn_source ADD VALUE IF NOT EXISTS 'CAS';

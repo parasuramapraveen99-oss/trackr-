@@ -1,0 +1,75 @@
+{
+  "_about": "PROPOSED research policy for BE-Q04 (per-source, per-use rights) and BE-Q05 (retention mapping). Drafted 2026-09-29 by the implementer under the owner's delegation. It has NO effect until the owner records one approval over this file's exact SHA-256 with `make approve-research-policy BY=\"<name>\"` (app/research/policy_approval.py). Editing any byte invalidates an existing approval. Legal terms for exchange-hosted material were NOT retrievable (NSE timed out, BSE 403/Akamai on 2026-09-29); every verdict below therefore rests on the issuer's own statutory publication duty and the investor's private use, and no exchange-hosted fetch adapter is proposed.",
+  "version": "research-policy-proposal-1",
+  "drafted_on": "2026-09-29",
+  "drafted_by": "Implementer (Claude) under owner delegation of 2026-09-29",
+  "source_rights": {
+    "_uses": "METADATA, STORE, EXTRACT, READ, MODEL_DISCLOSE are app/research/source_policy.py uses; export is app/db/workspace_privacy.py EXPORT_VERDICTS (EXPORT_ALLOWED | METADATA_ONLY | UNDECIDED).",
+    "USER_DOCUMENT": {
+      "uses": {"METADATA": "ALLOWED", "STORE": "ALLOWED", "EXTRACT": "ALLOWED", "READ": "ALLOWED", "MODEL_DISCLOSE": "ALLOWED"},
+      "export": "EXPORT_ALLOWED",
+      "conditions": ["Private to the uploading investor; never shared across tenants.", "Model disclosure only on the investor's own explicit task or report request, to the endpoint they chose or the BT-P02 report worker.", "Export returns the investor's own upload to the same investor only."],
+      "basis": "The investor supplied the bytes for their own private analysis (DPDP: the data principal's own material). Upload alone does not grant redistribution, so nothing beyond the uploading investor is permitted."
+    },
+    "ANNUAL_REPORT": {
+      "uses": {"METADATA": "ALLOWED", "STORE": "ALLOWED", "EXTRACT": "ALLOWED", "READ": "ALLOWED", "MODEL_DISCLOSE": "ALLOWED"},
+      "export": "METADATA_ONLY",
+      "conditions": ["Per-investor private copy only; no public redistribution.", "Attribute to the issuer with the origin URL and publication date.", "Retrieve from the issuer's own website (LODR Reg 46) or an investor upload; exchange-hosted retrieval is not covered (terms not retrieved)."],
+      "basis": "Annual reports are published by the issuer to all shareholders and on its website under Companies Act 2013 s.136 and SEBI LODR Reg 34/46. Private analysis and quotation with attribution is the normal investor use; export of the bytes is withheld because republication is not the investor's right."
+    },
+    "RESULTS": {
+      "uses": {"METADATA": "ALLOWED", "STORE": "ALLOWED", "EXTRACT": "ALLOWED", "READ": "ALLOWED", "MODEL_DISCLOSE": "ALLOWED"},
+      "export": "METADATA_ONLY",
+      "conditions": ["Same as ANNUAL_REPORT."],
+      "basis": "Financial results are published under SEBI LODR Reg 33 and Reg 46 (issuer website). Same private-use reasoning as ANNUAL_REPORT."
+    },
+    "EXCHANGE_FILING": {
+      "uses": {"METADATA": "ALLOWED", "STORE": "ALLOWED", "EXTRACT": "ALLOWED", "READ": "ALLOWED", "MODEL_DISCLOSE": "ALLOWED"},
+      "export": "METADATA_ONLY",
+      "conditions": ["Same as ANNUAL_REPORT.", "Only via investor upload or the issuer's own website until exchange terms are reviewed; NSE/BSE-hosted copies are not fetched."],
+      "basis": "Material disclosures under SEBI LODR Reg 30 are also required on the issuer website (Reg 46). Exchange terms were not retrievable, so the right claimed is the issuer-publication right only."
+    },
+    "PRESENTATION": {
+      "uses": {"METADATA": "ALLOWED", "STORE": "ALLOWED", "EXTRACT": "ALLOWED", "READ": "ALLOWED", "MODEL_DISCLOSE": "ALLOWED"},
+      "export": "METADATA_ONLY",
+      "conditions": ["Same as ANNUAL_REPORT."],
+      "basis": "Investor presentations are disclosed under LODR Reg 30 / Schedule III Part A para 15 and Reg 46."
+    },
+    "TRANSCRIPT": {
+      "uses": {"METADATA": "ALLOWED", "STORE": "ALLOWED", "EXTRACT": "ALLOWED", "READ": "ALLOWED", "MODEL_DISCLOSE": "ALLOWED"},
+      "export": "METADATA_ONLY",
+      "conditions": ["Issuer-published transcripts only; a third-party (vendor) transcript is NEWS-class and denied.", "Same private-use conditions as ANNUAL_REPORT."],
+      "basis": "Earnings-call audio/transcripts must be published by the issuer under LODR Schedule III Part A para 15 and Reg 46(2)(oa)."
+    },
+    "SHAREHOLDING": {
+      "uses": {"METADATA": "ALLOWED", "STORE": "ALLOWED", "EXTRACT": "ALLOWED", "READ": "ALLOWED", "MODEL_DISCLOSE": "ALLOWED"},
+      "export": "METADATA_ONLY",
+      "conditions": ["Same as ANNUAL_REPORT."],
+      "basis": "Quarterly shareholding pattern is filed under LODR Reg 31 and published on the issuer website."
+    },
+    "MANAGEMENT_COMMENTARY": {
+      "uses": {"METADATA": "ALLOWED", "STORE": "ALLOWED", "EXTRACT": "ALLOWED", "READ": "ALLOWED", "MODEL_DISCLOSE": "ALLOWED"},
+      "export": "METADATA_ONLY",
+      "conditions": ["Issuer-published commentary only (press releases, letters to shareholders).", "Same private-use conditions as ANNUAL_REPORT."],
+      "basis": "Issuer press releases are Reg 30 disclosures. Interviews in media are NEWS and denied."
+    },
+    "NEWS": {
+      "uses": {"METADATA": "ALLOWED", "STORE": "DENIED", "EXTRACT": "DENIED", "READ": "DENIED", "MODEL_DISCLOSE": "DENIED"},
+      "export": "METADATA_ONLY",
+      "conditions": ["Citation (headline, publisher, URL, date) only. No licensed news feed exists; coverage is stated as unavailable, never as complete."],
+      "basis": "Publisher content is copyrighted and usually licensed; no licence is held (NEEDS-LICENCE)."
+    },
+    "BOOK": {
+      "uses": {"METADATA": "ALLOWED", "STORE": "DENIED", "EXTRACT": "DENIED", "READ": "DENIED", "MODEL_DISCLOSE": "DENIED"},
+      "export": "METADATA_ONLY",
+      "conditions": ["Citation only."],
+      "basis": "Copyrighted works; no licence (NEEDS-LICENCE)."
+    }
+  },
+  "retention": {
+    "_about": "Maps each workspace privacy category to a retention_policy entity_type. app/db/retention.py only REPORTS what is due; nothing deletes on a timer. Start event = the investor's last activity (transactions OR research), as due_for_deletion already measures. Every category is erased with the investor (ON DELETE CASCADE) on a verified erasure request, and an open legal_hold suspends deletion for all of them. Minimum audit survives erasure as today (audit_log, 5 years).",
+    "RESEARCH_RECORD": {"entity_type": "workspace_research", "retain_years": "5", "start_event": "LAST_ACTIVITY", "erasure": "INVESTOR_ERASURE_CASCADE", "legal_hold": "SUSPENDS", "basis": "The investor's own research is kept for the same horizon as the account it belongs to (investor: 5 years) so an active or recently active researcher never loses it; erasure on request is immediate."},
+    "INVESTOR_NOTEBOOK": {"entity_type": "workspace_investor_notebook", "retain_years": "1", "start_event": "LAST_ACTIVITY", "erasure": "INVESTOR_ERASURE_CASCADE_OR_NOTEBOOK_PURGE", "legal_hold": "SUSPENDS", "basis": "Sensitive process observations (BUTLER_INVESTOR_MEMORY): the shortest horizon the retention_policy table allows (1 year), and the investor can purge it at any time via opt-out."},
+    "HOSTED_JOB": {"entity_type": "workspace_hosted_job", "retain_years": "1", "start_event": "LAST_ACTIVITY", "erasure": "INVESTOR_ERASURE_CASCADE", "legal_hold": "SUSPENDS", "basis": "Operational job/budget/checkpoint records have no value to the investor after a year; 1 year also covers DPDP's access-log minimum."}
+  }
+}

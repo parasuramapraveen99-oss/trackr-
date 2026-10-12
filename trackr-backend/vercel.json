@@ -1,0 +1,61 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/ops/cron/prices-refresh",
+      "schedule": "30 10 * * *"
+    },
+    {
+      "path": "/ops/cron/fno-prices-refresh",
+      "schedule": "30 13 * * *"
+    },
+    {
+      "path": "/ops/cron/prices-backfill",
+      "schedule": "40 10 * * *"
+    },
+    {
+      "path": "/ops/corporate-actions/refresh-cron",
+      "schedule": "45 10 * * *"
+    },
+    {
+      "path": "/ops/dividends/refresh-cron",
+      "schedule": "47 10 * * *"
+    },
+    {
+      "path": "/ops/demerger-watch/check-cron",
+      "schedule": "50 10 * * *"
+    },
+    {
+      "path": "/ops/cron/fundamentals-refresh",
+      "schedule": "50 10 * * *"
+    },
+    {
+      "path": "/ops/cron/snapshots-run",
+      "schedule": "30 13 * * *"
+    },
+    {
+      "path": "/ops/narrative/run-cron",
+      "schedule": "15 11 * * *"
+    },
+    {
+      "path": "/ops/security-alias/refresh-cron",
+      "schedule": "30 11 * * 0"
+    },
+    {
+      "path": "/ops/dividends/discover-yfinance-cron",
+      "schedule": "45 11 * * 0"
+    },
+    {
+      "path": "/ops/dividends/reconcile-cron",
+      "schedule": "55 11 * * *"
+    },
+    {
+      "path": "/ops/cron/jobs-drain",
+      "schedule": "20 11 * * *"
+    },
+    {
+      "path": "/ops/reference-sync/run-cron",
+      "schedule": "35 11 * * *"
+    }
+  ]
+}

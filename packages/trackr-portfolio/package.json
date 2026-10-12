@@ -1,0 +1,26 @@
+{
+  "name": "@trackr/portfolio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Portfolio destinations, route resolution and the shared portfolio screens/widgets both Trackr applications render.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "peerDependencies": {
+    "next": "^14.2.5",
+    "react": "^18.3.1",
+    "recharts": "^3.10.1"
+  },
+  "dependencies": {
+    "@trackr/core": "*",
+    "@trackr/ui": "*"
+  },
+  "devDependencies": {
+    "next": "^14.2.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^3.10.1"
+  }
+}

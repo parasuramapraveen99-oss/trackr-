@@ -1,0 +1,17 @@
+{
+  "name": "@trackr/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "API contracts, HTTP client, auth primitives and display formatters shared by Trackr+ and Trackr Workspace.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1"
+  },
+  "dependencies": {
+    "decimal.js": "10.6.0"
+  }
+}

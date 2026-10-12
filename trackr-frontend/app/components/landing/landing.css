@@ -1,0 +1,458 @@
+/* ---------------------------------------------------------------------------------
+ * The signed-out marketing page.
+ *
+ * Scoped entirely to `.l-root`, with its own `--l-*` tokens rather than the app's
+ * `--page` / `--surface` set. The landing is dark in BOTH app themes — someone who has
+ * never signed in has no stored theme, and the page is art-directed for dark — so it
+ * must not inherit whatever `:root` / `:root.dark` currently resolves to. The values
+ * below are copied from the dark ramp in globals.css so the two stay visually related.
+ *
+ * Fonts are the app's five faces, already loaded by globals.css.
+ * ------------------------------------------------------------------------------- */
+
+.l-root {
+  --l-page: #191918;
+  --l-surface: #232322;
+  --l-raised: #2a2a28;
+  --l-sunken: #1f1f1e;
+
+  --l-text: #f0efed;
+  --l-text-2: #d4d3cf;
+  --l-text-3: #8e8b86;
+  --l-text-4: #6f6e69;
+
+  --l-border: #373735;
+  --l-border-2: #4a4a47;
+
+  --l-accent: #dcb069;
+  --l-accent-dim: #d9b168;
+  --l-accent-tint: #2b2519;
+
+  /* Mirrors the app's own `--page` from `:root.dark` in globals.css. Repeated as a
+   * literal only because the screenshot's bottom fade has to name that colour with an
+   * alpha of 0 at one end, and `transparent` ramps through transparent BLACK in Safari,
+   * which puts a dark band across the middle of the fade. */
+  --l-shot-page: #0a0a09;
+  --l-pos: #34b076;
+  --l-pos-tint: #1c2b23;
+
+  --l-ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+  background: var(--l-page);
+  color: var(--l-text);
+  font-family: Inter, system-ui, sans-serif;
+  min-height: 100vh;
+  /* The second window overhangs the frame's right edge by a few pixels at the narrow end
+     of the widest breakpoint. `clip` refuses the scrollbar without making this a scroll
+     container, which `hidden` would. */
+  overflow-x: clip;
+}
+
+.l-root *,
+.l-root *::before,
+.l-root *::after { box-sizing: border-box; }
+
+/* A signed-in visitor lands on "/" too, and the landing is in the HTML before auth has
+ * resolved (see Shell.tsx). The session script in app/layout.tsx sets data-session
+ * ahead of hydration, so these two rules swap the landing for the ribbon's reserved
+ * height at the first paint — the same 52px the signed-in skeleton holds — instead of
+ * letting the marketing page flash. Uses the app's global tokens, not --l-*: this
+ * element sits outside .l-root and belongs to the app chrome. */
+.l-session-hold { display: none; }
+html[data-session="1"] .l-root { display: none; }
+html[data-session="1"] .l-session-hold {
+  display: block;
+  height: 52px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.l-container {
+  width: 100%;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ── Motion ─────────────────────────────────────────────────────────────────────
+ * `l-rise` is above-the-fold and plays on load. `l-reveal` is driven by the
+ * IntersectionObserver in Reveal.tsx. Both collapse to "just visible" under
+ * prefers-reduced-motion, and `l-reveal`'s hidden state only exists inside that
+ * media query so a viewer who has asked for no motion never sees a blank section. */
+
+@keyframes l-rise-up {
+  from { opacity: 0; transform: translateY(26px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes l-breathe {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.07); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .l-rise { animation: l-rise-up 0.9s var(--l-ease) both; }
+
+  .l-reveal {
+    opacity: 0;
+    transform: translateY(26px);
+    transition: opacity 0.9s var(--l-ease), transform 0.9s var(--l-ease);
+  }
+  .l-reveal.l-in { opacity: 1; transform: none; }
+
+  .l-breathe { animation: l-breathe 8s ease-in-out infinite; }
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────────── */
+
+.l-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  border-bottom: 1px solid var(--l-border);
+  background: rgb(25 25 24 / 0.82);
+  backdrop-filter: blur(14px);
+}
+.l-header-inner {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.l-brand { display: flex; align-items: center; gap: 10px; color: var(--l-text); text-decoration: none; }
+.l-mark {
+  width: 28px; height: 28px; border-radius: 7px;
+  background: var(--l-accent); color: var(--l-page);
+  display: flex; align-items: center; justify-content: center;
+  font-family: Newsreader, Georgia, serif; font-size: 18px; font-weight: 600; line-height: 1;
+}
+.l-wordmark { font-family: Newsreader, Georgia, serif; font-size: 20px; font-weight: 500; letter-spacing: -0.01em; }
+
+.l-nav { display: flex; align-items: center; gap: 34px; }
+.l-navlink {
+  position: relative;
+  font-size: 14px;
+  color: var(--l-text-2);
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+.l-navlink::after {
+  content: "";
+  position: absolute; left: 0; bottom: -7px;
+  width: 100%; height: 1px;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: right center;
+  transition: transform 0.34s var(--l-ease);
+}
+.l-navlink:hover { color: var(--l-text); }
+.l-navlink:hover::after { transform: scaleX(1); transform-origin: left center; }
+
+.l-header-cta { display: flex; align-items: center; gap: 20px; }
+
+@media (max-width: 860px) {
+  .l-nav { display: none; }
+}
+
+/* ── Buttons ────────────────────────────────────────────────────────────────── */
+
+.l-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 52px;
+  padding: 0 26px;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: transform 0.26s var(--l-ease), box-shadow 0.26s ease, border-color 0.2s ease;
+}
+.l-btn:hover { transform: translateY(-2px); }
+.l-btn-sm { height: 40px; padding: 0 18px; font-size: 14px; }
+
+.l-btn-solid { background: var(--l-accent); color: var(--l-page); border: 1px solid var(--l-accent); }
+.l-btn-solid:hover { box-shadow: 0 12px 30px -12px rgb(220 176 105 / 0.6); }
+
+.l-btn-ghost { background: var(--l-surface); color: var(--l-text); border: 1px solid var(--l-border-2); font-weight: 500; }
+.l-btn-ghost:hover { border-color: var(--l-text-3); }
+
+/* ── Type ───────────────────────────────────────────────────────────────────── */
+
+.l-h1 {
+  /* No top margin: the h1 is the first thing in the hero, so its margin and the
+   * section's own padding were stacking into dead space above the headline. */
+  margin: 0;
+  font-size: clamp(36px, 4.6vw, 62px);
+  font-family: Newsreader, Georgia, serif;
+  line-height: 1.06;
+  font-weight: 500;
+  letter-spacing: -0.022em;
+}
+.l-h2 {
+  margin: 14px 0 0;
+  font-family: Newsreader, Georgia, serif;
+  font-size: clamp(30px, 3.4vw, 46px);
+  line-height: 1.12;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+.l-lede {
+  margin: 16px 0 0;
+  font-size: clamp(15.5px, 1.3vw, 18px);
+  line-height: 1.62;
+  color: var(--l-text-2);
+}
+.l-body { font-size: 16px; line-height: 1.62; color: var(--l-text-2); }
+
+/* ── Sections ───────────────────────────────────────────────────────────────── */
+
+.l-section { padding: clamp(56px, 7vw, 92px) 0; }
+.l-section-alt { background: var(--l-sunken); border-top: 1px solid var(--l-border); border-bottom: 1px solid var(--l-border); }
+.l-center { text-align: center; display: flex; flex-direction: column; align-items: center; }
+
+.l-hero { padding: clamp(26px, 3.2vw, 44px) 0 clamp(44px, 5vw, 72px); }
+.l-trust {
+  margin-top: 18px;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  color: var(--l-text-3); font-size: 13px; text-align: center;
+}
+.l-cta-row { margin-top: 26px; display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; }
+
+/* ── Cards ──────────────────────────────────────────────────────────────────── */
+
+/* These four wear the APP's card treatment, not the landing's: the near-black surface,
+   the ledger rule across the top, the square corner. The windows above them are the real
+   product and they are darker than anything else on this page, so a lighter card here
+   read as a different, duller product further down the same page. App tokens, not --l-*,
+   on purpose — this is the one place the marketing page quotes the product directly. */
+.l-card {
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-top: 1px solid var(--ledger-rule);
+  border-radius: 0;
+  background: var(--surface);
+  transition: transform 0.28s var(--l-ease), border-color 0.24s ease, background-color 0.24s ease;
+}
+.l-card:hover { transform: translateY(-3px); border-color: var(--border-strong); background: var(--surface-raised); }
+.l-card-title { font-size: 14.5px; font-weight: 600; color: var(--l-text); }
+.l-card-body { margin: 8px 0 0; font-size: 13px; line-height: 1.55; color: var(--l-text-3); }
+
+.l-grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+
+@media (max-width: 620px) {
+  .l-grid-2 { grid-template-columns: 1fr; }
+}
+
+/* ── Split (text + panel) ───────────────────────────────────────────────────── */
+
+.l-split { display: flex; gap: 72px; align-items: flex-start; }
+.l-split-text { width: 480px; flex-shrink: 0; }
+.l-split-rest { flex-grow: 1; min-width: 0; }
+
+@media (max-width: 980px) {
+  .l-split { flex-direction: column; gap: 40px; }
+  .l-split-text { width: 100%; }
+}
+
+/* ── FAQ ────────────────────────────────────────────────────────────────────── */
+
+.l-faq-row { border-bottom: 1px solid var(--l-border); }
+.l-faq-row:last-child { border-bottom: none; }
+.l-faq-btn {
+  width: 100%;
+  padding: 20px 0;
+  background: none;
+  border: none;
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  text-align: left;
+  color: var(--l-text);
+  font-family: inherit; font-size: 16px; font-weight: 500;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+.l-faq-btn:hover { color: var(--l-accent); }
+.l-faq-chev { flex-shrink: 0; transition: transform 0.3s var(--l-ease); }
+.l-faq-btn[aria-expanded="true"] .l-faq-chev { transform: rotate(180deg); }
+.l-faq-answer { margin: 0; padding: 0 0 20px; max-width: 600px; font-size: 14.5px; line-height: 1.62; color: var(--l-text-3); }
+
+/* ── Footer ─────────────────────────────────────────────────────────────────── */
+
+.l-footer { border-top: 1px solid var(--l-border); padding-top: clamp(40px, 5vw, 56px); }
+.l-footer-cols { display: flex; gap: clamp(40px, 7vw, 96px); align-items: flex-start; }
+.l-footer-brand { width: 300px; flex-shrink: 0; }
+.l-footer-links { flex-grow: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px; }
+.l-footer-col { display: flex; flex-direction: column; gap: 12px; }
+.l-footer-head {
+  font-family: Archivo, system-ui, sans-serif;
+  font-size: 10px; font-weight: 600;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--l-text);
+}
+.l-flink {
+  font-size: 13.5px; color: var(--l-text-3); text-decoration: none;
+  display: inline-block;
+  transition: color 0.2s ease, transform 0.26s var(--l-ease);
+}
+.l-flink:hover { color: var(--l-text); transform: translateX(3px); }
+
+.l-social { margin-top: 22px; display: flex; align-items: center; gap: 8px; }
+.l-social a {
+  width: 38px; height: 38px;
+  border: 1px solid var(--l-border); border-radius: 10px;
+  background: var(--l-surface); color: var(--l-text-2);
+  display: flex; align-items: center; justify-content: center;
+  transition: color 0.2s ease, background-color 0.2s ease, border-color 0.2s ease, transform 0.26s var(--l-ease);
+}
+.l-social a:hover { color: var(--l-page); background: var(--l-accent); border-color: var(--l-accent); transform: translateY(-2px); }
+
+.l-footer-legal {
+  margin-top: 44px;
+  padding: 20px 0 24px;
+  border-top: 1px solid var(--l-border);
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 40px;
+}
+.l-footer-legal p { margin: 0; max-width: 820px; font-size: 12px; line-height: 1.55; color: var(--l-text-4); }
+.l-footer-legal span { font-size: 12px; color: var(--l-text-4); white-space: nowrap; }
+
+@media (max-width: 980px) {
+  .l-footer-cols { flex-direction: column; gap: 36px; }
+  .l-footer-brand { width: 100%; }
+  .l-footer-links { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+  .l-footer-legal { flex-direction: column; gap: 12px; }
+}
+@media (max-width: 620px) {
+  .l-footer-links { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── The window stack ───────────────────────────────────────────────────────────
+ * Two equal-size app windows, offset: the screen being shown, and the next one behind
+ * it. The frames, the page background and the crops live here. NOTHING here styles the
+ * screens inside them — those are live renders of the real pages, built in
+ * LandingHero.tsx out of the app's own components and reading the app's own tokens.
+ *
+ * The rules this replaced drew a lookalike: its own KPI tiles, its own donut, its own
+ * table, a left sidebar the app does not have. Two sets of styles for one screen means
+ * the picture and the product drift apart, and the visitor finds that out after signing
+ * up.
+ * ------------------------------------------------------------------------------- */
+
+.l-mock-wrap { position: relative; margin-top: 40px; }
+.l-mock-glow {
+  position: absolute; inset: 9% 8% 12% 8%;
+  border-radius: 999px;
+  background: radial-gradient(ellipse at center, rgb(220 176 105 / 0.16), rgb(220 176 105 / 0) 70%);
+  filter: blur(40px);
+  pointer-events: none;
+}
+
+.l-win {
+  position: relative;
+  border: 1px solid var(--l-border-2);
+  border-radius: 14px;
+  background: var(--l-surface);
+  overflow: hidden;
+  box-shadow: 0 40px 90px -30px rgb(0 0 0 / 0.85);
+}
+/* ONLY the page fades. The frame, the chrome and the ribbon are the same elements
+   throughout, so nothing about the window moves when the screen inside it changes — the
+   whole point of turning the page rather than swapping the picture. */
+@media (prefers-reduced-motion: no-preference) {
+  .l-win-page { animation: l-page-in 0.38s var(--l-ease) both; }
+}
+/* Never all the way down to nothing: a window that blanks between screens reads as a
+   page load, and the frame around it is meant to stay put. */
+@keyframes l-page-in {
+  from { opacity: 0.25; }
+  to { opacity: 1; }
+}
+/* The tab treatment moves with the page, so it gets the same easing rather than snapping
+   a frame before the page it belongs to. The hover is faster: that one is a response to a
+   pointer, and a pointer expects an answer immediately. */
+.l-win-tab { transition: background-color 0.35s var(--l-ease), color 0.35s var(--l-ease); }
+/* `!important` because the resting colours are inline styles on the button — that is how
+   every ds/ component is written, and an inline style outranks this rule without it. */
+.l-win-tab:hover {
+  background: var(--surface-hover) !important;
+  color: var(--text-primary) !important;
+  transition-duration: 0.12s;
+}
+.l-win-tab:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 1px; }
+
+.l-mock-chrome {
+  height: 40px; padding: 0 16px;
+  border-bottom: 1px solid var(--l-border);
+  background: var(--l-raised);
+  display: flex; align-items: center; gap: 8px;
+}
+.l-mock-dot { width: 10px; height: 10px; border-radius: 999px; background: var(--l-border-2); }
+.l-mock-url {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 24px; padding: 0 14px;
+  border: 1px solid var(--l-border); border-radius: 999px;
+  background: var(--l-sunken);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px; color: var(--l-text-3);
+}
+.l-mock-note {
+  margin: 18px 0 0;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--l-text-3);
+}
+
+/* The crop. A real page is taller than any hero image, so the screen is cut and the last
+   rows fade into the app's own background rather than stopping at a hard edge that reads
+   as a rendering bug. */
+.l-win-screen {
+  position: relative;
+  height: 730px;
+  overflow: hidden;
+  background: var(--l-shot-page);
+}
+/* Full width on a desktop; a fixed desktop width, cropped, on a phone. */
+.l-win-inner { width: 100%; }
+.l-win-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-section);
+  padding: var(--page-padding-y) var(--page-padding-x);
+}
+.l-win-fade {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 72px;
+  background: linear-gradient(to bottom, rgb(10 10 9 / 0), var(--l-shot-page));
+  pointer-events: none;
+}
+/* Only on the narrow layout, where the screen is wider than the window. */
+.l-win-fade-right {
+  display: none;
+  position: absolute;
+  top: 0; bottom: 0; right: 0;
+  width: 72px;
+  background: linear-gradient(to right, rgb(10 10 9 / 0), var(--l-shot-page));
+  pointer-events: none;
+}
+
+/* The skeletons stand for figures deliberately not shown here, not for figures still
+   arriving. Left pulsing, the hero would read as a screen stuck loading, so the animation
+   stops at the landing page's boundary — the geometry, which is the part that has to
+   match the app, is untouched. */
+.l-win .trackr-skeleton { animation: none; background: var(--surface-active); }
+
+@media (max-width: 900px) {
+  .l-win-screen { height: 460px; }
+  /* A phone-width reflow of a screen built for tables puts every KPI on its own row and
+     fills the whole hero with two of them, so the page keeps its desktop width and the
+     window simply shows less of it. */
+  .l-win-inner { width: 1040px; }
+  .l-win-fade-right { display: block; }
+}
+@media (max-width: 620px) {
+  .l-mock-wrap { margin-top: 28px; }
+  .l-win-screen { height: 380px; }
+}

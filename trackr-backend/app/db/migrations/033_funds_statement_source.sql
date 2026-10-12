@@ -1,0 +1,36 @@
+-- 033_funds_statement_source.sql -- a txn_source for broker funds statements.
+--
+-- WHY A NEW SOURCE RATHER THAN REUSING ONE. `source` exists for forensics: it answers
+-- "what kind of evidence put this row in the ledger", and for a DIVIDEND row that
+-- question is the whole ballgame. docs/ARCHITECTURE_INVARIANTS.md invariant 18 splits
+-- dividends into DECLARED / EXPECTED / RECEIVED / REALISED, and the ONLY thing that
+-- distinguishes the last two from the first two is evidence that money actually moved.
+-- A funds statement is that evidence. None of the seven existing values says so:
+--
+--   * CONTRACT_NOTE and TRADEBOOK are trade documents. Neither carries a dividend credit.
+--   * CAS is explicitly "declared quantities, used to CHECK the engine", not cash.
+--   * CORP_ACTION is the declaration side -- exactly the thing a receipt is NOT.
+--   * MANUAL means a human asserted it, which is a materially weaker claim than a
+--     broker's own books and must stay distinguishable from one.
+--   * CSV / EMAIL describe a transport, not a document, and would lose the distinction
+--     the moment a second kind of CSV arrives.
+--
+-- Folding funds statements into any of those would make "where did this dividend come
+-- from" unanswerable after the fact, which is the one question an auditor asks first.
+--
+-- ADD VALUE IS SAFE IN A TRANSACTION HERE, and the qualifier matters. PostgreSQL permits
+-- `ALTER TYPE ... ADD VALUE` inside a transaction block from PG12 on, but forbids USING
+-- the new label in that same transaction. This migration only adds it; the first row
+-- written with it comes from the application, in a later transaction. app.db.migrate
+-- runs every migration inside the caller's transaction, so a migration that also
+-- inserted a FUNDS_STATEMENT row would fail here -- deliberately not done.
+--
+-- IF NOT EXISTS makes re-running a no-op rather than an error, matching the idempotency
+-- app.db.migrate.migrate already promises.
+--
+-- NOTHING ELSE CHANGES. No column, no constraint, no backfill. Every existing row keeps
+-- its source; no number this system computes moves, because the engine is forbidden from
+-- branching on `source` at all (app.engine.types.Source's own docstring) -- which is
+-- precisely what makes adding a value here a layer-1 change and not an engine one.
+
+ALTER TYPE txn_source ADD VALUE IF NOT EXISTS 'FUNDS_STATEMENT';

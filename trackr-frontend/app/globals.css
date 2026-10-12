@@ -1,0 +1,672 @@
+/* ---------------------------------------------------------------------------------
+ * Trackr+ Design System — Ink / Paper / Warm-Grey.
+ *
+ * Five faces, each with a job:
+ *   Newsreader   — headings and any figure meant to be READ as a number
+ *   Inter        — UI text
+ *   JetBrains Mono — ISINs, ids, forwarding addresses
+ *   Archivo      — the ledger's small-caps labels (letterspaced, uppercase)
+ *   Petrona      — the ledger slip's footer figures
+ * Archivo + Petrona are the two the standalone kit loads on top of the base three;
+ * they carry the "vintage ledger" treatment on the KPI slips and LedgerGrid.
+ * ------------------------------------------------------------------------------- */
+@import url("https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,500&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Archivo:wght@400;500;600&family=Petrona:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------------
+ * TOKENS
+ *
+ * Two parallel sets live here, and they are NOT redundant:
+ *
+ *   1. The design-system vars (--page, --surface, --text-primary, --ledger-ink, …).
+ *      Raw hex. Every revamped component reads these directly via inline style, the
+ *      way the standalone kit does — that is what makes those screens pixel-exact.
+ *
+ *   2. The legacy Tailwind triplets (--color-navy-900, --color-cream-100, …).
+ *      "R G B" triplets, because tailwind.config.ts wraps each in rgb(… / <alpha-value>)
+ *      so opacity modifiers keep working. These are REPOINTED at the new palette, so
+ *      a component still written in `text-navy-900` / `bg-cream-100` renders in the
+ *      new ink-and-paper scheme instead of the retired navy/cream one. The role each
+ *      name describes is unchanged — navy-900 is still "strongest text" — only the
+ *      value it resolves to moved.
+ *
+ * The upshot: no screen is left half-migrated. Revamped screens are exact; screens not
+ * yet touched are at least coherent.
+ * ------------------------------------------------------------------------------- */
+:root {
+  /* ---- Neutral ramp: a warm grey off near-black, not a blue-grey ---- */
+  --white: #ffffff;
+  --black: #191918;
+
+  --ink-900: #2c2c2b;
+  --ink-700: #454440;
+  --ink-600: #5f5d59;
+  --ink-400: #8e8b86;
+  --ink-300: #ada9a3;
+  --ink-200: #c7c6c4;
+  --ink-100: #e3e2e0;
+  --ink-50: #f1f0ee;
+
+  /* ---- Semantic surfaces ---- */
+  --page: #ffffff;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #f7f7f5;
+  --surface-hover: #f1f0ee;
+  --surface-active: #e3e2e0;
+  --overlay-scrim: rgb(25 25 24 / 0.32);
+
+  /* ---- Semantic text ---- */
+  --text-primary: #2c2c2b;
+  --text-secondary: #5f5d59;
+  --text-tertiary: #8e8b86;
+  --text-inverse: #ffffff;
+  --text-link: #2f6fed;
+
+  /* ---- Lines ---- */
+  --border: #e3e2e0;
+  --border-strong: #c7c6c4;
+  --border-focus: #2c2c2b;
+
+  /* ---- Sign + status ---- */
+  --positive: #1e7a4c;
+  --positive-tint: #e8f3ec;
+  --negative: #b3261e;
+  --negative-tint: #fbeceb;
+  --warning: #a9761c;
+  --warning-tint: #fbf3e3;
+  --info: #2f6fed;
+  --info-tint: #eaf1fe;
+
+  /* ---- Charts: the one place saturated colour is allowed ---- */
+  --chart-1: #2f6fed;
+  --chart-2: #0f9b8e;
+  --chart-3: #e8a33d;
+  --chart-4: #7c5ce6;
+  --chart-5: #2e9e5b;
+  --chart-6: #e36a2c;
+  --chart-7: #d9439b;
+  --chart-8: #d8453c;
+  --chart-9: #96683b;
+
+  --chart-1-tint: #eaf1fe;
+  --chart-2-tint: #e6f5f3;
+  --chart-3-tint: #fdf4e6;
+  --chart-4-tint: #f1edfd;
+  --chart-5-tint: #e9f5ee;
+  --chart-6-tint: #fdefe7;
+  --chart-7-tint: #fceaf4;
+  --chart-8-tint: #fbeceb;
+  --chart-9-tint: #f5efe8;
+
+  --chart-mono-1: #2c2c2b;
+  --chart-mono-2: #5f5d59;
+  --chart-mono-3: #8e8b86;
+  --chart-mono-4: #ada9a3;
+  --chart-mono-5: #c7c6c4;
+  --chart-mono-6: #e3e2e0;
+
+  --chart-grid: #e3e2e0;
+  --chart-axis-text: #8e8b86;
+
+  /* ---- Allocation ramp — ink to brass. Weight reads as depth, not hue ---- */
+  --alloc-1: #2c2c2b;
+  --alloc-2: #443b2e;
+  --alloc-3: #63502c;
+  --alloc-4: #85682e;
+  --alloc-5: #a67c31;
+  --alloc-6: #cf9d42;
+  --alloc-7: #b98a6b;
+  /* 8 and 9 continue the ramp past brass into bleached brass. A sector donut routinely
+     carries ten groups; stopping at seven made the eighth sector the same colour as the
+     first, which reads as one slice split in two. */
+  --alloc-8: #d8c193;
+  --alloc-9: #e9dcc0;
+
+  --alloc-accent: #a67c31;
+  --alloc-accent-tint: rgb(207 157 66 / 0.16);
+  --alloc-accent-text: #5d4718;
+  --alloc-hairline: rgb(166 124 49 / 0.14);
+
+  /* ---- Ledger ink — the editorial metric slips and the ruled grid ---- */
+  --ledger-ink: #14130f;
+  --ledger-ink-soft: #3d382f;
+  --ledger-ink-faint: #6f6858;
+  --ledger-ink-negative: #8f2a1c;
+  --ledger-ink-positive: #2c6b41;
+  --ledger-rule: #b3ab97;
+  --ledger-chip-text: #ffffff;
+
+  /* Dividends received — a muted viridian opposite the brass */
+  --data-received: #2f5d53;
+
+  /* ---- Type ---- */
+  --font-heading: "Newsreader", Georgia, "Times New Roman", serif;
+  --font-body: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-label: "Archivo", system-ui, sans-serif;
+  --font-figure: "Petrona", Georgia, serif;
+  --font-slip: "Times New Roman", Times, serif;
+
+  --text-micro: 10px;
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 18px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+  --text-3xl: 30px;
+  --text-4xl: 38px;
+
+  --leading-tight: 1.15;
+  --leading-snug: 1.35;
+  --leading-normal: 1.55;
+  --leading-relaxed: 1.7;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --tracking-label: 0.06em;
+  --tracking-tight: -0.01em;
+
+  --type-display: var(--weight-regular) var(--text-4xl) / var(--leading-tight) var(--font-heading);
+  --type-h1: var(--weight-regular) var(--text-2xl) / var(--leading-tight) var(--font-heading);
+  --type-h2: var(--weight-regular) var(--text-xl) / var(--leading-tight) var(--font-heading);
+  --type-h3: var(--weight-medium) var(--text-base) / var(--leading-snug) var(--font-heading);
+  --type-body: var(--weight-regular) var(--text-sm) / var(--leading-normal) var(--font-body);
+  --type-body-sm: var(--weight-regular) var(--text-xs) / var(--leading-normal) var(--font-body);
+  --type-label: var(--weight-medium) var(--text-2xs) / 1.2 var(--font-body);
+  --type-metric: var(--weight-regular) var(--text-2xl) / var(--leading-tight) var(--font-heading);
+  --type-mono: var(--weight-regular) var(--text-xs) / var(--leading-normal) var(--font-mono);
+
+  /* ---- Spacing: 4px base. --space-5 is the card padding used throughout ---- */
+  --space-0: 0px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  --card-padding: var(--space-5);
+  --gap-grid: var(--space-4);
+  --gap-section: var(--space-6);
+  --page-padding-x: var(--space-8);
+  --page-padding-y: var(--space-6);
+  --content-max: 1180px;
+  /* The single-column screens -- Import, Reconcile, Settings, Privacy. Forms and prose,
+     not tables, so they are read at one width and centred instead of stretched to the
+     window. One variable, so the four cannot drift apart. */
+  --page-column: 860px;
+
+  /* ---- Radius ---- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* ---- Elevation: flat by default; a near-white system gets structure from 1px
+          lines, not shadow. Shadow only on things that genuinely float. ---- */
+  --shadow-none: none;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.04);
+
+  /* The fill every skeleton placeholder uses -- a shade of the same ink the
+   * ruled grid is drawn in, so a loading table reads as the table it will become
+   * rather than as a grey foreign object. */
+  --skeleton: #e8e6e0;
+  /* The ring + lift the KPI slips wear. Card adopts it verbatim so every panel on
+   * a screen has one border treatment (see ds/Card.tsx). */
+  --shadow-slip: 0 0 0 1px var(--border), 0 2px 5px rgb(27 26 22 / 0.08);
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.04), 0 8px 24px -8px rgb(0 0 0 / 0.1);
+  --shadow-menu: 0 12px 32px -12px rgb(0 0 0 / 0.18);
+  --shadow-overlay: 0 20px 40px -16px rgb(0 0 0 / 0.16);
+  --ring-focus: 0 0 0 2px var(--page), 0 0 0 4px var(--border-strong);
+
+  /* ---- Motion: one easing curve, three durations ---- */
+  --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 300ms;
+  --press-scale: 0.97;
+
+  /* ---- Legacy Tailwind triplets, repointed at the palette above ---- */
+  --color-navy-900: 44 44 43;
+  --color-navy-700: 69 68 64;
+  --color-navy-600: 95 93 89;
+  --color-navy-400: 142 139 134;
+  --color-navy-100: 227 226 224;
+  --color-navy-50: 241 240 238;
+
+  --color-cream-200: 227 226 224;
+  --color-cream-100: 255 255 255;
+  --color-cream-50: 247 247 245;
+
+  --color-brass-600: 93 71 24;
+  --color-brass-500: 166 124 49;
+  --color-brass-400: 207 157 66;
+  --color-brass-50: 251 243 227;
+
+  --color-surface: 255 255 255;
+  --color-surface-raised: 255 255 255;
+  --color-positive: 30 122 76;
+  --color-negative: 179 38 30;
+
+  color-scheme: light;
+}
+
+:root.dark {
+  --white: #ffffff;
+  --black: #f0efed;
+
+  --ink-900: #f0efed;
+  --ink-700: #d4d3cf;
+  --ink-600: #ada9a3;
+  --ink-400: #8e8b86;
+  --ink-300: #61605c;
+  --ink-200: #2a2a28;
+  --ink-100: #1c1c1b;
+  --ink-50: #131312;
+
+  /* Surfaces sit near-black. Structure is carried entirely by the 1px rules below, so
+     the gaps between them are deliberately hairline — a wider surface step would read as
+     elevation on a palette that has no other depth cue. */
+  --page: #0a0a09;
+  --surface: #131312;
+  --surface-raised: #1b1b1a;
+  --surface-sunken: #0e0e0d;
+  --surface-hover: #1e1e1d;
+  --surface-active: #282827;
+  --overlay-scrim: rgb(0 0 0 / 0.72);
+
+  --text-primary: #f0efed;
+  --text-secondary: #d4d3cf;
+  --text-tertiary: #8e8b86;
+  --text-inverse: #191918;
+  --text-link: #6f9dff;
+
+  /* Near-black fills leave the 1px rules to carry all the structure, so the rules are
+     the load-bearing value here, not the surface step between page and card. Kept at
+     roughly their original visual weight — the fills moved, the lines did not have to. */
+  --border: #333331;
+  --border-strong: #434340;
+  --border-focus: #f0efed;
+
+  /* On near-black, a sign colour is read as HUE first and lightness second, so both are
+     pushed for purity rather than muted for restraint: the old red carried 143 more blue
+     than red and the green 66 more blue than red, which is why they read as salmon and
+     sea-green rather than as loss and gain. Checked against all six surfaces --
+     --surface-active is the binding one at 4.85:1, and the old red was already failing
+     AA there at 4.11:1, so this is a fix rather than a lateral move. */
+  --positive: #3ecf6e;
+  --positive-tint: #17291d;
+  --negative: #ff5c52;
+  --negative-tint: #331d1a;
+  --warning: #d9b168;
+  --warning-tint: #2b2519;
+  --info: #6f9dff;
+  --info-tint: #1c2333;
+
+  --chart-1: #6f9dff;
+  --chart-2: #3fc2b4;
+  --chart-3: #f0bd6a;
+  --chart-4: #a48cf5;
+  --chart-5: #58c483;
+  --chart-6: #f28b55;
+  --chart-7: #ea72b6;
+  --chart-8: #ef6f66;
+  --chart-9: #bd8e5f;
+
+  --chart-1-tint: #1c2333;
+  --chart-2-tint: #142b29;
+  --chart-3-tint: #2b2519;
+  --chart-4-tint: #241f38;
+  --chart-5-tint: #17291f;
+  --chart-6-tint: #2e2118;
+  --chart-7-tint: #2d1b27;
+  --chart-8-tint: #2e1f1d;
+  --chart-9-tint: #2a221a;
+
+  --chart-mono-1: #f0efed;
+  --chart-mono-2: #d4d3cf;
+  --chart-mono-3: #ada9a3;
+  --chart-mono-4: #8e8b86;
+  --chart-mono-5: #5f5e59;
+  --chart-mono-6: #323230;
+
+  --chart-grid: #2a2a28;
+  --chart-axis-text: #8e8b86;
+
+  --alloc-1: #e6e3dc;
+  --alloc-2: #d3c8ad;
+  --alloc-3: #dcb069;
+  --alloc-4: #cf9d42;
+  --alloc-5: #ad8235;
+  --alloc-6: #8a6829;
+  --alloc-7: #8d7a5f;
+  --alloc-8: #5f5340;
+  --alloc-9: #403a30;
+
+  --alloc-accent: #cf9d42;
+  --alloc-accent-tint: rgb(207 157 66 / 0.2);
+  --alloc-accent-text: #f2ddb2;
+  --alloc-hairline: rgb(207 157 66 / 0.18);
+
+  --ledger-ink: #f7f5f1;
+  --ledger-ink-soft: #c8c3b8;
+  --ledger-ink-faint: #9c9689;
+  /* The ledger register: the same red/green family as --negative/--positive, a step
+     quieter so a ruled slip still reads as a slip. Held at ~0.65 saturation against the
+     main pair's ~0.69 — close enough to be one system, far enough to keep the register. */
+  --ledger-ink-negative: #f85f57;
+  --ledger-ink-positive: #46c85a;
+  --ledger-rule: #4d524a;
+  --ledger-chip-text: #0a0a09;
+
+  --data-received: #6fae9f;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.3);
+  --skeleton: #262625;
+  --shadow-slip: 0 0 0 1px var(--border), 0 2px 5px rgb(0 0 0 / 0.28);
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 28px -8px rgb(0 0 0 / 0.55);
+  --shadow-menu: 0 12px 32px -12px rgb(0 0 0 / 0.6);
+  --shadow-overlay: 0 20px 44px -16px rgb(0 0 0 / 0.6);
+
+  /* navy-900/700/600 and cream-100/50 are an INVERSE pair — a light solid button fill
+     carrying dark text — so they stay light here. Darkening them would make the label
+     and its own background the same value. Only the structural steps drop. */
+  --color-navy-900: 240 239 237;
+  --color-navy-700: 212 211 207;
+  --color-navy-600: 173 169 163;
+  --color-navy-400: 142 139 134;
+  --color-navy-100: 51 51 49;
+  --color-navy-50: 38 38 36;
+
+  --color-cream-200: 38 38 36;
+  --color-cream-100: 25 25 24;
+  --color-cream-50: 31 31 30;
+
+  --color-brass-600: 242 221 178;
+  --color-brass-500: 207 157 66;
+  --color-brass-400: 220 176 105;
+  --color-brass-50: 43 37 25;
+
+  --color-surface: 19 19 18;
+  --color-surface-raised: 27 27 26;
+  --color-positive: 62 207 110;
+  --color-negative: 255 92 82;
+
+  color-scheme: dark;
+}
+
+@layer base {
+  html {
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--page);
+    color: var(--text-secondary);
+    font: var(--type-body);
+    transition: background-color 0.25s ease, color 0.25s ease;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    margin: 0;
+    color: var(--text-primary);
+    font-family: var(--font-heading);
+    font-weight: var(--weight-regular);
+  }
+
+  /* Links carry the brass accent — the one warm note in a near-monochrome shell. */
+  a {
+    color: var(--alloc-accent);
+    text-decoration: none;
+  }
+  a:hover {
+    color: var(--alloc-accent-text);
+    text-decoration: underline;
+  }
+  :root.dark a:hover {
+    color: #fff;
+  }
+
+  ::selection {
+    background: var(--surface-active);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--border-focus);
+    outline-offset: 2px;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--border-strong);
+    border-radius: var(--radius-full);
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+}
+
+@layer utilities {
+  .tabular-nums {
+    font-feature-settings: "tnum" 1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .press-scale {
+    transition: transform var(--duration-fast) ease;
+  }
+  .press-scale:active {
+    transform: scale(var(--press-scale));
+  }
+
+  /* Retained so components still written against them keep a sane surface. The
+     frosted treatment is gone — this system gets its structure from 1px rules — so
+     these now resolve to the flat card the rest of the app uses. */
+  .glass-panel {
+    background-color: var(--surface);
+  }
+  .glass-card {
+    background-color: var(--surface);
+    box-shadow: var(--shadow-card);
+    transition: box-shadow var(--duration-base) var(--ease-smooth),
+      border-color var(--duration-base) ease;
+  }
+  .glass-card-hover:hover {
+    box-shadow: var(--shadow-raised);
+  }
+
+  .animate-delay-1 {
+    animation-delay: 60ms;
+  }
+  .animate-delay-2 {
+    animation-delay: 120ms;
+  }
+  .animate-delay-3 {
+    animation-delay: 180ms;
+  }
+  .animate-delay-4 {
+    animation-delay: 240ms;
+  }
+}
+
+/* ---------------------------------------------------------------------------------
+ * Editor prose. Scoped to .tiptap, following tiptap's own demo stylesheet conventions
+ * (heading rhythm, code/pre/blockquote) so the Notes surface can drop a real editor in
+ * later without restyling.
+ * ------------------------------------------------------------------------------- */
+.tiptap {
+  color: var(--text-primary);
+  font: var(--type-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
+}
+.tiptap :first-child {
+  margin-top: 0;
+}
+.tiptap h1,
+.tiptap h2,
+.tiptap h3 {
+  line-height: var(--leading-tight);
+  margin-top: 2rem;
+  text-wrap: pretty;
+}
+.tiptap h1 {
+  font-size: var(--text-3xl);
+  margin-bottom: 0.75rem;
+}
+.tiptap h2 {
+  font-size: var(--text-xl);
+  margin-bottom: 0.5rem;
+}
+.tiptap h3 {
+  font-size: var(--text-lg);
+}
+.tiptap p {
+  margin: 0.5rem 0;
+}
+.tiptap ul,
+.tiptap ol {
+  padding: 0 1rem;
+  margin: 0.75rem 1rem 0.75rem 0.4rem;
+}
+.tiptap ul {
+  list-style: disc;
+}
+.tiptap ol {
+  list-style: decimal;
+}
+.tiptap li p {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+.tiptap code {
+  background: var(--surface-sunken);
+  border-radius: var(--radius-xs);
+  color: var(--text-primary);
+  font: var(--type-mono);
+  padding: 0.15em 0.35em;
+}
+.tiptap pre {
+  background: var(--ink-900);
+  color: var(--page);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  margin: 1rem 0;
+  padding: 0.75rem 1rem;
+}
+.tiptap pre code {
+  background: none;
+  color: inherit;
+  padding: 0;
+}
+.tiptap blockquote {
+  border-left: 3px solid var(--border-strong);
+  margin: 1rem 0;
+  padding-left: 1rem;
+  color: var(--text-secondary);
+}
+.tiptap hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.5rem 0;
+}
+.tiptap[contenteditable="false"] {
+  cursor: default;
+}
+
+@keyframes trackr-fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes trackr-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes trackr-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ---- Skeletons -------------------------------------------------------------------
+ *
+ * One shared pulse, so every placeholder in the app breathes on the same clock. Two
+ * elements pulsing out of phase read as two things loading; in phase they read as one
+ * page loading, which is what is actually happening.
+ *
+ * The animation is on `opacity` alone -- never on width, height or margin. A skeleton
+ * that changes size would reintroduce exactly the layout shift it exists to prevent.
+ */
+@keyframes trackr-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.trackr-skeleton {
+  background: var(--skeleton);
+  border-radius: 2px;
+  animation: trackr-skeleton-pulse 1.5s var(--ease-smooth) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
