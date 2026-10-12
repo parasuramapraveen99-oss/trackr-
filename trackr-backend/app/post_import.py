@@ -67,6 +67,7 @@ def run_cycle(
     settings: Settings | None,
     budget_seconds: float = CYCLE_BUDGET_SECONDS,
     clock: Callable[[], float] = monotonic,
+    include_sectors: bool = False,
 ) -> dict:
     """One bounded catch-up cycle. ``more_work`` says whether anything is still pending
     after it; ``progress`` whether it moved anything forward -- together they decide
@@ -78,7 +79,7 @@ def run_cycle(
     if not acquired:
         return {"busy": True, "more_work": False, "progress": False}
     try:
-        return _run_cycle_locked(conn, settings, budget_seconds, clock)
+        return _run_cycle_locked(conn, settings, budget_seconds, clock, include_sectors)
     finally:
         try:
             conn.rollback()
@@ -90,7 +91,11 @@ def run_cycle(
 
 
 def _run_cycle_locked(
-    conn: Any, settings: Settings | None, budget_seconds: float, clock: Callable[[], float]
+    conn: Any,
+    settings: Settings | None,
+    budget_seconds: float,
+    clock: Callable[[], float],
+    include_sectors: bool = False,
 ) -> dict:
     from app.db.imports import heal_fno_awaiting_master
     from app.prices.alerts import get_notifier
@@ -115,6 +120,23 @@ def _run_cycle_locked(
         conn.rollback()
         logger.warning("post_import_prices_failed", exc_info=True)
         out["prices"] = {"error": type(exc).__name__}
+
+    if include_sectors:
+        # Sectors otherwise arrive only with the next daily fundamentals cron, so a fresh
+        # import showed "Unclassified" for up to a day. Once per import (hop 0), not per
+        # follow-up cycle: a security with no published sector (an ETF, a retired ISIN)
+        # would be refetched every few minutes for nothing.
+        try:
+            from app.db.sectors import refresh_sectors
+
+            missing = _isins_missing_sector(conn)
+            if missing:
+                out["sectors"] = refresh_sectors(conn, missing)
+                conn.commit()
+        except Exception as exc:  # the allocation chart can wait; the steps below cannot
+            conn.rollback()
+            logger.warning("post_import_sectors_failed", exc_info=True)
+            out["sectors"] = {"error": type(exc).__name__}
 
     try:
         out["fno"] = heal_fno_awaiting_master(
@@ -191,6 +213,22 @@ def _progress(out: dict) -> bool:
     )
 
 
+def _isins_missing_sector(conn: Any) -> list[str]:
+    """Held securities with no sector on file."""
+    from app.db.prices import held_isins
+
+    held = held_isins(conn)
+    if not held:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT isin FROM security WHERE isin = ANY(%s) AND sector IS NULL", (held,)
+        )
+        missing = [r[0] for r in cur.fetchall()]
+    conn.commit()
+    return missing
+
+
 def _reference_work_left(conn: Any, settings: Settings | None = None) -> bool:
     """Reference work THIS deployment can run now, or an import not yet turned into
     tasks. NSE-API tasks do not count where ``nse_api_enabled`` is false: they wait for
@@ -221,7 +259,7 @@ def run_cycle_in_own_connection(settings: Settings, hop: int = 0) -> None:
 
     try:
         with connect(settings.database_url) as conn:
-            result = run_cycle(conn, settings)
+            result = run_cycle(conn, settings, include_sectors=hop == 0)
         logger.info("post_import_cycle hop=%s result=%s", hop, str(result)[:500])
     except Exception:
         logger.warning("post_import_cycle_failed", exc_info=True)
