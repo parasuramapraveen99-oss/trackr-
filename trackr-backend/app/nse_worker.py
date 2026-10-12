@@ -15,7 +15,8 @@ WHAT ONE RUN DOES, in order:
   1. Re-opens what the blocked deployment shut: the ISIN-change feed's circuit breaker
      (tripped by 403s, not by an NSE outage) and the backoff on NSE/GAP tasks.
   2. The daily feeds for the last ``--days`` days: corporate actions, dividend notices,
-     ISIN-change circulars + alias promotion, the demerger watch, dividend reconcile.
+     ISIN-change circulars + alias promotion, the demerger watch, dividend reconcile,
+     and stock sectors (NSE list, BSE for the rest).
   3. The reference worker until its queue is empty or ``--max-minutes`` is spent: NSE
      months, GAP resolution, and whatever replays/verifications they unlock.
 Everything is the same code the crons and the worker run; nothing here is a second
@@ -70,6 +71,8 @@ def reopen(conn: Any) -> None:
 
 def daily_feeds(conn: Any, settings: Settings, days: int) -> dict[str, Any]:
     from app.db.dividend_reconcile import reconcile_pending_dividends
+    from app.db.prices import held_isins
+    from app.db.sectors import refresh_sectors
     from app.routers import corporate_actions, demerger_watch, dividends_ops, security_alias
 
     end = date.today()
@@ -82,6 +85,9 @@ def daily_feeds(conn: Any, settings: Settings, days: int) -> dict[str, Any]:
         "isin_changes": lambda: security_alias._refresh_and_promote(conn, nse_api_enabled=True),
         "demerger_watch": lambda: demerger_watch._run(conn, settings),
         "dividend_reconcile": lambda: reconcile_pending_dividends(conn),
+        # Same job as the fundamentals cron's sector step. Its BSE fallback is an
+        # api.bseindia.com call a blocked deployment may not reach either.
+        "sectors": lambda: refresh_sectors(conn, held_isins(conn)),
     }
     out: dict[str, Any] = {}
     for name, step in steps.items():
