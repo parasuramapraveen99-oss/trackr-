@@ -17,8 +17,10 @@ that does. Read that docstring before changing anything about uniqueness.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
+from time import monotonic
 from typing import Any
 
 from app.db import audit
@@ -699,6 +701,9 @@ def discover_dividends_from_yfinance(
     source: Any | None = None,
     actor_uid: str | None = None,
     rights_reference: str | None = None,
+    after: str | None = None,
+    time_budget_seconds: float | None = None,
+    clock: Callable[[], float] = monotonic,
 ) -> dict[str, Any]:
     """``Ticker.dividends`` for every ISIN this system holds -- a second, independent
     source whose agreement with an NSE notice is what verifies a dividend. Not the only
@@ -722,6 +727,14 @@ def discover_dividends_from_yfinance(
     anything was rejected. Good rows are committed either way. ``rights_reference`` is
     copied onto those observations; when ``source`` is omitted the real Yahoo source is
     built here and the reference is ``YAHOO_DATA_RIGHTS_REFERENCE``.
+
+    BOUNDED AND RESUMABLE. One Yahoo call per held ISIN grows with every user's holdings,
+    and a serverless caller is killed at a hard limit. ISINs are walked in sorted order,
+    only those after ``after``; once ``time_budget_seconds`` is spent the sweep stops and
+    returns ``next_after`` (the last ISIN it finished) so the caller can continue from
+    there -- a budget alone would restart from the same first ISINs every week and never
+    reach the rest. ``next_after`` is None when the sweep reached the end. When the run
+    raises ``ActionBatchFailed``, the same cursor rides on it as ``next_after``.
     """
     from app.config import get_settings
     from app.db.corporate_actions import (
@@ -742,13 +755,30 @@ def discover_dividends_from_yfinance(
     if yf_source is None:
         yf_source = YfinanceSource()
         rights_reference = get_settings().yahoo_data_rights_reference
-    target_isins = current_identifiers(conn, isins if isins is not None else held_isins(conn))
+    target_isins = sorted(
+        set(current_identifiers(conn, isins if isins is not None else held_isins(conn)))
+    )
+    if after is not None:
+        target_isins = [i for i in target_isins if i > after]
     meta = lookup_securities(conn, target_isins)
 
     counts: dict[str, int] = {}
     rejected: list[str] = []
+    next_after: str | None = None
+    last_done: str | None = None
+    began = clock()
 
     for isin in target_isins:
+        # At least one ISIN per call, so a cursor always moves and "finished" (None) is
+        # never reported for a sweep that did nothing.
+        if (
+            time_budget_seconds is not None
+            and last_done is not None
+            and clock() - began > time_budget_seconds
+        ):
+            next_after = last_done
+            break
+        last_done = isin
         symbol = (meta.get(isin) or {}).get("symbol")
         reason_code = yahoo_symbol_rejection(meta, isin)
         if reason_code is not None:
@@ -795,5 +825,7 @@ def discover_dividends_from_yfinance(
                 ))
 
     if rejected:
-        raise ActionBatchFailed(rejected, [])
-    return dict(counts)
+        failure = ActionBatchFailed(rejected, [])
+        failure.next_after = next_after
+        raise failure
+    return {**counts, "next_after": next_after}

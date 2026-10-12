@@ -54,6 +54,23 @@ def continue_if_needed(settings: Any, *, more_work: bool, progress: bool, hop: i
     return True
 
 
+def follow_up(settings: Any, path_and_query: str) -> bool:
+    """Call ``path_and_query`` on this deployment with ``CRON_SECRET`` -- for a cron job
+    that stopped at its time budget and continues in a fresh call (the weekly Yahoo
+    dividend sweep). Returns whether a request was sent; never raises."""
+    base = _base_url(settings)
+    secret = getattr(settings, "cron_secret", None)
+    if not base or not secret:
+        logger.info("follow_up_not_configured %s", path_and_query)
+        return False
+    try:
+        _send(f"{base}{path_and_query}", secret)
+    except Exception:
+        logger.warning("follow_up_send_failed %s", path_and_query, exc_info=True)
+        return False
+    return True
+
+
 def _base_url(settings: Any) -> str | None:
     explicit = getattr(settings, "self_base_url", None)
     if explicit:

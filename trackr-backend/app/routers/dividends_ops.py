@@ -141,7 +141,9 @@ def discover_dividends_yfinance(
     dependencies=[Depends(require_cron_secret)],
 )
 def discover_dividends_yfinance_cron(
-    conn: Any = Depends(get_conn), settings: Settings = Depends(get_settings)
+    after: str | None = Query(default=None, pattern=r"^IN[A-Z0-9]{10}$"),
+    conn: Any = Depends(get_conn),
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     """Same sweep, reachable by Vercel Cron: GET, gated by ``CRON_SECRET``.
 
@@ -158,11 +160,37 @@ def discover_dividends_yfinance_cron(
 
     Sharing ``security-alias``'s weekly slot (Sunday) rather than a weekday one: this is
     reference-data maintenance, not a trading-day job, and nothing downstream of it is
-    waiting on a same-day answer."""
-    result = de.discover_dividends_from_yfinance(
-        conn, isins=None, rights_reference=settings.yahoo_data_rights_reference
-    )
+    waiting on a same-day answer.
+
+    Time-boxed under Vercel's 300 s limit, with one Yahoo call per held ISIN growing with
+    every user's holdings: a sweep that stops at its budget calls this route again with
+    ``?after=<last ISIN done>`` (``app.continuation.follow_up``), so every ISIN is still
+    covered every week. Vercel's own weekly call carries no ``after`` and starts at the
+    top. Rejections still continue the sweep before the failure is reported."""
+    from app.continuation import follow_up
+    from app.ingest.action_source import ActionBatchFailed
+
+    try:
+        result = de.discover_dividends_from_yfinance(
+            conn,
+            isins=None,
+            rights_reference=settings.yahoo_data_rights_reference,
+            after=after,
+            time_budget_seconds=YAHOO_SWEEP_BUDGET_SECONDS,
+        )
+    except ActionBatchFailed as failure:
+        cursor = getattr(failure, "next_after", None)
+        if cursor:
+            follow_up(settings, f"/ops/dividends/discover-yfinance-cron?after={cursor}")
+        raise
+    cursor = result.pop("next_after", None)
+    if cursor:
+        follow_up(settings, f"/ops/dividends/discover-yfinance-cron?after={cursor}")
     return _normalise(result)
+
+
+#: Leaves headroom inside Vercel's 300 s function limit for the ISIN in flight.
+YAHOO_SWEEP_BUDGET_SECONDS = 200.0
 
 
 @ops_router.post(
