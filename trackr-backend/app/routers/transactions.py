@@ -336,6 +336,9 @@ def expected_dividends(
     # (drop_unverified_twins), shared with the corporate-action timeline so the two
     # cannot disagree about how many declarations exist.
 
+    from app.engine.dividends import split_fund_units
+
+    events, excluded_fund_units = split_fund_units(events)
     expected, unprojectable = compute_expected_dividends(rows, events, actions, as_of=as_of)
 
     return {
@@ -357,5 +360,6 @@ def expected_dividends(
             {"isin": u.isin, "ex_date": u.ex_date, "code": u.code, "detail": u.detail}
             for u in unprojectable
         ],
+        "excluded_fund_units": excluded_fund_units,
         "total_gross_expected": money(sum((e.gross_expected for e in expected), ZERO)),
     }

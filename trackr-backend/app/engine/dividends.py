@@ -187,6 +187,20 @@ def _withdrawn_evidence(
     return next((s.reason_code for s in skipped if s.isin == isin and s.reason_code), None)
 
 
+#: ISINs of mutual-fund units, ETFs included ("INF..."). Outside this system's listed-equity
+#: scope, and a fund's payouts (LIQUIDBEES: daily, reinvested as units) are not a company's
+#: cash dividend -- so they are excluded from dividend tracking and NAMED as excluded,
+#: never shown as "awaiting confirmation" (owner decision 2026-10-13).
+FUND_UNIT_ISIN_PREFIX = "INF"
+
+
+def split_fund_units(events: list[DividendEvent]) -> tuple[list[DividendEvent], list[str]]:
+    """``(events to track, sorted fund-unit ISINs excluded)``."""
+    kept = [e for e in events if not e.isin.startswith(FUND_UNIT_ISIN_PREFIX)]
+    excluded = sorted({e.isin for e in events if e.isin.startswith(FUND_UNIT_ISIN_PREFIX)})
+    return kept, excluded
+
+
 def drop_unverified_twins(events: list[DividendEvent]) -> list[DividendEvent]:
     """One declaration recorded twice -> one event. GUJTHEM's 2025-09-04 dividend was
     filed by yfinance under the retired ISIN and by NSE under the current one, so the

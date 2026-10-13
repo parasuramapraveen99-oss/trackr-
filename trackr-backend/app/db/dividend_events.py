@@ -311,9 +311,10 @@ def corroborate_dividend_event(
 def _restated_agreement(
     conn: Any, event: DividendEvent, source: str, amount_per_share: Decimal
 ) -> tuple[Decimal, Decimal, Any] | None:
-    """``(declared, yahoo, factor)`` when Yahoo's reading, multiplied back by the VERIFIED
-    bonuses/splits dated after the dividend, agrees with the other source's as-declared
-    reading; else ``None`` (owner decision 2026-10-13, docs/ENGINE_SPEC.md).
+    """``(declared, yahoo, description)`` when Yahoo's reading, multiplied back by the
+    VERIFIED bonuses/splits and divided by the rights-issue price factors dated after the
+    dividend, agrees with the other source's as-declared reading; else ``None`` (owner
+    decisions 2026-10-13, docs/ENGINE_SPEC.md).
 
     Yahoo divides past dividends by later share-count actions; NSE does not. Only Yahoo is
     restated, and only when it is exactly one of the two sources -- two other sources
@@ -337,9 +338,67 @@ def _restated_agreement(
     family = {event.isin, terminal} | {old for old, new in aliases.items() if new == terminal}
     actions = list_corporate_actions(conn, isins=sorted(family), verification=Verification.VERIFIED)
     factor = later_share_multiplier(actions, event.ex_date)
-    if factor == 1 or not amounts_agree(restated_amount(yahoo, factor), declared):
+    rights = _later_rights_factors(conn, sorted(family), event.ex_date)
+    if factor == 1 and not rights:
         return None
-    return declared, yahoo, factor
+    restated = restated_amount(yahoo, factor)
+    for _, rights_factor in rights:
+        restated = restated / rights_factor
+    if not amounts_agree(restated, declared):
+        return None
+    described = [f"bonuses/splits x{factor}"] if factor != 1 else []
+    described += [f"rights issue {on} (factor {f:.6f})" for on, f in rights]
+    return declared, yahoo, "; ".join(described)
+
+
+def _later_rights_factors(
+    conn: Any, family: list[str], ex_date: date
+) -> list[tuple[date, Decimal]]:
+    """``(rights ex-date, price factor)`` for every rights issue on the issuer's ISIN
+    family after ``ex_date`` that can be computed EXACTLY: NSE's own rights notice (terms)
+    and NSE's bhavcopy close on the last session before the rights ex-date (cum price).
+    A notice in another wording, or with no cum close on file, contributes nothing -- the
+    comparison then simply fails to agree and the dividend stays DISPUTED."""
+    from datetime import timedelta
+
+    from app.engine.dividend_events import rights_price_factor
+    from app.ingest.corporate_action_feed import parse_rights_subject
+
+    # NSE keeps a company's PRE-change ISIN on corporate-action notices long after the
+    # shares trade under the new one (SOUTHBANK's 2024 rights: INE683A01015 on the notice,
+    # INE683A01023 in the market) -- the same habit app.db.dividend_reconcile documents.
+    # So a notice also counts when it shares the issuer + class (first nine characters)
+    # AND names the security's own trading symbol: both, never either alone.
+    symbols = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT symbol FROM security WHERE isin = ANY(%s) AND symbol IS NOT NULL",
+            (family,),
+        ).fetchall()
+    ]
+    notices = conn.execute(
+        "SELECT DISTINCT ex_date, raw_payload->>'subject', raw_payload->>'faceVal' "
+        "FROM corporate_action_observation WHERE provider = 'NSE' AND classification = "
+        "'RIGHTS' AND ex_date > %s AND (isin = ANY(%s) OR (left(isin, 9) = ANY(%s) "
+        "AND raw_payload->>'symbol' = ANY(%s))) ORDER BY ex_date",
+        (ex_date, family, sorted({i[:9] for i in family}), symbols),
+    ).fetchall()
+    out: list[tuple[date, Decimal]] = []
+    for on, subject, face in notices:
+        if any(seen == on for seen, _ in out):
+            continue  # one rights issue, filed under two ISINs
+        terms = parse_rights_subject(subject, face)
+        cum = conn.execute(
+            "SELECT close FROM price WHERE isin = ANY(%s) AND source = 'NSE_BHAVCOPY' "
+            "AND price_date < %s AND price_date >= %s ORDER BY price_date DESC LIMIT 1",
+            (family, on, on - timedelta(days=7)),
+        ).fetchone()
+        if terms is None or cum is None:
+            continue
+        rights_factor = rights_price_factor(terms[0], terms[1], terms[2], cum[0])
+        if rights_factor is not None:
+            out.append((on, rights_factor))
+    return out
 
 
 def _verify_restated(
@@ -354,10 +413,10 @@ def _verify_restated(
     """VERIFIED at the AS-DECLARED amount. When Yahoo created the row, its stored amount is
     Yahoo's scaled figure, which would project a fraction of the real dividend -- so the
     declared amount replaces it, and the note keeps Yahoo's raw reading and the factor."""
-    declared, yahoo, factor = restated
+    declared, yahoo, described = restated
     note = (
         f"{event.notes or ''}\nRESTATED: Yahoo reported {yahoo}/share, scaled by later "
-        f"bonuses/splits (x{factor}); as declared {declared}/share"
+        f"{described}; as declared {declared}/share"
     ).strip()
     with conn.cursor() as cur:
         cur.execute(
@@ -375,7 +434,7 @@ def _verify_restated(
             "isin": event.isin,
             "corroborated_by": source,
             "amount_per_share": str(amount_per_share),
-            "restated": {"yahoo": str(yahoo), "factor": str(factor), "declared": str(declared)},
+            "restated": {"yahoo": str(yahoo), "by": described, "declared": str(declared)},
         },
     )
 
@@ -597,6 +656,19 @@ def _classify_and_corroborate(
     if event.verification is Verification.DISPUTED:
         return OUTCOME_CONFLICT  # a human's rejection stands; do not re-dispute it daily
 
+    if candidate.source == event.source:
+        # The same source labelling its own row -- NSE re-filing one dividend as
+        # "Dividend" then "Interim Dividend" (seen landing the stored sweep, 2026-10-13).
+        # Two reads of one source are one observation: the label may improve, the
+        # verification may not, and a different amount is not this module's to choose.
+        if not amounts_agree(candidate.amount_per_share, event.amount_per_share):
+            return OUTCOME_UNCHANGED
+        conn.execute(
+            "UPDATE dividend_event SET kind = %s WHERE id = %s",
+            (candidate.kind.value, event.id),
+        )
+        return OUTCOME_CLASSIFIED
+
     restated = None
     if not amounts_agree(candidate.amount_per_share, event.amount_per_share):
         # Yahoo's row often arrives first carrying its scaled figure; the NSE notice that
@@ -817,16 +889,62 @@ def refresh_dividend_feed(
         raise
 
     counts: dict[str, int] = {}
-    for row in rows:
-        if conn.execute("SELECT 1 FROM security WHERE isin=%s", (row.isin,)).fetchone() is None:
+    for notice in _group_by_notice(rows):
+        if conn.execute(
+            "SELECT 1 FROM security WHERE isin=%s", (notice[0].isin,)
+        ).fetchone() is None:
             # The feed is all-market: a dividend for a security nobody here holds is
             # expected, not a failure -- the same SECURITY_NOT_REGISTERED posture as
             # refresh_corporate_action_feed. dividend_event.isin is a foreign key to
             # security, so it cannot be stored. Counting it as failed made every month of
             # the reference sweep raise, so no month ever reached coverage.
-            counts["unregistered"] = counts.get("unregistered", 0) + 1
+            counts["unregistered"] = counts.get("unregistered", 0) + len(notice)
             continue
-        candidate = DividendEvent(
+        try:
+            outcome, _ = _land_nse_notice(conn, notice, actor_uid)
+            conn.commit()
+            counts[outcome] = counts.get(outcome, 0) + 1
+        except Exception:
+            conn.rollback()
+            logger.warning(
+                "dividend candidate failed for isin=%s ex_date=%s -- skipped, not aborting "
+                "the run", notice[0].isin, notice[0].ex_date, exc_info=True,
+            )
+            counts["failed"] = counts.get("failed", 0) + 1
+    if counts.get("failed"):
+        from app.ingest.action_source import ActionIngestionError
+        raise ActionIngestionError(f"{counts['failed']} dividend observations failed processing")
+    return {"fetched": len(rows), **counts}
+
+
+
+OUTCOME_MULTIPART_CONFIRMED = "multipart_confirmed"
+OUTCOME_MULTIPART_LANDED = "multipart_landed"
+
+
+def _group_by_notice(rows: list[Any]) -> list[list[Any]]:
+    """Parsed feed rows -> one list per NSE notice: a "/"-separated notice yields several
+    rows that share isin, ex-date and subject, and must be landed together."""
+    groups: dict[tuple, list[Any]] = {}
+    for row in rows:
+        groups.setdefault((row.isin, row.ex_date, row.raw_subject), []).append(row)
+    return list(groups.values())
+
+
+def _land_nse_notice(
+    conn: Any, notice: list[Any], actor_uid: str | None
+) -> tuple[str, list[str]]:
+    """Land one NSE notice's parsed dividends. Returns (outcome, ids of the events it
+    touched).
+
+    One dividend: ``upsert_declared_dividend``, unchanged. Several ("/"-separated parts,
+    owner decision 2026-10-13): Yahoo reports a date's dividends as ONE combined amount,
+    so if exactly one Yahoo-style UNSPECIFIED row sits on that date, the notice's TOTAL is
+    what corroborates it -- one row, the total, VERIFIED or DISPUTED as the amounts say.
+    With nothing on file the parts land as their own NSE rows. Anything else on file is
+    left to the per-part upsert, which refuses ambiguity as it always has."""
+    candidates = [
+        DividendEvent(
             isin=row.isin,
             ex_date=row.ex_date,
             amount_per_share=row.amount_per_share,
@@ -837,22 +955,85 @@ def refresh_dividend_feed(
             verification=Verification.DRAFT,
             notes=row.raw_subject,
         )
+        for row in notice
+    ]
+    first = candidates[0]
+
+    def ids_on_date() -> list[str]:
+        return [e.id for e in match_unspecified(conn, first.isin, first.ex_date)]
+
+    if len(candidates) == 1:
+        outcome = upsert_declared_dividend(conn, first, actor_uid=actor_uid)
+        return outcome, ids_on_date()
+
+    existing = match_unspecified(conn, first.isin, first.ex_date)
+    if (
+        len(existing) == 1
+        and existing[0].kind is DividendKind.UNSPECIFIED
+        and existing[0].source != _NSE_SOURCE_NAME
+    ):
+        total = sum((c.amount_per_share for c in candidates), Decimal(0))
+        corroborate_dividend_event(
+            conn, existing[0].id, _NSE_SOURCE_NAME, _NSE_SOURCE_URL, total, actor_uid=actor_uid
+        )
+        return OUTCOME_MULTIPART_CONFIRMED, [existing[0].id]
+    if not existing:
+        for candidate in candidates:
+            add_dividend_event(conn, candidate, actor_uid=actor_uid)
+        return OUTCOME_MULTIPART_LANDED, ids_on_date()
+    for candidate in candidates:
+        upsert_declared_dividend(conn, candidate, actor_uid=actor_uid)
+    return OUTCOME_MULTIPART_LANDED, ids_on_date()
+
+
+def land_stored_nse_dividend_notices(conn: Any, actor_uid: str | None = None) -> dict[str, int]:
+    """Land the NSE dividend notices the month-by-month reference sweep stored as
+    ``AWAITING_PARSER`` observations (owner decision 2026-10-13).
+
+    The sweep keeps every notice it reads, but only the daily two-day feed ever turned one
+    into a ``dividend_event`` -- so NSE's own record of every past dividend sat unused
+    (6,381 notices on production, 2026-10-13) while Yahoo alone stood for the history.
+    Each notice now goes through the SAME parser and landing the daily feed uses, then
+    the observation is marked: ACCEPTED (linked to the dividend) or REVIEW (a notice the
+    parser refuses, e.g. a percentage of face value). Only securities registered here
+    are read; a notice for one nobody holds stays pending until someone does. No network.
+    Per-notice commit, as the daily feed does."""
+    import json
+
+    from app.ingest.corporate_action_feed import parse_dividend_feed
+
+    counts: dict[str, int] = {"landed": 0, "unparseable": 0, "failed": 0}
+    pending = conn.execute(
+        "SELECT o.id, o.raw_payload FROM corporate_action_observation o "
+        "JOIN security s ON s.isin = o.isin "
+        "WHERE o.provider = 'NSE' AND o.classification = 'DIVIDEND' "
+        "AND o.result = 'PENDING' AND o.reason_code = 'AWAITING_PARSER' ORDER BY o.ex_date"
+    ).fetchall()
+    for obs_id, raw in pending:
         try:
-            outcome = upsert_declared_dividend(conn, candidate, actor_uid=actor_uid)
+            rows = parse_dividend_feed(json.dumps([raw]).encode())
+            if not rows:
+                conn.execute(
+                    "UPDATE corporate_action_observation SET result = 'REVIEW', "
+                    "reason_code = 'UNPARSEABLE_DIVIDEND' WHERE id = %s",
+                    (obs_id,),
+                )
+                conn.commit()
+                counts["unparseable"] += 1
+                continue
+            _, ids = _land_nse_notice(conn, rows, actor_uid)
+            conn.execute(
+                "UPDATE corporate_action_observation SET result = 'ACCEPTED', "
+                "reason_code = 'LANDED', dividend_id = %s WHERE id = %s",
+                (ids[0] if ids else None, obs_id),
+            )
             conn.commit()
-            counts[outcome] = counts.get(outcome, 0) + 1
+            counts["landed"] += 1
         except Exception:
             conn.rollback()
-            logger.warning(
-                "dividend candidate failed for isin=%s ex_date=%s -- skipped, not aborting "
-                "the run", row.isin, row.ex_date, exc_info=True,
-            )
-            counts["failed"] = counts.get("failed", 0) + 1
-
-    if counts.get("failed"):
-        from app.ingest.action_source import ActionIngestionError
-        raise ActionIngestionError(f"{counts['failed']} dividend observations failed processing")
-    return {"fetched": len(rows), **counts}
+            logger.warning("stored NSE dividend notice %s failed", obs_id, exc_info=True)
+            counts["failed"] += 1
+    return counts
 
 
 def discover_dividends_from_yfinance(

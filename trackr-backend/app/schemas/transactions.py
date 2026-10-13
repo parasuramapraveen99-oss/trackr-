@@ -194,6 +194,8 @@ class ExpectedDividendsOut(BaseModel):
     expected: list[ExpectedDividendOut]
     unprojectable: list[UnprojectableDividendOut]
     total_gross_expected: str
+    #: Fund-unit ISINs (INF...) left out of dividend tracking -- named, not hidden.
+    excluded_fund_units: list[str] = []
 
 
 class RefreshDividendFeedOut(BaseModel):
@@ -253,3 +255,6 @@ class ReconcileDividendsOut(BaseModel):
     self_check_implausible: int = 0
     self_check_ambiguous: int = 0
     self_check_already_verified: int = 0
+    #: Stored NSE notices from the month sweep landed as dividends, and refused ones.
+    stored_notices_landed: int = 0
+    stored_notices_unparseable: int = 0

@@ -190,6 +190,19 @@ def later_share_multiplier(actions: Iterable[CorporateAction], ex_date: date) ->
     return factor
 
 
+def rights_price_factor(
+    new: int, per_held: int, issue_price: Decimal, cum_close: Decimal
+) -> Decimal | None:
+    """The price-adjustment factor of a rights issue: theoretical ex-rights price over the
+    cum-rights close, ``(cum*per_held + issue*new) / ((per_held+new) * cum)``. Yahoo scales
+    every earlier dividend by exactly this (checked live, 2026-10-13: SOUTHBANK 0.918598,
+    ADANIENT 0.969485). ``None`` when the issue is not below the market price -- such an
+    issue carries no value to adjust for, and no factor is guessed."""
+    if cum_close <= ZERO or issue_price <= ZERO or issue_price >= cum_close:
+        return None
+    return (cum_close * per_held + issue_price * new) / ((per_held + new) * cum_close)
+
+
 def restated_amount(amount: Decimal, factor: Fraction) -> Decimal:
     """``amount`` times ``factor``, in exact Decimal arithmetic (never float)."""
     return amount * Decimal(factor.numerator) / Decimal(factor.denominator)

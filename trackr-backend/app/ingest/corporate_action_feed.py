@@ -398,6 +398,54 @@ _MAX_ATTRIBUTABLE_AMOUNTS = 3
 _JEV_CONFIDENCE_FLOOR = Decimal("0.5")
 
 
+def _slash_pairs(subject: str) -> list[tuple[Decimal, str]] | None:
+    """NSE writes several dividends in one notice as "/"-separated parts -- "Dividend - Rs
+    30 Per Share/Special Dividend - Rs 20 Per Share" (INDIAMART 2025-06-06). When EVERY part
+    that carries an amount carries exactly one amount, at most one kind and the word
+    "dividend", the text itself pairs each amount with its kind: no ordering inference,
+    which is what refusal 2 exists to avoid (owner decision 2026-10-13). A part with no
+    amount ("Annual General Meeting") is context. Two parts of one kind, or fewer than
+    two dividends, is not this shape -> None, and the ordinary refusals apply."""
+    pairs: list[tuple[Decimal, str]] = []
+    for part in subject.split("/"):
+        amounts = _valid_amounts(_DIVIDEND_AMOUNT_RE.findall(part))
+        if not amounts:
+            continue
+        kinds = [name for name, pattern in _DIVIDEND_KINDS if pattern.search(part)]
+        if len(amounts) != 1 or len(kinds) > 1 or not _DIVIDEND_RE.search(part):
+            return None
+        pairs.append((amounts[0], kinds[0] if kinds else "UNSPECIFIED"))
+    kinds_named = [kind for _, kind in pairs]
+    if len(pairs) < 2 or len(set(kinds_named)) != len(kinds_named):
+        return None
+    return pairs
+
+
+#: "Rights 3:25 @ Premium Rs 1799/-", "Rights 1:2@ Premium Re 1/-" -- the only shape NSE's
+#: corporate-actions feed has been seen to use (checked across the 2022-2026 sweep).
+_RIGHTS_RE = re.compile(
+    r"^\s*rights\s+(\d+)\s*:\s*(\d+)\s*@\s*premium\s+r[se]\.?\s*(\d+(?:\.\d+)?)\s*/-\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_rights_subject(subject: str, face_value: str) -> tuple[int, int, Decimal] | None:
+    """NSE's rights notice -> ``(new, per_held, issue_price)``: ``new`` shares for every
+    ``per_held`` held, at face value plus premium. ``None`` for any other wording or an
+    unusable face value -- a rights factor is never computed from a guessed term."""
+    match = _RIGHTS_RE.match(subject or "")
+    if match is None:
+        return None
+    try:
+        face = Decimal(str(face_value).strip())
+    except (InvalidOperation, ValueError):
+        return None
+    new, per_held = int(match.group(1)), int(match.group(2))
+    if face <= 0 or new <= 0 or per_held <= 0:
+        return None
+    return new, per_held, face + Decimal(match.group(3))
+
+
 def _valid_amounts(raw_amounts: list[str]) -> list[Decimal]:
     """The regex can match a well-formed but nonsensical figure (a stray "Rs 0" in a
     disclaimer clause). Parsing failure or non-positivity drops that ONE candidate rather
@@ -577,6 +625,8 @@ def parse_dividend_feed(
 
         if len(amounts) == 1 and len(kinds) <= 1:
             pairs = [(amounts[0], kinds[0] if kinds else "UNSPECIFIED")]
+        elif (slash := _slash_pairs(subject)) is not None:
+            pairs = slash  # each "/" part names its own amount and kind -- no inference
         elif len(amounts) == 1:
             attributed = _attribute_with_jev(jev_client, subject, isin, symbol, amounts, kinds)
             if attributed is None:

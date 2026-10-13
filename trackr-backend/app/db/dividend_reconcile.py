@@ -34,6 +34,7 @@ from typing import Any
 from app.db.dividend_events import _NSE_SOURCE_NAME as NSE_FEED_SOURCE
 from app.db.dividend_events import (
     corroborate_dividend_event,
+    land_stored_nse_dividend_notices,
     list_dividend_events,
     recheck_automatic_disputes,
 )
@@ -89,10 +90,21 @@ def _nse_self_check(conn: Any, event: Any, aliases: dict[str, str]) -> str:
     same_day = list_dividend_events(
         conn, isins=sorted(family), ex_date_from=event.ex_date, ex_date_to=event.ex_date
     )
-    if any(e.verification is Verification.VERIFIED for e in same_day):
-        return "self_check_already_verified"
-    if sum(1 for e in same_day if e.source == NSE_FEED_SOURCE) != 1:
+
+    def notice_of(e: Any) -> str:
+        # The notice's subject is the first line of an NSE row's notes; later lines are
+        # this system's own annotations (NSE-ONLY:, RESTATED:).
+        return (e.notes or "").split("\n", 1)[0].strip()
+
+    nse_rows = [e for e in same_day if e.source == NSE_FEED_SOURCE]
+    # One NOTICE, not one row: a "/"-separated notice lands one row per part (owner
+    # decision 2026-10-13), and its parts are verified together.
+    notices = {notice_of(e) for e in nse_rows}
+    if len(nse_rows) != 1 and (len(notices) != 1 or "" in notices):
         return "self_check_ambiguous"
+    siblings = {e.id for e in nse_rows}
+    if any(e.verification is Verification.VERIFIED and e.id not in siblings for e in same_day):
+        return "self_check_already_verified"
     row = conn.execute(
         "SELECT price_date, close FROM price WHERE isin = %s AND source = 'NSE_BHAVCOPY' "
         "AND price_date BETWEEN %s AND %s ORDER BY price_date DESC LIMIT 1",
@@ -176,6 +188,11 @@ def reconcile_pending_dividends(
     feed = feed_source or nse_corporate_action_feed()
     bhav = bhav_source or nse_source()
     counts: Counter[str] = Counter()
+    # NSE's own past notices, stored by the month sweep but never landed (2026-10-13).
+    # No network. Landed first so the recheck and self-check below can act on them.
+    landed = land_stored_nse_dividend_notices(conn)
+    counts["stored_notices_landed"] = landed["landed"]
+    counts["stored_notices_unparseable"] = landed["unparseable"]
     # Automatic amount disputes that a bonus/split recorded since now explains (Yahoo's
     # scaled figure vs NSE's as-declared one). No network: the readings are on file.
     recheck = recheck_automatic_disputes(conn)
