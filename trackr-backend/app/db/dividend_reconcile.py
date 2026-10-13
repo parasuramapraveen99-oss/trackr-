@@ -32,7 +32,11 @@ from datetime import date, timedelta
 from typing import Any
 
 from app.db.dividend_events import _NSE_SOURCE_NAME as NSE_FEED_SOURCE
-from app.db.dividend_events import corroborate_dividend_event, list_dividend_events
+from app.db.dividend_events import (
+    corroborate_dividend_event,
+    list_dividend_events,
+    recheck_automatic_disputes,
+)
 from app.db.security_alias import verified_map
 from app.engine.corporate_actions import Verification
 
@@ -40,6 +44,87 @@ logger = logging.getLogger(__name__)
 
 SOURCE_PREFIX = "NSE corporate actions, ISIN via NSE bhavcopy"
 _SESSION_LOOKBACK_DAYS = 5
+#: What ``corroborated_by`` names when NSE's notice was verified against NSE's own
+#: bhavcopy rather than a second publisher (owner decision 2026-10-13).
+NSE_SELF_CHECK_SOURCE = "NSE bhavcopy (self-check)"
+#: The UDiFF bhavcopy replaced the legacy archive from this session on.
+_UDIFF_FROM = date(2024, 7, 8)
+
+
+def _bhavcopy_url(on: date) -> str:
+    from app.prices.sources import LEGACY_NSE_URL, NSE_URL
+
+    if on >= _UDIFF_FROM:
+        return NSE_URL.format(d=on)
+    return LEGACY_NSE_URL.format(d=on, mon=on.strftime("%b").upper())
+
+
+def _nse_self_check(conn: Any, event: Any, aliases: dict[str, str]) -> str:
+    """Verify an NSE dividend notice from NSE's own records -- no second publisher.
+
+    NSE is the exchange, the authoritative source; what can be wrong is THIS SYSTEM's
+    reading of its notice (an amount parsed out of free text, an ISIN NSE kept after a
+    split, two dividends on one date). Each of those is checked against NSE's own
+    bhavcopy, already stored as ``price`` rows with source ``NSE_BHAVCOPY``:
+
+      1. Identity -- the notice's ISIN traded on NSE in the ex-date session (or the
+         nearest earlier one within ``_SESSION_LOOKBACK_DAYS``). A stale ISIN did not.
+      2. Plausibility -- the amount against that close (``check_amount_plausible``): a
+         misread decimal point is refused.
+      3. One dividend -- the only NSE notice for this issuer's ISIN family that day; an
+         interim and a special together are left for a human.
+      4. Not already covered -- no VERIFIED event for this issuer that day, so one
+         dividend is never projected twice.
+
+    Passing all four makes the event VERIFIED with ``corroborated_by`` naming the
+    self-check and the bhavcopy URL as evidence. This still unlocks only a PROJECTION,
+    never a ledger row (ARCHITECTURE_INVARIANTS #18, #19). Returns the outcome counted."""
+    from datetime import timedelta as _td
+
+    from app.db import audit
+    from app.engine.dividend_events import check_amount_plausible
+
+    terminal = aliases.get(event.isin, event.isin)
+    family = {event.isin, terminal} | {old for old, new in aliases.items() if new == terminal}
+    same_day = list_dividend_events(
+        conn, isins=sorted(family), ex_date_from=event.ex_date, ex_date_to=event.ex_date
+    )
+    if any(e.verification is Verification.VERIFIED for e in same_day):
+        return "self_check_already_verified"
+    if sum(1 for e in same_day if e.source == NSE_FEED_SOURCE) != 1:
+        return "self_check_ambiguous"
+    row = conn.execute(
+        "SELECT price_date, close FROM price WHERE isin = %s AND source = 'NSE_BHAVCOPY' "
+        "AND price_date BETWEEN %s AND %s ORDER BY price_date DESC LIMIT 1",
+        (event.isin, event.ex_date - _td(days=_SESSION_LOOKBACK_DAYS), event.ex_date),
+    ).fetchone()
+    if row is None:
+        return "self_check_identity_unproven"
+    session, close = row
+    if check_amount_plausible(event, close) is not None:
+        return "self_check_implausible"
+
+    url = _bhavcopy_url(session)
+    note = (
+        f"{event.notes or ''}\nNSE-ONLY: verified from NSE's own records -- {event.isin} "
+        f"traded on NSE on {session} (close {close}); amount plausible; sole notice that day"
+    ).strip()
+    conn.execute(
+        "UPDATE dividend_event SET corroborated_by = %s, corroborated_url = %s, "
+        "verification = %s, notes = %s WHERE id = %s",
+        (NSE_SELF_CHECK_SOURCE, url, Verification.VERIFIED.value, note, event.id),
+    )
+    audit.record(
+        conn, audit.ACTION_DIVIDEND_EVENT_CORROBORATED, "dividend_event", event.id, None,
+        {
+            "isin": event.isin,
+            "corroborated_by": NSE_SELF_CHECK_SOURCE,
+            "session": session.isoformat(),
+            "close": str(close),
+            "amount_per_share": str(event.amount_per_share),
+        },
+    )
+    return "nse_self_checked"
 
 
 def _pending(conn: Any) -> list[Any]:
@@ -90,8 +175,14 @@ def reconcile_pending_dividends(
 
     feed = feed_source or nse_corporate_action_feed()
     bhav = bhav_source or nse_source()
-    aliases = verified_map(conn)
     counts: Counter[str] = Counter()
+    # Automatic amount disputes that a bonus/split recorded since now explains (Yahoo's
+    # scaled figure vs NSE's as-declared one). No network: the readings are on file.
+    recheck = recheck_automatic_disputes(conn)
+    conn.commit()
+    counts["disputes_rechecked"] = recheck["rechecked"]
+    counts["disputes_restated"] = recheck["verified"]
+    aliases = verified_map(conn)
     feed_by_month: dict[tuple[int, int], list[Any]] = {}
 
     pending = sorted(_pending(conn), key=lambda e: e.ex_date, reverse=True)
@@ -99,9 +190,17 @@ def reconcile_pending_dividends(
     for event in pending[:max_events]:
         if event.source == NSE_FEED_SOURCE:
             # NSE's own row cannot be corroborated by NSE's feed read a second time --
-            # two reads of one feed are one observation. Its independent twin (usually
-            # yfinance under an older ISIN) is what gets corroborated instead.
+            # two reads of one feed are one observation. It is instead checked against
+            # NSE's own bhavcopy (owner decision 2026-10-13; see _nse_self_check).
             counts["nse_sourced"] += 1
+            try:
+                outcome = _nse_self_check(conn, event, aliases)
+                conn.commit()
+                counts[outcome] += 1
+            except Exception:
+                conn.rollback()
+                logger.warning("NSE self-check failed for dividend %s", event.id, exc_info=True)
+                counts["failed"] += 1
             continue
         terminal = aliases.get(event.isin, event.isin)
         month = (event.ex_date.year, event.ex_date.month)

@@ -36,15 +36,17 @@ so corroboration here is cross-source instead -- with the honest caveat
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
+from fractions import Fraction
 
 # Reused, never re-declared: this system has one vocabulary for how much a reference
 # record is trusted, shared by corporate_action, security_alias and dividend_event. A
 # parallel three-state enum would be two standards of evidence pretending to be one.
-from app.engine.corporate_actions import Verification
+from app.engine.corporate_actions import CorpActionType, CorporateAction, Verification
 
 ZERO = Decimal("0")
 
@@ -156,6 +158,43 @@ def amounts_agree(left: Decimal, right: Decimal) -> bool:
     )
 
 
+#: The actions Yahoo scales past dividends by: the ones that change the share count.
+#: (A DEMERGER leaves the parent's count alone; a rights issue's factor depends on the
+#: cum-rights price, which this rule deliberately does not reconstruct.)
+SHARE_COUNT_ACTIONS = (CorpActionType.BONUS, CorpActionType.SPLIT)
+
+
+def later_share_multiplier(actions: Iterable[CorporateAction], ex_date: date) -> Fraction:
+    """Shares now per share held on ``ex_date``: the product of the multipliers of every
+    VERIFIED, uncancelled bonus/split dated strictly AFTER it (owner decision 2026-10-13).
+
+    Yahoo serves a past dividend divided by exactly this factor; NSE serves it as
+    declared. Multiplying Yahoo's figure back by it is what lets the two be compared at
+    all. DRAFT actions never count -- an unproven ratio would turn a real conflict into a
+    false agreement -- and neither does an action ON the dividend's ex-date, whose order
+    relative to the dividend the record cannot tell. One action filed under both its old
+    and its new ISIN is one action, counted once."""
+    factor = Fraction(1)
+    seen: set[tuple[CorpActionType, date]] = set()
+    for action in actions:
+        if (
+            action.action_type not in SHARE_COUNT_ACTIONS
+            or action.verification is not Verification.VERIFIED
+            or action.cancelled
+            or action.ex_date <= ex_date
+            or (action.action_type, action.ex_date) in seen
+        ):
+            continue
+        seen.add((action.action_type, action.ex_date))
+        factor *= action.multiplier()
+    return factor
+
+
+def restated_amount(amount: Decimal, factor: Fraction) -> Decimal:
+    """``amount`` times ``factor``, in exact Decimal arithmetic (never float)."""
+    return amount * Decimal(factor.numerator) / Decimal(factor.denominator)
+
+
 def check_sourced(event: DividendEvent) -> GuardFailure | None:
     """Provenance exists. Identical in spirit and in weakness to
     ``app.engine.corporate_actions.check_sourced`` -- it tests that two strings are
@@ -225,6 +264,12 @@ def check_cross_sourced(event: DividendEvent) -> GuardFailure | None:
       - A human verifying an event by hand is a THIRD, stronger path, because a person can
         read the company's own filing. That is why ``verify_dividend_event`` exists and
         does not require this guard to pass.
+      - NSE's notice checked against NSE's own bhavcopy is a FOURTH path (owner decision
+        2026-10-13: NSE is the authoritative source; what needs checking is this system's
+        READING of it). ``corroborated_by`` then names ``NSE bhavcopy (self-check)``, which
+        is not a second publisher of the amount: it proves the ISIN traded that session
+        and that the amount is plausible against the close. See
+        ``app.db.dividend_reconcile._nse_self_check`` for the four conditions.
       - Should a third source ever be added, it does not make this argument stronger by
         arithmetic. Whether it is genuinely separate in ORIGIN is the only question that
         matters, and it has to be answered in writing, here, before it counts.

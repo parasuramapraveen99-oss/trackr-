@@ -266,6 +266,10 @@ def corroborate_dividend_event(
         return event.verification  # the same corroboration, reported again -- nothing new
 
     if not amounts_agree(amount_per_share, event.amount_per_share):
+        restated = _restated_agreement(conn, event, source, amount_per_share)
+        if restated is not None:
+            _verify_restated(conn, event, source, source_url, amount_per_share, restated, actor_uid)
+            return Verification.VERIFIED
         note = (
             f"{event.notes}\nAMOUNT_CONFLICT: {event.source} reports "
             f"{event.amount_per_share}/share, {source} reports {amount_per_share}/share"
@@ -283,6 +287,7 @@ def corroborate_dividend_event(
                 "reported": str(amount_per_share),
                 "on_file": str(event.amount_per_share),
                 "reported_by": source,
+                "reported_url": source_url,
             },
         )
         return Verification.DISPUTED
@@ -301,6 +306,144 @@ def corroborate_dividend_event(
         {"isin": event.isin, "corroborated_by": source, "amount_per_share": str(amount_per_share)},
     )
     return Verification.VERIFIED
+
+
+def _restated_agreement(
+    conn: Any, event: DividendEvent, source: str, amount_per_share: Decimal
+) -> tuple[Decimal, Decimal, Any] | None:
+    """``(declared, yahoo, factor)`` when Yahoo's reading, multiplied back by the VERIFIED
+    bonuses/splits dated after the dividend, agrees with the other source's as-declared
+    reading; else ``None`` (owner decision 2026-10-13, docs/ENGINE_SPEC.md).
+
+    Yahoo divides past dividends by later share-count actions; NSE does not. Only Yahoo is
+    restated, and only when it is exactly one of the two sources -- two other sources
+    disagreeing is a real conflict, never explained away by a ratio."""
+    from app.db.corporate_actions import list_corporate_actions
+    from app.db.security_alias import verified_map
+    from app.engine.dividend_events import later_share_multiplier, restated_amount
+    from app.ingest.corporate_action_yfinance import YFINANCE_SOURCE_NAME
+
+    if (source == YFINANCE_SOURCE_NAME) == (event.source == YFINANCE_SOURCE_NAME):
+        return None
+    if source == YFINANCE_SOURCE_NAME:
+        yahoo, declared = amount_per_share, event.amount_per_share
+    else:
+        yahoo, declared = event.amount_per_share, amount_per_share
+
+    # The issuer's whole ISIN family: a split often changes the ISIN, and the action may
+    # be filed under the old identifier while the dividend sits under the new one.
+    aliases = verified_map(conn)
+    terminal = aliases.get(event.isin, event.isin)
+    family = {event.isin, terminal} | {old for old, new in aliases.items() if new == terminal}
+    actions = list_corporate_actions(conn, isins=sorted(family), verification=Verification.VERIFIED)
+    factor = later_share_multiplier(actions, event.ex_date)
+    if factor == 1 or not amounts_agree(restated_amount(yahoo, factor), declared):
+        return None
+    return declared, yahoo, factor
+
+
+def _verify_restated(
+    conn: Any,
+    event: DividendEvent,
+    source: str,
+    source_url: str,
+    amount_per_share: Decimal,
+    restated: tuple[Decimal, Decimal, Any],
+    actor_uid: str | None,
+) -> None:
+    """VERIFIED at the AS-DECLARED amount. When Yahoo created the row, its stored amount is
+    Yahoo's scaled figure, which would project a fraction of the real dividend -- so the
+    declared amount replaces it, and the note keeps Yahoo's raw reading and the factor."""
+    declared, yahoo, factor = restated
+    note = (
+        f"{event.notes or ''}\nRESTATED: Yahoo reported {yahoo}/share, scaled by later "
+        f"bonuses/splits (x{factor}); as declared {declared}/share"
+    ).strip()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE dividend_event
+               SET corroborated_by = %s, corroborated_url = %s, verification = %s,
+                   amount_per_share = %s, notes = %s
+             WHERE id = %s
+            """,
+            (source, source_url, Verification.VERIFIED.value, declared, note, event.id),
+        )
+    audit.record(
+        conn, audit.ACTION_DIVIDEND_EVENT_CORROBORATED, "dividend_event", event.id, actor_uid,
+        {
+            "isin": event.isin,
+            "corroborated_by": source,
+            "amount_per_share": str(amount_per_share),
+            "restated": {"yahoo": str(yahoo), "factor": str(factor), "declared": str(declared)},
+        },
+    )
+
+
+def _reported_amount(diff: dict, notes: str, reporter: str) -> Decimal | None:
+    """The disputing source's amount: from the audit row, or -- for disputes recorded
+    before the audit row carried it -- from the ``AMOUNT_CONFLICT`` line this module
+    itself wrote ("<source> reports <amount>/share"). None when neither has it."""
+    import re
+
+    if diff.get("reported") is not None:
+        return Decimal(diff["reported"])
+    found = re.findall(rf"{re.escape(reporter)} reports ([0-9]+(?:\.[0-9]+)?)/share", notes)
+    return Decimal(found[-1]) if found else None
+
+
+def recheck_automatic_disputes(conn: Any) -> dict[str, int]:
+    """Re-run the restated comparison on every dividend that AUTOMATION disputed for an
+    amount conflict -- never one a human disputed (``"manual": true`` in its audit row).
+
+    Why this exists: a dividend often lands before the bonus or split that explains
+    Yahoo's figure is recorded (a new user's history is swept month by month), so the
+    comparison that disputed it had no factor to apply. The original readings are in the
+    dispute's audit row; nothing is re-fetched."""
+    from app.ingest.corporate_action_yfinance import YFINANCE_SOURCE_NAME
+
+    counts = {"rechecked": 0, "verified": 0}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT d.id::text, a.diff_json
+              FROM dividend_event d
+              JOIN LATERAL (
+                    SELECT diff_json FROM audit_log
+                     WHERE entity_type = 'dividend_event' AND entity_id = d.id
+                       AND action = %s
+                     ORDER BY ts DESC LIMIT 1
+                   ) a ON true
+             WHERE d.verification = 'DISPUTED'
+            """,
+            (audit.ACTION_DIVIDEND_EVENT_DISPUTED,),
+        )
+        rows = cur.fetchall()
+    for event_id, diff in rows:
+        if not diff or diff.get("manual") or diff.get("reason") != "AMOUNT_CONFLICT":
+            continue
+        counts["rechecked"] += 1
+        event = get_dividend_event(conn, event_id)
+        reporter = diff["reported_by"]
+        reported = _reported_amount(diff, event.notes or "", reporter)
+        if reported is None:
+            continue  # the reading cannot be recovered exactly -- leave it DISPUTED
+        restated = _restated_agreement(conn, event, reporter, reported)
+        if restated is None:
+            continue
+        # Disputes recorded before the reporter's URL was kept: Yahoo's is derived from
+        # the symbol exactly as discovery builds it; anything else is NSE's filings page.
+        url = diff.get("reported_url")
+        if not url and reporter == YFINANCE_SOURCE_NAME:
+            row = conn.execute(
+                "SELECT symbol FROM security WHERE isin = %s", (event.isin,)
+            ).fetchone()
+            if row and row[0]:
+                url = f"https://finance.yahoo.com/quote/{row[0]}.NS/history"
+        url = url or _NSE_SOURCE_URL
+        _verify_restated(conn, event, reporter, url, reported, restated, None)
+        counts["verified"] += 1
+    return counts
 
 
 def verify_dividend_event(
@@ -454,7 +597,12 @@ def _classify_and_corroborate(
     if event.verification is Verification.DISPUTED:
         return OUTCOME_CONFLICT  # a human's rejection stands; do not re-dispute it daily
 
+    restated = None
     if not amounts_agree(candidate.amount_per_share, event.amount_per_share):
+        # Yahoo's row often arrives first carrying its scaled figure; the NSE notice that
+        # labels it may still agree once later bonuses/splits are multiplied back.
+        restated = _restated_agreement(conn, event, candidate.source, candidate.amount_per_share)
+    if restated is None and not amounts_agree(candidate.amount_per_share, event.amount_per_share):
         note = (
             f"{event.notes}\nAMOUNT_CONFLICT: {event.source} reports "
             f"{event.amount_per_share}/share, {candidate.source} reports "
@@ -467,7 +615,13 @@ def _classify_and_corroborate(
             )
         audit.record(
             conn, audit.ACTION_DIVIDEND_EVENT_DISPUTED, "dividend_event", event.id, actor_uid,
-            {"isin": event.isin, "reason": "AMOUNT_CONFLICT", "reported_by": candidate.source},
+            {
+                "isin": event.isin,
+                "reason": "AMOUNT_CONFLICT",
+                "reported_by": candidate.source,
+                "reported": str(candidate.amount_per_share),
+                "reported_url": candidate.source_url,
+            },
         )
         return OUTCOME_CONFLICT
 
@@ -498,6 +652,12 @@ def _classify_and_corroborate(
             "corroborated_by": candidate.source,
         },
     )
+    if restated is not None:
+        # Labelled and verified above; now record the as-declared amount and why.
+        _verify_restated(
+            conn, event, candidate.source, candidate.source_url, candidate.amount_per_share,
+            restated, actor_uid,
+        )
     return OUTCOME_CLASSIFIED
 
 

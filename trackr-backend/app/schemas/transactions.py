@@ -243,3 +243,13 @@ class ReconcileDividendsOut(BaseModel):
     identity_unproven: int = 0
     nse_sourced: int = 0
     failed: int = 0
+    #: Automatic amount disputes re-checked against later bonuses/splits, and how many of
+    #: them that verified (Yahoo's scaled figure restated -- app.db.dividend_events).
+    disputes_rechecked: int = 0
+    disputes_restated: int = 0
+    #: NSE notices verified from NSE's own bhavcopy, and why the rest were not.
+    nse_self_checked: int = 0
+    self_check_identity_unproven: int = 0
+    self_check_implausible: int = 0
+    self_check_ambiguous: int = 0
+    self_check_already_verified: int = 0
