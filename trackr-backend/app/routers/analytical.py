@@ -1338,8 +1338,11 @@ def _catch_up_start(connection: Any, target: date) -> date | None:
                JOIN account a ON a.id = t.account_id GROUP BY a.investor_id"""
         )
         first_trade = dict(cur.fetchall())
-        cur.execute("SELECT investor_id, min(as_of) FROM portfolio_snapshot GROUP BY investor_id")
-        first_snapshot = dict(cur.fetchall())
+        cur.execute(
+            "SELECT investor_id, min(as_of), max(as_of) FROM portfolio_snapshot "
+            "GROUP BY investor_id"
+        )
+        stored = {inv: (first, last) for inv, first, last in cur.fetchall()}
         cur.execute("SELECT max(as_of) FROM portfolio_snapshot")
         latest = cur.fetchone()[0]
 
@@ -1349,8 +1352,15 @@ def _catch_up_start(connection: Any, target: date) -> date | None:
         days = trading_days(need_from, target) if need_from <= target else []
         if not days:
             continue
-        have = first_snapshot.get(investor_id)
-        if have is None or have > days[0]:
+        have_first, have_last = stored.get(investor_id, (None, None))
+        if have_first is None or have_first > days[0]:
             starts.append(days[0])
+        elif have_last < days[-1]:
+            # This investor's own series stopped short -- a budgeted catch-up ran out of
+            # time partway (2026-10-13: a new account stuck at 27 Feb 2025 while another
+            # account's rows were current, so the global newest row hid the gap forever).
+            later = [d for d in days if d > have_last]
+            if later:
+                starts.append(later[0])
     start = min(starts)
     return start if start <= target else None
