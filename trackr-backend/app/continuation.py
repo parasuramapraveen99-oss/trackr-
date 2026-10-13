@@ -71,6 +71,40 @@ def follow_up(settings: Any, path_and_query: str) -> bool:
     return True
 
 
+#: How long a promote waits to hand its cycle to another request. The continue route's
+#: reply arrives only when its cycle ends (see start_cycle_elsewhere), so this is the
+#: wait before the promote stops listening, not a deadline for the cycle.
+START_TIMEOUT_SECONDS = 3.0
+
+
+def start_cycle_elsewhere(settings: Any) -> bool:
+    """Run the first post-import cycle in ANOTHER request; True when it is running there.
+
+    WHY (2026-10-13). On Vercel a FastAPI background task does not run after the response
+    is sent: the response is held until the task ends. A promote that scheduled the cycle
+    as its own background task therefore lasted as long as the cycle, and for a fresh
+    account that passed Vercel's 300 s limit -- the client got a 5xx although the trades
+    were committed, and onboarding stopped after the first file. Asking this deployment's
+    ``/ops/cycle/continue?hop=0`` runs the cycle in its own invocation instead.
+
+    The continue route only answers when its cycle has finished, so a read TIMEOUT here
+    means the other request was accepted and is running: success. A refusal, an
+    unreachable deployment, or no configured address/secret returns False, and the caller
+    falls back to running the cycle itself."""
+    base = _base_url(settings)
+    secret = getattr(settings, "cron_secret", None)
+    if not base or not secret:
+        return False
+    try:
+        _send(f"{base}/ops/cycle/continue?hop=0", secret, timeout=START_TIMEOUT_SECONDS)
+    except TimeoutError:
+        return True
+    except Exception:
+        logger.warning("cycle_start_elsewhere_failed", exc_info=True)
+        return False
+    return True
+
+
 def _base_url(settings: Any) -> str | None:
     explicit = getattr(settings, "self_base_url", None)
     if explicit:
@@ -80,7 +114,7 @@ def _base_url(settings: Any) -> str | None:
     return f"https://{host.strip('/')}" if host else None
 
 
-def _send(url: str, secret: str) -> None:
+def _send(url: str, secret: str, timeout: float = SEND_TIMEOUT_SECONDS) -> None:
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {secret}"})
-    with urllib.request.urlopen(request, timeout=SEND_TIMEOUT_SECONDS) as response:  # noqa: S310
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
         response.read()

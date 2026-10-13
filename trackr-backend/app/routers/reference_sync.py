@@ -106,7 +106,8 @@ def cron(conn: Any = Depends(get_conn), settings: Settings = Depends(get_setting
 @router.get("/ops/cycle/continue", status_code=202, dependencies=[Depends(require_cron_secret)])
 def continue_cycle(
     background_tasks: BackgroundTasks,
-    hop: int = Query(default=1, ge=1),
+    # 0 is a promote handing over its first cycle (app.continuation.start_cycle_elsewhere).
+    hop: int = Query(default=1, ge=0),
     settings: Settings = Depends(get_settings),
 ) -> dict:
     """The next link of a catch-up chain (``app.continuation``). Answers 202 at once and

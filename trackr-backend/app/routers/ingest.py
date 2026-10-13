@@ -800,9 +800,16 @@ def promote_stage(
         # tomorrow's cron (owner decision 2026-10-08) -- and fetch any F&O contract-master
         # day this batch's F&O rows are waiting on. Runs after the response is sent;
         # the import screen continues it via POST /investors/{id}/sync. See app.post_import.
-        from app.post_import import run_cycle_in_own_connection
+        #
+        # On Vercel a background task holds the response until it ends, so a long cycle
+        # made this promote answer 5xx after its trades were committed (2026-10-13). The
+        # cycle is handed to another request; only if that cannot start does it run here.
+        from app.continuation import start_cycle_elsewhere
 
-        background_tasks.add_task(run_cycle_in_own_connection, settings)
+        if not start_cycle_elsewhere(settings):
+            from app.post_import import run_cycle_in_own_connection
+
+            background_tasks.add_task(run_cycle_in_own_connection, settings)
     return {
         "inserted": summary.inserted,
         "skipped_duplicates": summary.skipped_duplicates,

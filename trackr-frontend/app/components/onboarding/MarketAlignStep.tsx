@@ -92,11 +92,19 @@ export function MarketAlignStep({
         update("promote", { state: "running" });
         let inserted = 0;
         for (const batchId of batchIds) {
-          const summary = await api.post<{ inserted: number }>(
-            `/ingest/stage/${batchId}/promote`,
-            { token }
-          );
-          inserted += summary.inserted;
+          try {
+            const summary = await api.post<{ inserted: number }>(
+              `/ingest/stage/${batchId}/promote`,
+              { token }
+            );
+            inserted += summary.inserted;
+          } catch (err) {
+            // A promote can fail to ANSWER after its trades were committed (a long
+            // post-import cycle ran past Vercel's limit, 2026-10-13). Ask what actually
+            // happened before giving up: a batch already in the ledger is done, and the
+            // files after it still need adding.
+            if (!(await wasPromoted(batchId, token))) throw err;
+          }
         }
         update("promote", {
           state: "done",
@@ -263,6 +271,15 @@ function Spinner() {
       <style>{"@keyframes trackr-spin { to { transform: rotate(360deg); } }"}</style>
     </>
   );
+}
+
+async function wasPromoted(batchId: string, token: string | null): Promise<boolean> {
+  try {
+    const batch = await api.get<{ status: string }>(`/ingest/stage/${batchId}`, { token });
+    return batch.status === "PROMOTED";
+  } catch {
+    return false;
+  }
 }
 
 function friendly(err: unknown): string {

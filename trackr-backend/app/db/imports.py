@@ -481,7 +481,10 @@ def stage_batch(
 
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id FROM import_batch WHERE sha256 = %s AND account_id = %s",
+            # A DISCARDED batch does not block the file (migration 080): discarding ends
+            # that batch, it does not ban the bytes from ever being staged again.
+            "SELECT id FROM import_batch WHERE sha256 = %s AND account_id = %s "
+            "AND status <> 'DISCARDED'",
             (digest, account_id),
         )
         existing = cur.fetchone()
