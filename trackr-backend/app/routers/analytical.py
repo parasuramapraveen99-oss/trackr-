@@ -672,6 +672,45 @@ def list_snapshots(
     return result
 
 
+@router.get(
+    "/investors/{investor_id}/snapshots/status",
+    dependencies=[Depends(require_owned_investor)],
+)
+def snapshot_status(
+    investor_id: str,
+    advised_only: bool = False,
+    connection: Any = Depends(get_conn),
+) -> dict[str, Any]:
+    """Cheap chart progress: never replay a ledger or contact a price provider."""
+    with connection.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), max(computed_at) FROM portfolio_snapshot "
+            "WHERE investor_id=%s AND advised_only=%s",
+            (investor_id, advised_only),
+        )
+        count, computed = cur.fetchone()
+        cur.execute(
+            """SELECT EXISTS (
+                   SELECT 1 FROM reference_sync_dependency d
+                   JOIN account a ON a.id=d.account_id
+                   JOIN reference_sync_task t USING (kind,task_key)
+                   WHERE a.investor_id=%s AND t.state <> 'done'
+                     AND t.kind IN ('REPLAY','GAP','SNAPSHOT')
+               ) OR EXISTS (
+                   SELECT 1 FROM reference_sync_import r JOIN account a ON a.id=r.account_id
+                   WHERE a.investor_id=%s
+                     AND (r.scheduled_at IS NULL OR r.requested_at > r.scheduled_at)
+               )""",
+            (investor_id, investor_id),
+        )
+        pending = bool(cur.fetchone()[0])
+    return {
+        "version": f"{count}:{computed.isoformat() if computed else ''}",
+        "pending": pending,
+        "points": count,
+    }
+
+
 def _live_snapshot_tail(
     connection: Any,
     investor_id: str,

@@ -167,6 +167,13 @@ export function ValueChartCard() {
   // Today's point is computed live on the server until the day settles, so while the
   // chart is showing today it refreshes on the same two-minute cadence as the summary.
   const isToday = asOf === new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+  const [historyPending, setHistoryPending] = useState(true);
+  const progress = useFetch<{ version: string; pending: boolean; points: number }>(
+    investorId ? `/investors/${investorId}/snapshots/status` : null,
+    undefined,
+    token,
+    { refreshMs: historyPending ? 5_000 : 30_000 },
+  );
   const snapshots = useFetch<SnapshotOut[]>(
     investorId ? `/investors/${investorId}/snapshots` : null,
     { start: HISTORY_START, end: asOf },
@@ -178,6 +185,21 @@ export function ValueChartCard() {
     { start: HISTORY_START, end: asOf },
     token
   );
+  usePortfolioRefresh(progress.refetch);
+  const previousProgress = useRef<{ scope: string; version: string } | null>(null);
+  useEffect(() => {
+    if (!progress.data) return;
+    const scope = `${investorId}:${asOf}`;
+    const previous = previousProgress.current;
+    setHistoryPending(progress.data.pending);
+    previousProgress.current = { scope, version: progress.data.version };
+    if (previous?.scope === scope && previous.version !== progress.data.version) {
+      // Poll only the cheap status while a rebuild runs. Fetch full chart bodies
+      // when stored points actually change, including corrections at the same dates.
+      snapshots.refetch();
+      benchmark.refetch();
+    }
+  }, [progress.data, investorId, asOf, snapshots.refetch, benchmark.refetch]);
 
   /**
    * The market itself, for an account that has no history of its own yet.

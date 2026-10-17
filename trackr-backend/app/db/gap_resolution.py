@@ -135,6 +135,8 @@ def resolve_account_gaps(
     ipo_source: Any = None,
     circulars: Any = None,
     researcher: Any = None,
+    defer_research: bool = False,
+    research_isins: list[str] | None = None,
 ) -> dict[str, Any]:
     """Resolve what can be resolved for one account; report the rest. Commits per row."""
     from app import securities
@@ -151,6 +153,9 @@ def resolve_account_gaps(
 
     transactions = load_transactions(conn, account_id=account_id)
     gaps = find_gaps(transactions)
+    if research_isins is not None:
+        wanted = set(research_isins)
+        gaps = [gap for gap in gaps if gap.isin in wanted]
     if not gaps:
         return {"gaps": 0, "resolved": [], "open": [], "deferred": [], **checked}
     meta = securities.lookup(conn, [g.isin for g in gaps])
@@ -229,6 +234,16 @@ def resolve_account_gaps(
             )
         else:
             leftovers.append((gap, info, refusals))
+
+    # The initial pass commits every structured fix before yielding. A resumed
+    # research claim checks only its target ISIN, including any new structured
+    # evidence that arrived since the checkpoint.
+    if defer_research and researcher is not None:
+        return {
+            "gaps": len(gaps), "resolved": resolved, "open": still_open,
+            "deferred": [], "research_pending": [gap.isin for gap, _, _ in leftovers],
+            **checked,
+        }
 
     # PASS 2 -- research (Exa + LLM) only for what no structured record explained.
     paused: str | None = None

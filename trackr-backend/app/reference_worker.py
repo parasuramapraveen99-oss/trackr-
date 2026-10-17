@@ -374,10 +374,28 @@ def process(conn, kind: str, key: str, payload: dict, settings: Settings) -> dic
         _verify_action(conn, payload["action_id"])
     elif kind == "REPLAY":
         ca.apply_known_actions_for_account(conn, payload["account_id"])
-        _invalidate_snapshots(conn, payload["account_id"])
+        # Source observations can requeue REPLAY without changing this ledger.
+        # Invalidate only when the normalized financial inputs changed, so repeated
+        # checks do not erase a chart that the previous cycle just rebuilt.
+        fingerprint = _ledger_fingerprint(conn, payload["account_id"])
+        changed = payload.get("snapshot_fingerprint") != fingerprint
+        if changed:
+            _invalidate_snapshots(conn, payload["account_id"])
+        payload["snapshot_fingerprint"] = fingerprint
         # Rule 20 (owner amendment 2026-10-08): whatever still does not reconcile after
         # the known actions are applied is a gap for public records to close.
-        queue.enqueue(conn, "GAP", payload["account_id"], payload, refresh=True)
+        gap_payload = {"account_id": payload["account_id"]}
+        queue.enqueue(conn, "GAP", payload["account_id"], gap_payload, refresh=changed)
+        if not changed:
+            with conn.cursor() as cur:
+                # New public observations may explain a previously open gap, but an
+                # unchanged replay must not erase an in-progress research checkpoint
+                # or bypass its source-outage backoff.
+                cur.execute(
+                    """UPDATE reference_sync_task SET state='pending', available_at=now(),
+                           payload=%s::jsonb WHERE kind='GAP' AND task_key=%s AND state='done'""",
+                    (json.dumps(gap_payload), payload["account_id"]),
+                )
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO reference_sync_dependency VALUES (%s,'GAP',%s) ON CONFLICT DO NOTHING",
@@ -386,7 +404,13 @@ def process(conn, kind: str, key: str, payload: dict, settings: Settings) -> dic
     elif kind == "GAP":
         from app.db.gap_resolution import resolve_account_gaps
 
-        result = resolve_account_gaps(conn, payload["account_id"], researcher=_researcher(settings))
+        remaining = payload.get("research_isins")
+        researching = remaining is not None
+        result = resolve_account_gaps(
+            conn, payload["account_id"], researcher=_researcher(settings),
+            defer_research=not researching,
+            research_isins=remaining[:1] if researching else None,
+        )
         if result["resolved"]:
             # New ledger rows: replay so snapshots and every derived figure catch up.
             # Terminates: a replay re-queues GAP, which resolves nothing new the second
@@ -396,6 +420,12 @@ def process(conn, kind: str, key: str, payload: dict, settings: Settings) -> dic
             # What pass 1 fixed is committed; only research waits for the quota to recover.
             conn.commit()
             raise ResearchDeferred(f"{len(result['deferred'])} gap(s) wait for research")
+        pending = remaining[1:] if researching else result.get("research_pending", [])
+        if pending:
+            # One researched security per claim. Yield the worker to snapshots and
+            # other accounts between slow source/model calls. The remaining ISINs
+            # survive a worker restart in the existing durable task payload.
+            return {"account_id": payload["account_id"], "research_isins": pending}
     elif kind == "SNAPSHOT":
         if payload.get("repair"):
             # An interior-hole repair (app.routers.analytical.enqueue_interior_holes). A day
@@ -465,6 +495,27 @@ def _researcher(settings: Settings):
             raise ResearchDeferred(str(exc)) from exc
 
     return run
+
+
+def _ledger_fingerprint(conn, account_id):
+    from app.db.repository import load_transactions
+
+    rows = load_transactions(conn, account_id=account_id)
+    digest = hashlib.sha256()
+    with conn.cursor() as cur:
+        cur.execute("SELECT investor_id::text, is_advised FROM account WHERE id=%s", (account_id,))
+        digest.update(json.dumps(cur.fetchone()).encode())
+    for row in rows:
+        values = {
+            name: getattr(row, name)
+            for name in (
+                "id", "isin", "account_id", "txn_date", "txn_type", "quantity", "price",
+                "charges", "stt", "dividend_amount", "tds_amount", "cost_transfer", "raw_payload",
+            )
+        }
+        digest.update(json.dumps(values, sort_keys=True, default=str).encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def _invalidate_snapshots(conn, account_id):
@@ -596,15 +647,28 @@ def run_once(
                            WHERE state IN ('pending','retry') AND available_at <= now()
                              AND (%s OR kind <> ALL(%s))
                              AND (%s OR kind <> ALL(%s))
-                           -- Derived snapshot rebuilds last: they are cheap, numerous, and
-                           -- only correct once the identity/action work ahead of them is done.
-                           ORDER BY (kind = 'SNAPSHOT'), available_at, kind, task_key
+                           ORDER BY
+                             CASE WHEN %s THEN
+                               CASE WHEN kind IN ('IDENTITY','ACTION','REPLAY','SNAPSHOT')
+                                      OR (kind='GAP' AND NOT (payload ? 'research_isins'))
+                                    THEN 1 ELSE 0 END
+                               ELSE 0 END,
+                             CASE
+                               WHEN kind IN ('IDENTITY','ACTION','REPLAY') THEN 0
+                               WHEN kind='GAP' AND NOT (payload ? 'research_isins') THEN 0
+                               WHEN kind='SNAPSHOT' THEN 1
+                               WHEN kind='GAP' THEN 3
+                               ELSE 2
+                             END,
+                             CASE WHEN kind='SNAPSHOT' THEN payload->>'on' END DESC,
+                             available_at, kind, task_key
                            LIMIT 1 FOR UPDATE SKIP LOCKED""",
                         (
                             settings.nse_api_enabled,
                             list(NSE_TASK_KINDS),
                             allow_amfi,
                             list(AMFI_TASK_KINDS),
+                            claims % 5 == 4,
                         ),
                     )
                     row = cur.fetchone()

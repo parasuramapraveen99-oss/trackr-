@@ -253,6 +253,13 @@ def _catch_up_one(
                 "DELETE FROM fund_snapshot_ledger WHERE investor_id=%s AND advised_only=%s",
                 (investor_id, advised_only),
             )
+            # Identify this rebuild BEFORE committing any points. Otherwise a budget
+            # expiry leaves no fingerprint and the next call deletes its progress.
+            cur.execute(
+                """INSERT INTO fund_snapshot_ledger (investor_id, advised_only, fingerprint)
+                   VALUES (%s,%s,%s)""",
+                (investor_id, advised_only, print_),
+            )
             result.rebuilt_series += 1
         cur.execute(
             "SELECT as_of, final FROM fund_snapshot WHERE investor_id=%s AND advised_only=%s",
