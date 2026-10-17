@@ -41,6 +41,7 @@ NSE_API_DISABLED_NOTE = (
     "NSE API disabled on this deployment (NSE_API_ENABLED=false); run app.nse_worker"
 )
 
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", case_sensitive=False, extra="ignore", hide_input_in_errors=True
@@ -185,6 +186,25 @@ class Settings(BaseSettings):
     # archives and NSDL are unaffected and keep running here.
     nse_api_enabled: bool = True
 
+    # --- mutual funds / ETFs (docs/MF_ETF_PLAN.md section 10) -------------------------
+    # Independent rollout flags, OFF by default; each is turned on only after its gate
+    # passes. With all off, fund units still route away from the bhavcopy's absence
+    # evidence and out of the listed series (that protection is not a flag), and a fund
+    # holding is shown unpriced with its reason.
+    #   MF_REFERENCE_ENABLED  AMFI daily/history fetch, catalogue and NAV writes
+    #   MF_VALUATION_ENABLED  value fund holdings at their AMFI NAV; the fund series
+    #   MF_TAX_ENABLED        fund capital-gains classification in /realised
+    mf_reference_enabled: bool = False
+    mf_valuation_enabled: bool = False
+    mf_tax_enabled: bool = False
+    # Whether THIS host may call AMFI (portal.amfiindia.com). A capability, like
+    # NSE_API_ENABLED: where false, AMFI queue tasks are left for a host that can.
+    amfi_fetch_enabled: bool = True
+    amfi_http_timeout_seconds: int = Field(default=60, ge=5, le=120)
+    # Plan section 7.1: an initial 180 s working budget per AMFI job invocation, well
+    # inside a 300 s serverless limit; stop claiming work with insufficient headroom.
+    amfi_job_budget_seconds: int = Field(default=180, ge=10, le=280)
+
     # --- web --------------------------------------------------------------------
     # Comma-separated in the environment; split into a list for CORSMiddleware.
     cors_origins: str = "http://localhost:3000"
@@ -256,6 +276,12 @@ class Settings(BaseSettings):
     # verification-code lookup answers 404, and INGEST_DOMAIN is not required. Read
     # through ``forwarding_domain`` below, never ingest_domain directly.
     email_forwarding_enabled: bool = False
+    # Deployment kill switch; promotion still requires a live investor mandate and
+    # strict document/account validation. Turning this off keeps receipt/staging alive.
+    email_auto_promote_enabled: bool = True
+    # Pending encrypted delivery bytes per investor. Backpressure is retryable (503),
+    # never an acknowledgement of work we could not retain. Archived payloads leave DB.
+    ingest_max_spooled_bytes_per_investor: int = Field(default=67_108_864, gt=0)
 
     # --- inbound-email webhook (app/ingest/webhook_providers.py) --------------------
     # POST /ingest/email is internet-facing, so unlike storage_backend/SMTP above --
@@ -337,6 +363,8 @@ class Settings(BaseSettings):
     market_assistant_openrouter_api_key: str | None = Field(default=None, repr=False)
     market_assistant_model: str | None = None
     market_assistant_model_daily_limit: int = Field(default=50, ge=0)
+    # Per-login allowance, persisted separately from the shared provider-call ceilings.
+    market_assistant_message_daily_limit: int = Field(default=20, ge=0)
     # Phase 5: how admitted official passages are ranked before the selector sees them.
     # "lexical" (default) is the Phase 2 word-overlap baseline. "hybrid" fuses BM25 with a
     # LOCAL embedding model by reciprocal rank fusion; it needs the optional extra

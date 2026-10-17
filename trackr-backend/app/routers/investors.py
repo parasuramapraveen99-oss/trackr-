@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.auth.dependencies import get_current_user, require_owned_investor
 from app.config import Settings, get_settings
 from app.database import get_conn, money, rate
-from app.db import consent, families, forwarding_confirmation, repository
+from app.db import consent, document_passwords, families, forwarding_confirmation, repository
 from app.db.repository import create_account, create_investor, set_investor_pan
 from app.engine.errors import EngineError
 from app.engine.holdings import compute_holdings_partitioned
@@ -35,6 +35,7 @@ from app.schemas.families import ClientsOverview
 from app.schemas.investors import (
     AccountIn,
     AccountOut,
+    FilePasswordOut,
     ForwardingCodeOut,
     InvestorIn,
     InvestorOut,
@@ -350,6 +351,61 @@ def set_pan(
     Never echoed back -- 204, no body, matching InvestorOut's write-only PAN.
     """
     set_investor_pan(connection, investor_id, body.pan, actor_uid=str(current_user["id"]))
+
+
+@router.get(
+    "/{investor_id}/file-passwords",
+    response_model=list[FilePasswordOut],
+    dependencies=[Depends(require_owned_investor)],
+)
+def list_file_passwords(
+    investor_id: str, connection: Any = Depends(get_conn)
+) -> list[dict[str, Any]]:
+    """Your PAN (set with PUT /investors/{id}/pan) and which statement sources have a saved
+    password -- for Settings. Never a value.
+
+    A password is added only on upload, after it has opened a real file (POST
+    /ingest/files with ``password`` + ``password_source``), so this surface can list and
+    remove but never set one: a password typed here could be wrong with nothing to prove it.
+    """
+    saved = document_passwords.saved_sources(connection, investor_id)
+    pan_row = {
+        "source": document_passwords.PAN_SOURCE,
+        "label": "Your PAN",
+        "hint": "Tried first on every locked file, in capitals and in small letters",
+        "saved": bool(document_passwords.stored_pan(connection, investor_id)),
+        "updated_at": None,
+    }
+    return [pan_row] + [
+        {
+            "source": source,
+            "label": document_passwords.SOURCE_LABELS[source],
+            "hint": document_passwords.SOURCE_HINTS[source],
+            "saved": source in saved,
+            "updated_at": saved.get(source),
+        }
+        for source in document_passwords.SOURCES
+    ]
+
+
+@router.delete(
+    "/{investor_id}/file-passwords/{source}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_owned_investor)],
+)
+def remove_file_password(
+    investor_id: str,
+    source: str,
+    connection: Any = Depends(get_conn),
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> None:
+    """Forget one source's password. 404 when none was saved, so a stale screen hears it."""
+    if source not in document_passwords.SOURCES:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"unknown statement source: {source}")
+    if not document_passwords.remove(
+        connection, investor_id, source, actor_uid=str(current_user["id"])
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"no saved password for {source}")
 
 
 @router.post(

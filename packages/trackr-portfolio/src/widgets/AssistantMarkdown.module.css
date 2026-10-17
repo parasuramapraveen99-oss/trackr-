@@ -1,0 +1,15 @@
+.markdown { min-width: 0; font: inherit; line-height: 1.65; overflow-wrap: anywhere; }
+.markdown p { margin: 0 0 9px; }
+.heading { margin: 14px 0 7px; font: inherit; font-weight: 600; line-height: 1.45; color: var(--text-primary); }
+.markdown ul, .markdown ol { margin: 7px 0 11px; padding-left: 20px; }
+.markdown ul { list-style: disc; }
+.markdown ol { list-style: decimal; }
+.markdown li { margin: 3px 0; padding-left: 2px; }
+.markdown strong { font-weight: 600; }
+.markdown code { font-family: var(--font-mono); font-size: .9em; background: var(--surface-hover); padding: 1px 4px; }
+.markdown pre { white-space: pre-wrap; margin: 8px 0; border: 1px solid var(--border); padding: 10px; }
+.markdown pre code { padding: 0; background: none; }
+.markdown blockquote { margin: 8px 0; padding-left: 12px; border-left: 2px solid var(--border-strong); }
+.markdown hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }

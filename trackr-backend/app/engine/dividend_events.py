@@ -204,7 +204,7 @@ def rights_price_factor(
 
 
 def restated_amount(amount: Decimal, factor: Fraction) -> Decimal:
-    """``amount`` times ``factor``, in exact Decimal arithmetic (never float)."""
+    """``amount`` times ``factor``, in exact Decimal arithmetic."""
     return amount * Decimal(factor.numerator) / Decimal(factor.denominator)
 
 

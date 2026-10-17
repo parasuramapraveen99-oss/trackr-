@@ -56,6 +56,10 @@
     {
       "path": "/ops/reference-sync/run-cron",
       "schedule": "35 11 * * *"
+    },
+    {
+      "path": "/ops/cron/mf-nav-refresh",
+      "schedule": "0 6 * * *"
     }
   ]
 }

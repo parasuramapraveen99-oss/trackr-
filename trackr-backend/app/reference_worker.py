@@ -397,7 +397,31 @@ def process(conn, kind: str, key: str, payload: dict, settings: Settings) -> dic
             conn.commit()
             raise ResearchDeferred(f"{len(result['deferred'])} gap(s) wait for research")
     elif kind == "SNAPSHOT":
-        _rebuild_snapshot(conn, payload)
+        if payload.get("repair"):
+            # An interior-hole repair (app.routers.analytical.enqueue_interior_holes). A day
+            # that still cannot be priced is recorded on the task and finished; the payload
+            # written back by run_once carries the reason, and the hole is offered again
+            # only after HOLE_RETRY_INTERVAL.
+            from app.engine.errors import MissingPriceError, NegativeHoldingError
+
+            try:
+                _rebuild_snapshot(conn, payload)
+                payload.pop("unrepairable", None)
+            except (MissingPriceError, NegativeHoldingError) as exc:
+                conn.rollback()
+                payload["unrepairable"] = str(exc)[:300]
+        else:
+            _rebuild_snapshot(conn, payload)
+    elif kind == "AMFI_NAV_WINDOW":
+        from app.prices.amfi_jobs import process_nav_window
+
+        return process_nav_window(conn, payload, settings.amfi_http_timeout_seconds)
+    elif kind == "AMFI_AMC_DISCOVERY":
+        from app.prices.amfi_jobs import process_amc_discovery
+
+        return process_amc_discovery(
+            conn, payload, settings.amfi_http_timeout_seconds, budget_seconds=60.0
+        )
     else:
         raise ValueError(f"Unknown reference task kind: {kind}")
     return None
@@ -478,6 +502,7 @@ def _invalidate_snapshots(conn, account_id):
 
 def _rebuild_snapshot(conn, payload):
     """Replay using date-effective identities and observed prices; never retain stale totals."""
+    from app.db.fund_reference import non_exchange_isins
     from app.db.prices import absent_on_or_before, latest_prices
     from app.db.repository import load_transactions
     from app.db.snapshots import upsert_snapshot
@@ -502,8 +527,13 @@ def _rebuild_snapshot(conn, payload):
     # seen 2026-10-07, retrying with backoff and crowding out the identity and
     # corporate-action tasks that would actually fix the gap. A price merely not FETCHED
     # yet is not in price_absent, so it still raises and retries, as it should.
-    unpriceable = absent_on_or_before(conn, [i for i in isins if i not in prices], on)
-    snapshot = compute_snapshot(transactions, prices, on, exclude_isins=unpriceable)
+    # LISTED series, same scope as app.routers.analytical._run_snapshots: units the
+    # exchange cannot price are left out by route, never by bhavcopy absence.
+    off_exchange = set(non_exchange_isins(conn, isins))
+    unpriceable = absent_on_or_before(
+        conn, [i for i in isins if i not in prices and i not in off_exchange], on
+    )
+    snapshot = compute_snapshot(transactions, prices, on, exclude_isins=unpriceable | off_exchange)
     upsert_snapshot(conn, investor_id, advised, snapshot)
 
 
@@ -545,26 +575,47 @@ def run_once(
             logger.warning("demerger_price_factors_failed", exc_info=True)
         _maybe_verify_quote_mappings(conn)
         began = time.monotonic()
+        # AMFI tasks run only on a host that can reach AMFI, with the feature on -- the
+        # same capability split as NSE -- and at most AMFI_TASKS_PER_BATCH of every five
+        # claims while other kinds are due (docs/MF_ETF_PLAN.md section 7.2).
+        from app.prices.amfi_jobs import AMFI_TASK_KINDS, AMFI_TASKS_PER_BATCH
+
+        amfi_runnable = settings.mf_reference_enabled and settings.amfi_fetch_enabled
+        claims = amfi_claims = 0
         for _ in range(limit or settings.reference_worker_batch_size):
             # A serverless cron has a hard timeout; stop claiming new tasks once the
             # budget is spent. Unclaimed work stays pending for the next run.
             if time_budget_seconds is not None and (time.monotonic() - began > time_budget_seconds):
                 break
             with conn.cursor() as cur:
-                cur.execute(
-                    """SELECT kind,task_key,payload,attempts FROM reference_sync_task
-                       WHERE state IN ('pending','retry') AND available_at <= now()
-                         AND (%s OR kind <> ALL(%s))
-                       -- Derived snapshot rebuilds last: they are cheap, numerous, and
-                       -- only correct once the identity/action work ahead of them is done.
-                       ORDER BY (kind = 'SNAPSHOT'), available_at, kind, task_key
-                       LIMIT 1 FOR UPDATE SKIP LOCKED""",
-                    (settings.nse_api_enabled, list(NSE_TASK_KINDS)),
-                )
-                row = cur.fetchone()
+                over_quota = amfi_claims >= AMFI_TASKS_PER_BATCH * (claims // 5 + 1)
+                row = None
+                for allow_amfi in ((amfi_runnable and not over_quota), amfi_runnable):
+                    cur.execute(
+                        """SELECT kind,task_key,payload,attempts FROM reference_sync_task
+                           WHERE state IN ('pending','retry') AND available_at <= now()
+                             AND (%s OR kind <> ALL(%s))
+                             AND (%s OR kind <> ALL(%s))
+                           -- Derived snapshot rebuilds last: they are cheap, numerous, and
+                           -- only correct once the identity/action work ahead of them is done.
+                           ORDER BY (kind = 'SNAPSHOT'), available_at, kind, task_key
+                           LIMIT 1 FOR UPDATE SKIP LOCKED""",
+                        (
+                            settings.nse_api_enabled,
+                            list(NSE_TASK_KINDS),
+                            allow_amfi,
+                            list(AMFI_TASK_KINDS),
+                        ),
+                    )
+                    row = cur.fetchone()
+                    # Over quota, AMFI work waits only while something else is due.
+                    if row is not None or not over_quota:
+                        break
                 if row is None:
                     break
                 kind, key, payload, attempts = row
+                claims += 1
+                amfi_claims += kind in AMFI_TASK_KINDS
                 cur.execute(
                     "UPDATE reference_sync_task SET state='running',updated_at=now() "
                     "WHERE kind=%s AND task_key=%s",
@@ -616,7 +667,15 @@ def run_once(
                     },
                 )
             except Exception as exc:
-                _requeue(conn, kind, key, attempts, exc)
+                # A source's Retry-After (AMFI 429/5xx) is a floor on the backoff.
+                _requeue(
+                    conn,
+                    kind,
+                    key,
+                    attempts,
+                    exc,
+                    min_delay=getattr(exc, "retry_after", None) or 0,
+                )
                 failed += 1
                 logger.warning(
                     "reference_task_failed",
@@ -707,6 +766,45 @@ def _maybe_catch_up_snapshots(conn, settings: Settings) -> None:
     except Exception:
         conn.rollback()
         logger.exception("Snapshot catch-up failed; retried in thirty minutes")
+    _maybe_refresh_funds(conn, settings)
+
+
+def _maybe_refresh_funds(conn, settings: Settings) -> None:
+    """On a host that runs AMFI work: the daily NAV refresh when no daily file has been
+    published since today's 06:00 UTC run time (plan section 7.3 -- the worker uses its own
+    scheduler when it hosts AMFI), then the fund series catch-up. Never raises."""
+    from datetime import UTC, datetime
+
+    try:
+        from app.db.fund_reference import fund_tables_present
+
+        if not fund_tables_present(conn):
+            return
+        if settings.mf_reference_enabled and settings.amfi_fetch_enabled:
+            now = datetime.now(UTC)
+            due = now.replace(hour=6, minute=0, second=0, microsecond=0)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT max(fetched_at) FROM amfi_batch WHERE layout='DAILY' "
+                    "AND status IN ('PUBLISHED','QUARANTINED')"
+                )
+                last = cur.fetchone()[0]
+            conn.commit()
+            if now >= due and (last is None or last < due):
+                from app.prices.amfi_jobs import refresh_daily
+
+                result = refresh_daily(conn, timeout_seconds=settings.amfi_http_timeout_seconds)
+                logger.info("AMFI daily refresh: %s", result.status)
+        if settings.mf_valuation_enabled:
+            from app.funds.series import catch_up_fund_snapshots
+
+            fund = catch_up_fund_snapshots(conn, today=date.today(), time_budget_seconds=240)
+            logger.info(
+                "Fund snapshot catch-up: written=%s complete=%s", fund.written, fund.complete
+            )
+    except Exception:
+        conn.rollback()
+        logger.exception("Fund refresh/catch-up failed; retried in thirty minutes")
 
 
 def main() -> None:

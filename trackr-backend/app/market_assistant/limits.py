@@ -21,8 +21,39 @@ from collections import OrderedDict
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Generic, Protocol, TypeVar
+from zoneinfo import ZoneInfo
 
 T = TypeVar("T")
+MESSAGE_TIMEZONE = ZoneInfo("Asia/Kolkata")
+
+
+class MessageStore(Protocol):
+    def used(self, day: date) -> int: ...
+    def reserve(self, day: date, limit: int) -> int | None: ...
+    def release(self, day: date) -> None: ...
+
+
+class DailyMessageQuota:
+    """A message counts once, independently of how many provider calls it needs."""
+
+    def __init__(self, store: MessageStore, limit: int = 20,
+                 now: Callable[[], datetime] | None = None):
+        self.store = store
+        self.limit = limit
+        self.now = now or (lambda: datetime.now(MESSAGE_TIMEZONE))
+
+    def day(self) -> date:
+        return self.now().astimezone(MESSAGE_TIMEZONE).date()
+
+    def status(self) -> dict:
+        from datetime import time as day_time
+        from datetime import timedelta
+
+        day = self.day()
+        used = self.store.used(day)
+        return {"limit": self.limit, "used": used, "remaining": max(0, self.limit - used),
+                "resets_at": datetime.combine(day + timedelta(days=1), day_time(),
+                                               tzinfo=MESSAGE_TIMEZONE)}
 
 
 class UsageStore(Protocol):

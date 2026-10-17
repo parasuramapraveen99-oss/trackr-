@@ -9,35 +9,16 @@ import type {
   MarketAssistantEvidenceOut,
   MarketAssistantAskIn,
   MarketAssistantAskOut,
-  MarketAssistantTopicOut,
+  MarketAssistantMessageUsage,
 } from "@trackr/core";
 import { Icon, IconButton } from "@trackr/ui";
+import { AssistantMarkdown } from "./AssistantMarkdown";
 
 /** The backend's own cap (app/market_assistant/admission.py MAX_QUESTION_CHARS). */
 const MAX_QUESTION_CHARS = 2000;
 
-/** Per-browser memory of the user's choice. Search is On unless they turned it Off
- * (owner decision 11 Oct 2026, docs/AI_ASSISTANT_PRIVACY_PLAN.md). */
-const ALLOW_EXTERNAL_KEY = "trackr.marketAssistant.allowExternal";
-
-/** The backend's cap on follow-up context (app/market_assistant/admission.py MAX_HISTORY). */
+/** Only the user's last four questions are sent for follow-ups. */
 const MAX_HISTORY = 4;
-
-function readAllowExternal(): boolean {
-  try {
-    return window.localStorage.getItem(ALLOW_EXTERNAL_KEY) !== "0";
-  } catch {
-    return true;
-  }
-}
-
-function writeAllowExternal(value: boolean) {
-  try {
-    window.localStorage.setItem(ALLOW_EXTERNAL_KEY, value ? "1" : "0");
-  } catch {
-    // Storage blocked: the choice lasts for this page only.
-  }
-}
 
 type Turn =
   | { kind: "question"; text: string; typed: boolean }
@@ -46,8 +27,10 @@ type Turn =
 
 function errorText(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status === 503) return "Ask about markets is turned off right now. Please contact support.";
-    if (err.status === 429) return "Too many questions at once. Please wait a minute and try again.";
+    if (err.status === 503) return err.message || "The assistant is unavailable. Please try again later.";
+    if (err.status === 429) return err.message.includes("daily")
+      ? "You’ve used today’s messages. Your allowance resets at midnight IST."
+      : "Too many questions at once. Please wait a minute and try again.";
   }
   return "Something went wrong. Please try again.";
 }
@@ -72,26 +55,21 @@ export function MarketAssistantDrawer() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  // On by default; the user can switch it Off, and the choice is remembered.
-  const [allowExternal, setAllowExternal] = useState(true);
+  const [usage, setUsage] = useState<MarketAssistantMessageUsage | null>(null);
+  const [usageError, setUsageError] = useState<string | null>(null);
+  const [usageRetry, setUsageRetry] = useState(0);
+  const inFlight = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   // Bumped whenever the conversation is reset; a reply from an older generation is dropped.
   const generation = useRef(0);
 
-  useEffect(() => {
-    setMounted(true);
-    setAllowExternal(readAllowExternal());
-  }, []);
-
-  function changeAllowExternal(value: boolean) {
-    setAllowExternal(value);
-    writeAllowExternal(value);
-  }
+  useEffect(() => setMounted(true), []);
 
   useEffect(() => {
     generation.current += 1;
     setSending(false);
+    inFlight.current = false;
     if (!isOpen) {
       setTurns([]);
       return;
@@ -103,10 +81,28 @@ export function MarketAssistantDrawer() {
   }, [sessionId, isOpen, token, investorId]);
 
   useEffect(() => {
+    if (!isOpen || !token) { setUsage(null); return; }
+    let cancelled = false;
+    setUsage(null);
+    setUsageError(null);
+    const refresh = () => api.get<MarketAssistantMessageUsage>("/market-assistant/usage", { token })
+      .then((value) => { if (!cancelled) { setUsage(value); setUsageError(null); } })
+      .catch(() => { if (!cancelled) setUsageError("Couldn't check your message allowance."); });
+    void refresh();
+    // Keep other tabs and the midnight reset in sync with the server.
+    const onVisible = () => { if (!document.hidden) void refresh(); };
+    const timer = window.setInterval(onVisible, 60_000);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { cancelled = true; clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [isOpen, sessionId, token, usageRetry]);
+
+  useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [turns]);
 
   async function ask(body: MarketAssistantAskIn, shown: string) {
+    if (inFlight.current || !usage || usage.remaining === 0 || usageError) return;
+    inFlight.current = true;
     const mine = generation.current;
     const history = turns
       .flatMap((t) => (t.kind === "question" && t.typed ? [t.text] : []))
@@ -117,14 +113,20 @@ export function MarketAssistantDrawer() {
     let next: Turn;
     try {
       const reply = await api.post<MarketAssistantAskOut>("/market-assistant/ask", {
-        json: { ...body, allow_external: allowExternal, history },
+        json: { ...body, allow_external: true, history },
         token,
       });
+      if (mine !== generation.current) return;
+      if (reply.usage) setUsage(reply.usage);
       next = { kind: "reply", reply };
     } catch (err) {
+      if (mine !== generation.current) return;
       next = { kind: "error", text: errorText(err) };
+      // A second tab may have used the final message; ask the server again.
+      setUsageRetry((value) => value + 1);
     }
     if (mine !== generation.current) return;
+    inFlight.current = false;
     setTurns((cur) => [...cur, next]);
     setSending(false);
   }
@@ -132,26 +134,8 @@ export function MarketAssistantDrawer() {
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const question = input.trim();
-    if (sending || !question) return;
+    if (sending || !question || !usage || usage.remaining === 0 || usageError) return;
     void ask({ question }, question);
-  }
-
-  function chips(list: MarketAssistantTopicOut[]) {
-    return (
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-        {list.map((t) => (
-          <button
-            key={t.topic_id}
-            type="button"
-            disabled={sending}
-            onClick={() => void ask({ topic_id: t.topic_id }, t.label)}
-            style={chipStyle}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-    );
   }
 
   if (!mounted || !isOpen) return null;
@@ -201,15 +185,25 @@ export function MarketAssistantDrawer() {
             Ask about markets
           </p>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <SearchToggle on={allowExternal} onChange={changeAllowExternal} />
+            <span role="status" aria-live="polite"
+              aria-label={usage ? `${usage.remaining} of ${usage.limit} messages left today` : "Checking message allowance"}
+              title="Daily message allowance. Resets at midnight IST."
+              style={{ font: "var(--type-label)", color: "var(--text-tertiary)", whiteSpace: "nowrap" }}>
+              {usage ? `${usage.remaining}/${usage.limit} left` : usageError ? "Unavailable" : "…"}
+            </span>
             <IconButton name="close" label="Close" variant="plain" size={32} onClick={closeChat} />
           </div>
         </div>
+
+        {usageError && <div role="alert" style={{ padding: "10px 20px", font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>
+          {usageError} <button type="button" onClick={() => setUsageRetry((value) => value + 1)} style={chipStyle}>Try again</button>
+        </div>}
 
         <div
           ref={scrollRef}
           style={{ flex: 1, overflowY: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 12 }}
         >
+          {usage?.remaining === 0 && <p role="status" style={{ font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>You’ve used today’s messages. You can ask again after midnight IST.</p>}
           {turns.map((turn, i) => {
             if (turn.kind === "question") {
               return (
@@ -231,15 +225,15 @@ export function MarketAssistantDrawer() {
             return (
               <div key={i} style={{ display: "grid", gap: 8, maxWidth: "92%" }}>
                 <div style={{ ...bubbleStyle, maxWidth: "100%", background: "var(--surface-sunken)", color: "var(--text-primary)" }}>
-                  {reply.text}
+                  <AssistantMarkdown text={reply.text.replace(/\s*\[\d+(?:[,\s-]*\d+)*\]/g, "")} />
                 </div>
                 {reply.evidence.length > 0 && (
                   <>
                     <details style={{ font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>
                       <summary style={{ cursor: "pointer" }}>Sources ({reply.evidence.length})</summary>
                       <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
-                        {reply.evidence.map((e, n) => (
-                          <SourceCard key={e.chunk_id} evidence={e} number={n + 1} />
+                        {reply.evidence.map((e) => (
+                          <SourceCard key={e.chunk_id} evidence={e} />
                         ))}
                       </div>
                     </details>
@@ -251,7 +245,6 @@ export function MarketAssistantDrawer() {
                   </>
                 )}
                 {reply.answer && <p style={{ margin: 0, font: "var(--type-body-sm)", color: "var(--text-tertiary)" }}>Source: {reply.answer.source_label}</p>}
-                {reply.outcome === "clarify" && reply.suggestions.length > 0 && chips(reply.suggestions)}
               </div>
             );
           })}
@@ -278,6 +271,8 @@ export function MarketAssistantDrawer() {
             value={input}
             maxLength={MAX_QUESTION_CHARS}
             autoComplete="off"
+            aria-label="Market question"
+            disabled={!usage || usage.remaining === 0 || !!usageError}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Ask about markets"
             style={{
@@ -295,7 +290,7 @@ export function MarketAssistantDrawer() {
           />
           <button
             type="submit"
-            disabled={sending || !input.trim()}
+            disabled={sending || !input.trim() || !usage || usage.remaining === 0 || !!usageError}
             aria-label="Send"
             style={{
               display: "inline-flex",
@@ -308,8 +303,8 @@ export function MarketAssistantDrawer() {
               border: "1px solid var(--ink-900)",
               background: "var(--ink-900)",
               color: "var(--text-inverse)",
-              cursor: sending || !input.trim() ? "not-allowed" : "pointer",
-              opacity: sending || !input.trim() ? 0.5 : 1,
+              cursor: sending || !input.trim() || !usage || usage.remaining === 0 || usageError ? "not-allowed" : "pointer",
+              opacity: sending || !input.trim() || !usage || usage.remaining === 0 || usageError ? 0.5 : 1,
               transition: "opacity var(--duration-base) ease",
             } as CSSProperties}
           >
@@ -322,48 +317,10 @@ export function MarketAssistantDrawer() {
   );
 }
 
-/** On/Off for public-source search. On by default; turning it Off is remembered. The tooltip carries what "On" means: the question leaves Trackr+. */
-function SearchToggle({ on, onChange }: { on: boolean; onChange: (value: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label="Search public sources"
-      title="When on, your question goes to an external AI model and search. Leave out personal details."
-      onClick={() => onChange(!on)}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "3px 10px 3px 4px",
-        borderRadius: "var(--radius-full)",
-        border: "1px solid var(--border)",
-        background: on ? "var(--ink-900)" : "var(--surface)",
-        color: on ? "var(--text-inverse)" : "var(--text-secondary)",
-        font: "var(--type-body-sm)",
-        cursor: "pointer",
-        transition: "background var(--duration-base) ease",
-      }}
-    >
-      <span
-        aria-hidden
-        style={{
-          width: 14,
-          height: 14,
-          borderRadius: "50%",
-          background: on ? "var(--text-inverse)" : "var(--text-tertiary)",
-        }}
-      />
-      Search {on ? "On" : "Off"}
-    </button>
-  );
-}
-
 /** One official excerpt. The link opens in a new tab with no referrer, so the official
  * site never learns which Trackr+ page sent the reader. Plain text only: no HTML from the
  * source is ever rendered. */
-function SourceCard({ evidence, number }: { evidence: MarketAssistantEvidenceOut; number?: number }) {
+function SourceCard({ evidence }: { evidence: MarketAssistantEvidenceOut }) {
   return (
     <div
       style={{
@@ -376,15 +333,14 @@ function SourceCard({ evidence, number }: { evidence: MarketAssistantEvidenceOut
       }}
     >
       <p style={{ margin: 0, font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>
-        {number !== undefined && <strong>[{number}] </strong>}
         {evidence.lead}
         {evidence.source_kind === "news" && (
           <span style={{ color: "var(--text-tertiary)" }}> · news report, not official confirmation</span>
         )}
       </p>
-      <p style={{ margin: 0, font: "var(--type-body)", color: "var(--text-primary)", whiteSpace: "pre-line" }}>
-        &ldquo;{evidence.excerpt}&rdquo;
-      </p>
+      <div style={{ font: "var(--type-body-sm)", color: "var(--text-primary)", margin: "6px 0" }}>
+        <AssistantMarkdown text={evidence.excerpt} />
+      </div>
       <p style={{ margin: 0, font: "var(--type-body-sm)", color: "var(--text-tertiary)" }}>
         {evidence.published ? formatDate(evidence.published) : "Date not shown"}
       </p>

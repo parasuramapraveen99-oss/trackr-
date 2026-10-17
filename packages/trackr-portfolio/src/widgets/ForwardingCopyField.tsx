@@ -29,15 +29,15 @@ export function CopyField({ value, label }: { value: string; label?: string }) {
   }
 
   return (
-    <div className="flex items-center gap-2">
-      <code className="flex-1 truncate rounded-lg border border-navy-100 bg-surface px-3 py-2 text-sm font-mono text-navy-800">
+    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+      <code title={value} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", border: "1px solid var(--border)", background: "var(--surface-sunken)", padding: "9px 10px", font: "var(--type-label)", fontFamily: "var(--font-mono, monospace)", color: "var(--text-primary)" }}>
         {value}
       </code>
       <button
         type="button"
         onClick={copy}
         aria-label={label ? `Copy ${label}` : "Copy"}
-        className="press-scale shrink-0 rounded-lg border border-navy-100 px-3 py-2 text-xs font-medium text-navy-600 transition-colors hover:bg-cream-50"
+        style={{ flexShrink: 0, border: "1px solid var(--border)", background: "var(--surface)", padding: "9px 10px", color: "var(--text-secondary)", font: "var(--type-label)", cursor: "pointer" }}
       >
         {copied ? "Copied" : "Copy"}
       </button>

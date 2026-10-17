@@ -308,6 +308,81 @@ def _pdf_is_encrypted(content: bytes) -> bool:
     return b"/Encrypt" in content[-_PDF_TRAILER_SCAN:] or b"/Encrypt" in content[:_PDF_TRAILER_SCAN]
 
 
+#: The three things that can happen when we try to open a PDF. Decided from the PDF
+#: library's own exception, never from a heuristic: pdfminer raises
+#: ``PDFPasswordIncorrect`` for a password that does not open the file, and anything else
+#: means the file itself is broken -- where a password cannot help and must not be asked for.
+UNLOCK_OPENED = "OPENED"
+UNLOCK_WRONG_PASSWORD = "WRONG_PASSWORD"
+UNLOCK_DAMAGED = "DAMAGED"
+
+
+@dataclass(frozen=True, slots=True)
+class Unlock:
+    """Result of ``unlock_pdf``. ``password`` is the one that opened the file ("" when it
+    needs none); ``source`` is the saved source it came from, None for no password or one
+    typed just now."""
+
+    outcome: str
+    password: str = ""
+    source: str | None = None
+
+
+def _is_wrong_password(exc: BaseException) -> bool:
+    """pdfplumber wraps pdfminer's exceptions; walk the chain for PDFPasswordIncorrect."""
+    from pdfminer.pdfdocument import PDFPasswordIncorrect
+
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, PDFPasswordIncorrect):
+            return True
+        stack.extend(arg for arg in current.args if isinstance(arg, BaseException))
+        for linked in (current.__cause__, current.__context__):
+            if linked is not None:
+                stack.append(linked)
+    return False
+
+
+def _try_open(content: bytes, password: str) -> str:
+    """One attempt with ``password`` exactly as given. Reads page 1, so a file that only
+    fails once decryption actually starts is caught here rather than in the parser."""
+    import pdfplumber
+
+    try:
+        with pdfplumber.open(io.BytesIO(content), password=password) as pdf:
+            if pdf.pages:
+                pdf.pages[0].extract_text()
+        return UNLOCK_OPENED
+    except Exception as exc:  # noqa: BLE001 - pdfplumber raises assorted types
+        return UNLOCK_WRONG_PASSWORD if _is_wrong_password(exc) else UNLOCK_DAMAGED
+
+
+def unlock_pdf(content: bytes, candidates: list[tuple[str | None, str]]) -> Unlock:
+    """Open a PDF: first with no password, then each ``(source, password)`` EXACTLY as
+    given -- no case variants, no PAN derivation. The first that opens wins.
+
+    A file that opens with no password never touches the candidates. A file that fails for
+    any reason other than a wrong password is DAMAGED at once: trying more passwords on a
+    broken file would only turn "this file is damaged" into a misleading "locked".
+    """
+    first = _try_open(content, "")
+    if first == UNLOCK_OPENED:
+        return Unlock(UNLOCK_OPENED)
+    if first == UNLOCK_DAMAGED:
+        return Unlock(UNLOCK_DAMAGED)
+    for source, password in candidates:
+        if not password:
+            continue
+        if _try_open(content, password) == UNLOCK_OPENED:
+            return Unlock(UNLOCK_OPENED, password=password, source=source)
+    return Unlock(UNLOCK_WRONG_PASSWORD)
+
+
 def _classify_pdf(content: bytes, password: str = "") -> tuple[str, bool, list[str]]:
     """Which document a PDF is, from the text on its first page.
 
@@ -320,14 +395,21 @@ def _classify_pdf(content: bytes, password: str = "") -> tuple[str, bool, list[s
     except ImportError:  # pragma: no cover - dependency guard
         return DOC_CONTRACT_NOTE_PDF, False, ["PDF not inspected: pdfplumber unavailable"]
 
-    try:
-        with pdfplumber.open(io.BytesIO(content), password=password) as pdf:
-            pages = pdf.pages[:2]
-            text = "\n".join(page.extract_text() or "" for page in pages)
-    except Exception as exc:  # noqa: BLE001 - pdfplumber raises assorted types
+    error: Exception | None = None
+    # Some regenerated CAS PDFs retain /Encrypt but only accept the empty password.
+    # Try the supplied password exactly, then no password; never invent a case variant.
+    for candidate in (password, "") if password else ("",):
+        try:
+            with pdfplumber.open(io.BytesIO(content), password=candidate) as pdf:
+                pages = pdf.pages[:2]
+                text = "\n".join(page.extract_text() or "" for page in pages)
+            break
+        except Exception as exc:  # noqa: BLE001 - pdfplumber raises assorted types
+            error = exc
+    else:
         if _pdf_is_encrypted(content):
-            return DOC_UNKNOWN, True, [str(exc)]
-        return DOC_UNKNOWN, False, [f"could not read PDF: {exc}"]
+            return DOC_UNKNOWN, True, [str(error)]
+        return DOC_UNKNOWN, False, [f"could not read PDF: {error}"]
 
     upper = text.upper()
     if not upper.strip():
@@ -375,10 +457,9 @@ def _mismatch(filename: str, extension: str, container: str, document: str) -> F
 def classify(content: bytes, filename: str, pdf_password: str = "") -> FileVerdict:
     """Both tiers, on one file. Never raises.
 
-    ``pdf_password`` is the investor's own PDF password (PAN, cased per broker -- see
-    ``app.ingest.webhook.pdf_password``). Passing it lets a locked contract note be
-    classified rather than reported as unreadable; passing nothing is correct for every
-    other caller and simply produces the "locked" verdict.
+    ``pdf_password`` is the password that opens this file, exactly (``unlock_pdf`` found it
+    among the investor's saved ones, or they just typed it). Passing nothing is correct for
+    every other caller and simply produces the "locked" verdict for a locked file.
     """
     extension = extension_of(filename)
     tier1 = check_extension(filename)
@@ -407,7 +488,23 @@ def classify(content: bytes, filename: str, pdf_password: str = "") -> FileVerdi
     # Tier 2b -- what the document inside actually is.
     encrypted = False
     if container == CONTAINER_PDF:
-        document, encrypted, notes = _classify_pdf(content, pdf_password)
+        # Open it first, with the library's own verdict: a damaged file and a locked one
+        # need opposite answers ("send another copy" vs "type its password").
+        unlock = unlock_pdf(content, [(None, pdf_password)] if pdf_password else [])
+        if unlock.outcome == UNLOCK_DAMAGED:
+            return FileVerdict(
+                filename=filename,
+                extension=extension,
+                container=container,
+                document=DOC_UNKNOWN,
+                ok=False,
+                reason="This PDF is damaged or not a complete PDF, so we couldn't open it.",
+                hint="Download it again from where you got it and upload that copy.",
+            )
+        if unlock.outcome == UNLOCK_WRONG_PASSWORD:
+            encrypted, document, notes = True, DOC_UNKNOWN, []
+        else:
+            document, encrypted, notes = _classify_pdf(content, unlock.password)
     elif container == CONTAINER_XLSX:
         document, notes = _classify_xlsx(content)
     else:
@@ -421,11 +518,8 @@ def classify(content: bytes, filename: str, pdf_password: str = "") -> FileVerdi
             document=DOC_UNKNOWN,
             ok=False,
             encrypted=True,
-            reason="This PDF is password-protected, so we couldn't open it.",
-            hint=(
-                "Add your PAN in Settings — Zerodha locks contract notes with it — "
-                "then upload again. Or upload the XLSX export from Console instead."
-            ),
+            reason="This file is locked with a password.",
+            hint="Enter its password below. We'll remember it for this kind of statement.",
             notes=notes,
         )
 

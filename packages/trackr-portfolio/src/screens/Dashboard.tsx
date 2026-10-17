@@ -26,6 +26,9 @@ import { ErrorState, NoInvestorState } from "../widgets/PageState";
 import { ValueChartCard } from "../widgets/ValueChartCard";
 import { DividendCard } from "../widgets/DividendCard";
 import { FnoCard, useFnoPositions } from "../widgets/FnoCard";
+import { FundsCard } from "../widgets/FundsCard";
+import { EmailImportNotification } from "../widgets/EmailAutomation";
+import { CapitalGainsCard } from "../widgets/CapitalGainsCard";
 import {
   ALLOC_RAMP,
   AllocationArcs,
@@ -454,6 +457,7 @@ export function DashboardScreen({ chrome }: PortfolioScreenProps) {
 
       <Body>
         {chrome.banners}
+        <EmailImportNotification investorId={investorId} />
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--gap-section)" }}>
           {/* Rule 21(e): an equity total says F&O is not in it. Only when there is F&O. */}
           {fno.data?.has_trades && (
@@ -643,6 +647,13 @@ export function DashboardScreen({ chrome }: PortfolioScreenProps) {
           {/* Equity F&O, its own ledger and its own figures. Draws nothing unless the
               investor has an F&O trade, so an equity-only dashboard is unchanged. */}
           <FnoCard positions={fno} />
+
+          {/* Mutual funds: their own series at AMFI NAV, never blended with the figures
+              above. Draws nothing for an investor with no fund units. */}
+          <FundsCard />
+
+          {/* The year's capital gains, shares and fund units together. */}
+          <CapitalGainsCard />
 
           <Card title="Top holdings" action={<LinkAction href="/holdings">View all</LinkAction>}>
             {holdings.loading ? (

@@ -63,9 +63,19 @@ def _cas_counts(conn: Any, account_id: str, isin: str) -> dict[date, Decimal]:
         return {row[0]: Decimal(row[1]) for row in cur.fetchall()}
 
 
-def reverse_transaction(conn: Any, txn_id: str, reason: str) -> None:
-    """Append the reversal of one row. Idempotent: a row is reversed at most once."""
-    payload = json.dumps({"resolution": "REVERSED", "rule": "20f", "reason": reason})
+def reverse_transaction(
+    conn: Any,
+    txn_id: str,
+    reason: str,
+    *,
+    rule: str = "20f",
+) -> bool:
+    """Append a linked correction. Idempotent: a row is reversed at most once.
+
+    Source precedence shares this mechanism; its policy is recorded separately from
+    rule 20(f), and neither caller sends a synthetic disposal into cost/return replay.
+    """
+    payload = json.dumps({"resolution": "REVERSED", "rule": rule, "reason": reason})
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO transaction (account_id, isin, txn_date, txn_type, quantity, price,
@@ -76,6 +86,7 @@ def reverse_transaction(conn: Any, txn_id: str, reason: str) -> None:
                ON CONFLICT DO NOTHING""",
             (payload, txn_id),
         )
+        return cur.rowcount > 0
 
 
 def check_auto_rows(conn: Any, account_id: str) -> dict[str, list[dict[str, str]]]:

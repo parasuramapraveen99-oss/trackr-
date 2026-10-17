@@ -4,7 +4,7 @@ GET /investors/{id}/dividends/expected."""
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -13,13 +13,18 @@ from app.auth.dependencies import require_owned_investor
 from app.config import Settings, get_settings
 from app.database import get_conn, money
 from app.db.consent import require_consent
+from app.db.fund_reference import valuation_routes
+from app.db.fund_tax import facts_by_isin, facts_on, taxpayer_profile
 from app.db.repository import account_belongs_to, load_transactions, save_transactions
 from app.engine.dividends import compute_dividends, compute_expected_dividends
+from app.engine.fund_tax import classify_fund_slice
 from app.engine.holdings import exclude_unreconciled
 from app.engine.lots import compute_lots
 from app.engine.realised import compute_realised
 from app.engine.tax_classification import classification_sensitive
 from app.engine.types import ZERO, Transaction
+from app.prices.fund_category import InstrumentKind
+from app.prices.routing import Route
 from app.routers import exclusions
 from app.schemas.transactions import (
     DividendSummaryOut,
@@ -211,14 +216,26 @@ def realised(
     section 3); the window is ``BONUS_ALLOTMENT_SENSITIVITY_DAYS``."""
     # Unreconciled securities are left out and named in X-Trackr-Excluded (2026-10-08).
     rows, skipped = exclude_unreconciled(load_transactions(connection, investor_id=investor_id))
+
+    # Fund units (docs/MF_ETF_PLAN.md section 5) never take the equity-share path: an ETF
+    # or mutual fund classified on the 365-day equity rule would get a confidently wrong
+    # term. Equity shares below are computed exactly as before.
+    routes = valuation_routes(connection, {t.isin for t in rows})
+    fund_isins = {isin for isin, d in routes.items() if d.instrument_kind != InstrumentKind.STOCK}
+    stock_rows = [t for t in rows if t.isin not in fund_isins]
+    gains = compute_realised(stock_rows)
+    fund_slices, fund_skipped = _fund_realised([t for t in rows if t.isin in fund_isins], routes)
+    skipped = skipped + fund_skipped
     exclusions.mark(response, skipped)
-    gains = compute_realised(rows)
 
     if fy is not None:
         start, end = _financial_year_bounds(fy)
         gains = [g for g in gains if g.sell_date is not None and start <= g.sell_date <= end]
+        fund_slices = [
+            f for f in fund_slices if f[1].sell_date is not None and start <= f[1].sell_date <= end
+        ]
 
-    return [
+    out = [
         {
             "isin": g.isin,
             "sell_date": g.sell_date,
@@ -232,9 +249,101 @@ def realised(
             "classification_sensitive": classification_sensitive(
                 g, sensitivity_days=settings.bonus_allotment_sensitivity_days
             ),
+            "instrument_kind": "STOCK",
         }
         for g in gains
     ]
+    if fund_slices:
+        profiles = facts_by_isin(connection, sorted({g.isin for _a, g in fund_slices}))
+        taxpayer = taxpayer_profile(connection, investor_id)
+        fair_values = _fair_values_31jan2018(
+            connection, routes, sorted({g.isin for _a, g in fund_slices})
+        )
+        for account_id, g in fund_slices:
+            acquired = g.sell_date - timedelta(days=g.holding_days)
+            if settings.mf_tax_enabled:
+                result = classify_fund_slice(
+                    acquired,
+                    g.sell_date,
+                    facts_on(profiles.get(g.isin, []), g.sell_date),
+                    taxpayer,
+                    # A sale or redemption carries STT by statute where it applies
+                    # (Finance (No. 2) Act 2004, Chapter VII): the ledger SELL is it.
+                    stt_paid_on_transfer=True,
+                    fmv_31jan2018=fair_values.get(g.isin),
+                )
+                tax = {
+                    "term": str(result.term) if result.resolved else "UNRESOLVED",
+                    "tax_branch": str(result.branch) if result.branch else None,
+                    "tax_term": str(result.term) if result.term else None,
+                    "rate_status": str(result.rate_status) if result.rate_status else None,
+                    "base_rate": str(result.base_rate) if result.base_rate is not None else None,
+                    "indexation": result.indexation,
+                    "tax_act": result.act,
+                    "tax_section": result.section,
+                    "tax_rule_version": result.rule_version,
+                    "tax_unresolved_reason": result.unresolved_reason,
+                }
+            else:
+                tax = {
+                    "term": "UNRESOLVED",
+                    "tax_unresolved_reason": (
+                        "Fund capital-gains classification is not enabled on this deployment"
+                    ),
+                }
+            out.append(
+                {
+                    "isin": g.isin,
+                    "sell_date": g.sell_date,
+                    "quantity": money(g.quantity),
+                    "proceeds": money(g.proceeds),
+                    "cost": money(g.cost),
+                    "gain": money(g.gain),
+                    "holding_days": g.holding_days,
+                    "acquisition_date": acquired,
+                    "acquisition_date_basis": g.acquisition_date_basis,
+                    "classification_sensitive": False,
+                    "instrument_kind": str(routes[g.isin].instrument_kind),
+                    "account_id": account_id,
+                    **tax,
+                }
+            )
+    return out
+
+
+def _fair_values_31jan2018(connection: Any, routes: dict[str, Any], isins: list[str]) -> dict:
+    """31-Jan-2018 fair value per unit for grandfathering: an unlisted fund unit's NAV that
+    day (s.55(2)(ac)); for an exchange-traded unit, the loaded ``security.fmv_31jan2018``."""
+    from app.routers.capital_gains import _nav_31jan2018
+
+    navs = _nav_31jan2018(connection, [i for i in isins if routes[i].route == Route.AMFI])
+    with connection.cursor() as cur:
+        cur.execute(
+            "SELECT isin, fmv_31jan2018 FROM security WHERE isin = ANY(%s) "
+            "AND fmv_31jan2018 IS NOT NULL",
+            ([i for i in isins if routes[i].route != Route.AMFI],),
+        )
+        navs.update(dict(cur.fetchall()))
+    return navs
+
+
+def _fund_realised(
+    rows: list[Transaction], routes: dict[str, Any]
+) -> tuple[list[tuple[str | None, Any]], list[Any]]:
+    """FIFO per ACCOUNT, then per ISIN (docs/MF_ETF_PLAN.md section 5.5): a sale in one
+    demat account or folio can never consume another's lots. An account segment that does
+    not reconcile on its own (units moved in without an evidenced transfer) is left out
+    and named, never matched against another account's purchases."""
+    by_account: dict[str | None, list[Transaction]] = {}
+    for t in rows:
+        by_account.setdefault(t.account_id, []).append(t)
+    slices: list[tuple[str | None, Any]] = []
+    skipped: list[Any] = []
+    for account_id, account_rows in by_account.items():
+        usable, broken = exclude_unreconciled(account_rows)
+        skipped.extend(broken)
+        slices.extend((account_id, g) for g in compute_realised(usable))
+    return slices, skipped
 
 
 @router.get(

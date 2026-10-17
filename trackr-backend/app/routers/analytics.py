@@ -21,12 +21,12 @@ import logging
 from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app import securities
-from app.analytics import advisor, composition, factors, series, verdict, windows
+from app.analytics import advisor, composition, factors, integration, series, verdict, windows
 from app.analytics import fundamentals as fagg
 from app.auth.dependencies import require_owned_investor
 from app.auth.ops import require_cron_secret, require_ops_key
@@ -89,9 +89,14 @@ def analytics(
     advised_only: bool = False,
     universe: str = DEFAULT_UNIVERSE,
     connection: Any = Depends(get_conn),
+    calculation_method: Literal["current", "advisor_v1", "advisor_v2"] = "current",
 ) -> dict[str, Any]:
     """Everything the analytics screen renders, from one replay of the ledger."""
     on = as_of or date.today()
+    if calculation_method == "advisor_v2":
+        from app.routers.analytics_advisor import build_analytics
+
+        return build_analytics(connection, investor_id, on, benchmark, advised_only, universe)
     transactions = load_transactions(connection, investor_id, advised_only=advised_only, date_to=on)
 
     # Partitioned, not raw: a segment that does not reconcile is carried out as a named
@@ -148,6 +153,7 @@ def analytics(
                 "unrealised": value - holding.invested,
                 "sector": info.get("sector"),
                 "market_cap_bucket": info.get("market_cap_bucket"),
+                "asset_class": securities.describe(meta, holding.isin)["asset_class"],
                 "_holding": holding,
             }
         )
@@ -304,6 +310,10 @@ def analytics(
         }
 
     # --- aggregates ---------------------------------------------------------------------
+    exclusions = unresolved + [{"isin": s.isin, "reason": s.message} for s in skipped]
+    candidate = integration.materialize(positions, exclusions, on)
+    candidate["active_method"] = calculation_method
+    candidate["differences"] = []
     pe_agg = fagg.harmonic_mean([(p["weight"], p.get("pe")) for p in positions])
     pb_agg = fagg.harmonic_mean([(p["weight"], p.get("pb")) for p in positions])
     dy_agg = fagg.weighted_mean([(p["weight"], p.get("dividend_yield")) for p in positions])
@@ -327,6 +337,31 @@ def analytics(
     # Computed ONCE, here. It feeds both the health grade and the `derived` block, and the
     # frontend reads it rather than recomputing its own -- see DerivedOut.
     effective_n = composition.effective_holdings([p["weight"] for p in positions])
+    old_effective_n = effective_n
+    # A priced subtotal cannot establish full-book concentration, in either method.
+    if exclusions or calculation_method == "advisor_v1":
+        value = candidate["metrics"]["effective_holdings"]["value"]
+        effective_n = float(value) if value is not None else None
+
+    for key, old in (
+        ("effective_holdings", old_effective_n),
+        ("pe", pe_agg.value),
+        ("pb", pb_agg.value),
+        ("dividend_yield", dy_agg.value),
+    ):
+        value = candidate["metrics"][key]["value"]
+        new = float(value) if value is not None else None
+        if (old is None) != (new is None) or (
+            old is not None and new is not None and abs(old - new) > 0.0001
+        ):
+            candidate["differences"].append(
+                {
+                    "metric": key,
+                    "current": old,
+                    "candidate": new,
+                    "reason": "scope_or_precision_difference",
+                }
+            )
 
     health = verdict.compute_health(
         factor_scores=[factor_scores["portfolio"][k].score for k in _FACTOR_KEYS],
@@ -337,9 +372,14 @@ def analytics(
         benchmark_coverage_pct=actual_one_year.get("coverage_pct"),
     )
 
-    sector_alloc = composition.allocation([(p.get("sector"), p["market_value"]) for p in positions])
+    sector_alloc = composition.allocation(
+        [(securities.allocation_label(p, "sector"), p["market_value"]) for p in positions]
+    )
     cap_alloc = composition.allocation(
-        [(p.get("market_cap_bucket"), p["market_value"]) for p in positions]
+        [
+            (securities.allocation_label(p, "market_cap_bucket"), p["market_value"])
+            for p in positions
+        ]
     )
 
     gains = sorted((p for p in positions if p["unrealised"] > 0), key=lambda p: -p["unrealised"])
@@ -384,7 +424,8 @@ def analytics(
         "as_of": on,
         "generated_at": datetime.now(UTC),
         "benchmark": benchmark,
-        "coverage": _coverage(positions, total_value, history, shared_dates),
+        "coverage": _coverage(positions, total_value, history, shared_dates, len(exclusions)),
+        "integration": candidate,
         "sources": {
             "quantity_and_cost": "Trackr+ ledger, replayed by app.engine.holdings (FIFO)",
             "prices": "NSE/BSE bhavcopy; verified split/bonus-adjusted price-return series",
@@ -487,13 +528,22 @@ def analytics(
         },
         "correlation": _correlation_payload(aligned, labels),
         "fundamentals": {
-            "pe": {"value": pe_agg.value, "excluded_weight_pct": pe_agg.excluded_weight_pct},
-            "pb": {"value": pb_agg.value, "excluded_weight_pct": pb_agg.excluded_weight_pct},
-            "dividend_yield": {
-                "value": dy_agg.value,
-                "excluded_weight_pct": dy_agg.excluded_weight_pct,
+            **{
+                key: integration.aggregate_projection(
+                    candidate["metrics"][key],
+                    100.0
+                    - sum(
+                        p["weight"]
+                        for p in positions
+                        if p["isin"] not in candidate["metrics"][key]["coverage"]["excluded_isins"]
+                    ),
+                )
+                if calculation_method == "advisor_v1"
+                else {"value": agg.value, "excluded_weight_pct": agg.excluded_weight_pct}
+                for key, agg in (("pe", pe_agg), ("pb", pb_agg), ("dividend_yield", dy_agg))
             },
             **index_valuation,
+            "benchmark_comparison": "reported_separately_incompatible_aggregation",
         },
         "capital_state": {k: _money(v) for k, v in buckets.items()},
         "derived": {
@@ -504,7 +554,9 @@ def analytics(
             "growth_delta_vs_benchmark": growth_delta,
             "capital_state_pct": {k: _pct(v, total_value) for k, v in buckets.items()},
             "capital_state_total": _money(sum(buckets.values(), Decimal(0))),
-            "lenses": _lens_payload(positions, index_valuation, benchmark),
+            "lenses": integration.lens_projection(candidate, positions)
+            if calculation_method == "advisor_v1"
+            else _lens_payload(positions, index_valuation, benchmark),
         },
         "growth_of_100k": growth,
         "positions": [_position_payload(p) for p in sorted(positions, key=lambda p: -p["weight"])],
@@ -543,9 +595,10 @@ def _lens_payload(
     """Neutral, money-weighted comparisons; a two-input lens requires both inputs.
 
     The valuation lens is referenced to the index publisher's own P/E and P/B when they are
-    cached -- a market reference, rather than the portfolio's own median. NSE's index P/E is
-    free-float market cap over earnings, the same aggregation as the portfolio's harmonic
-    mean. The other lenses have no published index equivalent and stay within-portfolio.
+    cached, as a reported reference. Its inclusion of losses differs from the positive-only
+    portfolio harmonic diagnostic; it does not establish a comparable valuation spread.
+    The advisor_v1 projection uses eligible-holdings means instead. Other legacy lenses
+    have no published index equivalent and stay within-portfolio.
     """
     published = (index_valuation or {}).get("benchmark") or {}
     return {
@@ -679,7 +732,8 @@ def _coverage(
     total_value: Decimal,
     history: dict[str, Any],
     shared_dates: list[date],
-) -> dict[str, float]:
+    excluded_count: int = 0,
+) -> dict[str, Any]:
     def weight_with(field: str) -> float:
         return round(sum(p["weight"] for p in positions if p.get(field) is not None), 1)
 
@@ -688,7 +742,14 @@ def _coverage(
     )
     with_history = round(sum(p["weight"] for p in positions if history.get(p["isin"])), 1)
     return {
-        "priced_pct": 100.0 if positions else 0.0,
+        "priced_pct": None if excluded_count else (100.0 if positions else 0.0),
+        "basis": "priced_subset" if excluded_count else "complete_priced_book",
+        "priced_count_pct": 100.0 * len(positions) / (len(positions) + excluded_count)
+        if positions or excluded_count
+        else 0.0,
+        "priced_count": len(positions),
+        "total_count": len(positions) + excluded_count,
+        "known_value_subtotal": _money(total_value),
         "pe_pct": weight_with("pe"),
         "pb_pct": weight_with("pb"),
         "roe_pct": weight_with("roe"),

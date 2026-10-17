@@ -148,8 +148,10 @@ def existing_identities(conn: Any, account_id: str) -> dict[TradeIdentity, tuple
         cur.execute(
             """
             SELECT id, source_ref, isin, txn_date, txn_type, quantity, source
-            FROM transaction
+            FROM transaction t
             WHERE account_id = %s AND source_ref IS NOT NULL
+              AND t.reverses_id IS NULL
+              AND NOT EXISTS (SELECT 1 FROM transaction r WHERE r.reverses_id = t.id)
             """,
             (account_id,),
         )

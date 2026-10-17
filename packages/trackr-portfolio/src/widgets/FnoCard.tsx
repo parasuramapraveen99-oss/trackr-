@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import type { ReactNode } from "react";
 import { useAuth, useFetch, usePortfolioRefresh } from "@trackr/core";
 import type {
   FnoContractOut,
@@ -18,29 +18,19 @@ import {
   signClass,
   sumDecimals,
 } from "@trackr/core";
-import { Card } from "@trackr/ui";
-
-const label = {
-  fontFamily: "var(--font-label)",
-  fontSize: 9,
-  fontWeight: 600,
-  textTransform: "uppercase" as const,
-  letterSpacing: ".2em",
-  color: "var(--ledger-ink-soft)",
-};
+import { Card, Skeleton } from "@trackr/ui";
+import { CardSkeleton, Chip, Figure, Figures, Line, ShareBar, figureLabel } from "./cardKit";
 
 /** What `useFetch` returns for the positions read. */
 type FnoPositionsState = ReturnType<typeof useFetch<FnoPositionsResponse>>;
 
-const note = { margin: "10px 0 0", font: "var(--type-body-sm)", color: "var(--text-tertiary)" };
-
 const REASON: Record<FnoUnresolvedOut["reason"], string> = {
-  MISSING_PRICE: "the exchange has not published a price for it yet, so it has no value here",
-  SETTLEMENT_PRICE_MISSING: "the contract has expired, but the exchange's final settlement price is not available yet, so its profit or loss is not worked out",
-  PHYSICAL_SETTLEMENT_UNCONFIRMED: "the contract has expired and settles by delivering shares, but that delivery has not been confirmed yet",
-  TRADE_AFTER_EXPIRY: "a trade is dated after the contract expired, so it is not counted",
-  SETTLEMENT_EXCEEDS_POSITION: "the expiry entry is for more than you held, so it is not counted",
-  INVALID_REVERSAL: "a correction does not match any trade it could cancel, so it is not applied",
+  MISSING_PRICE: "no price yet",
+  SETTLEMENT_PRICE_MISSING: "settlement price pending",
+  PHYSICAL_SETTLEMENT_UNCONFIRMED: "delivery unconfirmed",
+  TRADE_AFTER_EXPIRY: "trade after expiry",
+  SETTLEMENT_EXCEEDS_POSITION: "expiry too large",
+  INVALID_REVERSAL: "correction unmatched",
 };
 
 function contractName(c: FnoContractOut): string {
@@ -82,14 +72,21 @@ export function FnoCard({ positions }: { positions: FnoPositionsState }) {
   const tax = useFetch<FnoTaxResponse>(base && `${base}/tax`, { as_of: asOf }, token);
   usePortfolioRefresh(realised.refetch);
   usePortfolioRefresh(tax.refetch);
-  const [showDetails, setShowDetails] = useState(false);
 
   // A failed read is shown, never hidden: hiding it would make an account WITH F&O trades
   // look like one without them.
   if (positions.error) {
     return (
-      <Card title="Futures & options" subtitle="Could not load">
-        <p style={{ ...note, marginTop: 0, color: "var(--negative)" }}>{positions.error}</p>
+      <Card title="Futures & options">
+        <Line tone="negative">{positions.error}</Line>
+      </Card>
+    );
+  }
+  // A skeleton while the first answer is out, like every other dashboard card.
+  if (positions.loading) {
+    return (
+      <Card title="Futures & options">
+        <CardSkeleton figures={2} bars={2} />
       </Card>
     );
   }
@@ -100,298 +97,147 @@ export function FnoCard({ positions }: { positions: FnoPositionsState }) {
   const unresolved = [...p.excluded, ...p.expired_unresolved];
   const provisionalNote = realised.data?.matches.find((m) => m.provisional)?.note ?? null;
 
-  const years = tax.data?.years ?? [];
-  const closedYears = years.filter((y) => y.matches > 0);
+  const closedYears = (tax.data?.years ?? []).filter((y) => y.matches > 0);
   // Exact decimal sums; null when any year is unreadable, shown as a dash, never a guess.
-  const totalPnl = tax.data ? sumDecimals(closedYears.map((y) => y.realised_pnl)) : null;
   const totalCharges = tax.data ? sumDecimals(closedYears.map((y) => y.expenses)) : null;
   const totalNet = tax.data ? sumDecimals(closedYears.map((y) => y.net_business_income)) : null;
   // Bar lengths are drawing ratios, not money: |year| / largest |year|.
   const largest = closedYears.reduce<Dec | null>((max, y) => {
-    const v = parseDecimal(y.realised_pnl)?.abs() ?? null;
+    const v = parseDecimal(y.net_business_income)?.abs() ?? null;
     return v && (!max || v.greaterThan(max)) ? v : max;
   }, null);
 
   return (
-    <Card title="Futures & options" subtitle="Kept apart from your stock returns, so they are not mixed in">
-      <div style={{ display: "flex", gap: 40, flexWrap: "wrap", alignItems: "flex-end" }}>
-        <div>
-          <span style={label}>Closed trades · profit / loss</span>
-          <div
-            className={totalPnl ? signClass(totalPnl.toString()) : undefined}
-            style={{ font: "var(--type-metric)", fontFamily: "var(--font-figure)", marginTop: 4 }}
-          >
-            {tax.loading && !tax.data ? "…" : totalPnl ? formatMoney(totalPnl.toString()) : "—"}
+    <Card title="Futures & options" subtitle="Separate from your stock returns">
+      <Figures>
+        {tax.loading && !tax.data ? (
+          <div>
+            <span style={figureLabel}>Closed trades</span>
+            <Skeleton width={140} height={26} style={{ marginTop: 6 }} />
           </div>
-          {totalCharges && totalNet && (
-            <div style={{ ...note, marginTop: 2 }}>
-              Charges {formatMoney(totalCharges.toString())} · after charges{" "}
-              <span className={signClass(totalNet.toString())}>{formatMoney(totalNet.toString())}</span>
-            </div>
-          )}
-        </div>
-        <div>
-          <span style={label}>Open now</span>
-          <div
-            className={p.positions.length ? signClass(p.unrealised_total) : undefined}
-            style={{ font: "var(--type-metric)", fontFamily: "var(--font-figure)", marginTop: 4 }}
-          >
-            {p.positions.length ? formatMoney(p.unrealised_total) : "None"}
-          </div>
-          <div style={{ ...note, marginTop: 2 }}>
-            {p.positions.length
-              ? `${p.positions.length} open position${p.positions.length === 1 ? "" : "s"}`
-              : "No open futures or options"}
-          </div>
-        </div>
-      </div>
+        ) : (
+          <Figure
+            label="Closed trades"
+            value={totalNet ? formatMoney(totalNet.toString()) : "—"}
+            className={totalNet ? signClass(totalNet.toString()) : undefined}
+            sub={totalCharges ? `after ${formatMoney(totalCharges.toString())} charges` : undefined}
+          />
+        )}
+        <Figure
+          label="Open now"
+          value={p.positions.length ? formatMoney(p.unrealised_total) : "None"}
+          className={p.positions.length ? signClass(p.unrealised_total) : undefined}
+          sub={p.positions.length ? `${p.positions.length} open` : undefined}
+        />
+      </Figures>
 
-      {unresolved.length > 0 && (
-        <ul style={{ margin: "16px 0 0", padding: 0, listStyle: "none", display: "grid", gap: 6 }}>
-          {unresolved.map((u) => (
-            <li
-              key={`${u.account_id}-${u.contract_id}`}
-              style={{
-                font: "var(--type-body-sm)",
-                color: "var(--text-secondary)",
-                borderLeft: "3px solid var(--warning)",
-                background: "var(--surface-sunken)",
-                padding: "6px 10px",
-              }}
-            >
-              <strong style={{ fontWeight: 600, color: "var(--text-primary)" }}>
-                Not counted: {contractName(u)}
-              </strong>{" "}
-              ({u.side === "SHORT" ? "sold" : "bought"} {formatQuantity(u.quantity)}): {REASON[u.reason]}
-            </li>
-          ))}
-        </ul>
+      {tax.error ? (
+        <Line tone="negative">{tax.error}</Line>
+      ) : (
+        closedYears.length > 0 && (
+          <div style={{ marginTop: 20, display: "grid", gap: 14 }}>
+            {closedYears.map((y) => {
+              const value = parseDecimal(y.net_business_income);
+              const share =
+                value && largest && largest.greaterThan(0) ? value.abs().div(largest).toNumber() : 0;
+              const loss = value?.isNegative() ?? false;
+              return (
+                <div key={y.financial_year}>
+                  <Row
+                    name={`FY ${y.financial_year}`}
+                    bar={<ShareBar share={share} color={loss ? "var(--negative)" : "var(--positive)"} />}
+                    value={formatMoney(y.net_business_income)}
+                    valueClass={signClass(y.net_business_income)}
+                  />
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6, marginLeft: 84 }}>
+                    <Pill>turnover {formatMoney(y.turnover)}</Pill>
+                    <Pill>charges {formatMoney(y.expenses)}</Pill>
+                    <Pill>STT {formatMoney(y.stt)}</Pill>
+                    {y.includes_provisional && <Pill title={provisionalNote ?? undefined}>estimated expiry</Pill>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )
       )}
 
-      <div style={{ marginTop: 20 }}>
-        <span style={label}>Closed trades, by financial year</span>
-      </div>
-      {tax.error ? (
-        <p style={{ ...note, color: "var(--negative)" }}>{tax.error}</p>
-      ) : years.length === 0 ? (
-        <p style={note}>{tax.loading ? "Loading…" : "No closed trades yet."}</p>
-      ) : (
-        <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
-          {years.map((y) => {
-            const value = parseDecimal(y.realised_pnl);
-            const share =
-              y.matches > 0 && value && largest && largest.greaterThan(0)
-                ? value.abs().div(largest).toNumber() * 50
-                : 0;
-            const loss = value?.isNegative() ?? false;
+      {p.positions.length > 0 && (
+        <div style={{ marginTop: 20, display: "grid", gap: 8 }}>
+          {p.positions.map((row) => {
+            const v = parseDecimal(row.unrealised);
+            const top = parseDecimal(p.positions.reduce((m, r) => {
+              const a = parseDecimal(r.unrealised)?.abs();
+              return a && a.greaterThan(m) ? a.toString() : m;
+            }, "0"));
+            const share = v && top?.greaterThan(0) ? v.abs().div(top).toNumber() : 0;
             return (
-              <div
-                key={y.financial_year}
-                style={{ display: "grid", gridTemplateColumns: "64px 1fr 120px", alignItems: "center", gap: 12 }}
-              >
-                <span style={{ font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>{y.financial_year}</span>
-                {y.matches === 0 ? (
-                  <span style={{ font: "var(--type-body-sm)", color: "var(--text-tertiary)", gridColumn: "2 / 4" }}>
-                    No closed trades
-                  </span>
-                ) : (
-                  <>
-                    <div
-                      aria-hidden
-                      style={{ position: "relative", height: 14, background: "var(--surface-sunken)" }}
-                    >
-                      <div style={{ position: "absolute", left: "50%", top: -2, bottom: -2, width: 1, background: "var(--ledger-rule)" }} />
-                      <div
-                        style={{
-                          position: "absolute",
-                          top: 0,
-                          bottom: 0,
-                          [loss ? "right" : "left"]: "50%",
-                          width: `${Math.max(share, 0.5)}%`,
-                          background: loss ? "var(--negative)" : "var(--positive)",
-                        }}
-                      />
-                    </div>
-                    <span
-                      className={`tabular-nums ${signClass(y.realised_pnl)}`}
-                      style={{ font: "var(--type-body-sm)", textAlign: "right" }}
-                      title={`${y.matches} closed trade${y.matches === 1 ? "" : "s"}`}
-                    >
-                      {formatMoney(y.realised_pnl)}
-                    </span>
-                  </>
-                )}
-              </div>
+              <Row
+                key={`${row.account_id}-${row.contract_id}`}
+                nameWidth={230}
+                name={`${contractName(row)} · ${row.side === "SHORT" ? "sold" : "bought"} ${formatQuantity(row.quantity)}`}
+                bar={<ShareBar share={share} color={v?.isNegative() ? "var(--negative)" : "var(--positive)"} />}
+                value={formatMoney(row.unrealised)}
+                valueClass={signClass(row.unrealised)}
+              />
             );
           })}
         </div>
       )}
 
-      {p.positions.length > 0 && (
-        <div style={{ marginTop: 20 }}>
-          <span style={label}>Open positions</span>
-          <ul style={{ margin: "8px 0 0", padding: 0, listStyle: "none", display: "grid", gap: 4 }}>
-            {p.positions.map((row) => (
-              <li
-                key={`${row.account_id}-${row.contract_id}`}
-                style={{ display: "flex", justifyContent: "space-between", gap: 12, font: "var(--type-body-sm)" }}
-              >
-                <span>
-                  {contractName(row)}{" "}
-                  <span style={{ color: "var(--text-tertiary)" }}>
-                    · {row.side === "SHORT" ? "sold" : "bought"} {formatQuantity(row.quantity)}
-                  </span>
-                </span>
-                <span className={`tabular-nums ${signClass(row.unrealised)}`}>{formatMoney(row.unrealised)}</span>
-              </li>
-            ))}
-          </ul>
+      {unresolved.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {unresolved.map((u) => (
+            <Chip key={`${u.account_id}-${u.contract_id}`} title={`${u.side === "SHORT" ? "Sold" : "Bought"} ${formatQuantity(u.quantity)}`}>
+              {contractName(u)} · {REASON[u.reason]}
+            </Chip>
+          ))}
         </div>
       )}
 
-      <button
-        type="button"
-        onClick={() => setShowDetails((v) => !v)}
-        style={{
-          marginTop: 16,
-          background: "none",
-          border: "none",
-          padding: 0,
-          cursor: "pointer",
-          font: "var(--type-body-sm)",
-          color: "var(--text-secondary)",
-          textDecoration: "underline",
-        }}
-        aria-expanded={showDetails}
-      >
-        {showDetails ? "Hide details" : "View details (turnover, charges, STT)"}
-      </button>
-      {!showDetails && (
-        <p style={note}>Draft for your CA: F&amp;O profit is taxed as business income.</p>
-      )}
-      {showDetails && (
-        <FnoDetails
-          positions={p}
-          tax={tax}
-          realised={realised}
-          provisionalNote={provisionalNote}
-        />
-      )}
+      <Line>Taxed as business income, not capital gains.</Line>
     </Card>
   );
 }
 
-/** The full figures behind the summary: open positions, and turnover, charges and STT
- *  per financial year -- what a CA asks for. Unchanged from the earlier card. */
-function FnoDetails({
-  positions: p,
-  tax,
-  realised,
-  provisionalNote,
+function Row({
+  name,
+  bar,
+  value,
+  valueClass,
+  nameWidth = 72,
 }: {
-  positions: FnoPositionsResponse;
-  tax: ReturnType<typeof useFetch<FnoTaxResponse>>;
-  realised: ReturnType<typeof useFetch<FnoRealisedResponse>>;
-  provisionalNote: string | null;
+  nameWidth?: number;
+  name: string;
+  bar: ReactNode;
+  value: string;
+  valueClass?: string;
 }) {
   return (
-    <div style={{ marginTop: 12 }}>
-      <span style={label}>Open positions</span>
-      {p.positions.length === 0 ? (
-        <p style={note}>You have no open futures or options right now.</p>
-      ) : (
-        <table className="w-full" style={{ marginTop: 8, font: "var(--type-body-sm)" }}>
-          <thead>
-            <tr style={{ color: "var(--text-secondary)" }}>
-              <th className="py-1 text-left">Contract</th>
-              <th className="py-1 text-left">Side</th>
-              <th className="py-1 text-right">Quantity</th>
-              <th className="py-1 text-right">Current price</th>
-              <th className="py-1 text-right">Profit / loss (open)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {p.positions.map((row) => (
-              <tr key={`${row.account_id}-${row.contract_id}`}>
-                <td className="py-1">{contractName(row)}</td>
-                <td className="py-1">{row.side === "SHORT" ? "Sold (short)" : "Bought (long)"}</td>
-                <td className="py-1 text-right tabular-nums">{formatQuantity(row.quantity)}</td>
-                <td className="py-1 text-right tabular-nums" title={`Exchange price of ${formatDate(row.mark_date)}`}>
-                  {formatMoney(row.mark, true)}
-                </td>
-                <td className={`py-1 text-right tabular-nums ${signClass(row.unrealised)}`}>
-                  {formatMoney(row.unrealised)}
-                </td>
-              </tr>
-            ))}
-            <tr style={{ borderTop: "1px solid var(--ledger-ink)" }}>
-              <td className="py-1" colSpan={4}>Total profit / loss on open positions{p.excluded.length > 0 ? " (only those with a price)" : ""}</td>
-              <td className={`py-1 text-right tabular-nums ${signClass(p.unrealised_total)}`}>
-                {formatMoney(p.unrealised_total)}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      )}
-
-      <div style={{ marginTop: 20 }}>
-        <span style={label}>Closed trades, by financial year</span>
-      </div>
-      {tax.error ? (
-        <p style={{ ...note, color: "var(--negative)" }}>{tax.error}</p>
-      ) : !tax.data || tax.data.years.length === 0 ? (
-        <p style={note}>{tax.loading ? "Loading…" : "No closed trades yet."}</p>
-      ) : (
-        <table className="w-full" style={{ marginTop: 8, font: "var(--type-body-sm)" }}>
-          <thead>
-            <tr style={{ color: "var(--text-secondary)" }}>
-              <th className="py-1 text-left">Financial year</th>
-              <th className="py-1 text-right">Profit / loss</th>
-              <th className="py-1 text-right" title="Turnover as used for F&amp;O tax">Turnover</th>
-              <th className="py-1 text-right" title="Brokerage, exchange fees, GST, stamp duty and STT">Charges paid</th>
-              <th className="py-1 text-right" title="Securities Transaction Tax, already counted in Charges paid">STT (part of charges)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tax.data.years.map((y) => (
-              <tr key={y.financial_year}>
-                <td className="py-1">
-                  {y.financial_year}
-                  {y.includes_provisional && (
-                    <span
-                      style={{ color: "var(--text-tertiary)" }}
-                      title={provisionalNote ?? undefined}
-                    >
-                      {" "}
-                      (includes {y.provisional_matches} estimated expiry{" "}
-                      {y.provisional_matches === 1 ? "entry" : "entries"})
-                    </span>
-                  )}
-                </td>
-                <td className={`py-1 text-right tabular-nums ${signClass(y.realised_pnl)}`}>
-                  {formatMoney(y.realised_pnl)}
-                </td>
-                <td className="py-1 text-right tabular-nums">{formatMoney(y.turnover)}</td>
-                <td className="py-1 text-right tabular-nums">{formatMoney(y.expenses)}</td>
-                <td className="py-1 text-right tabular-nums">{formatMoney(y.stt)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-
-      {realised.error && (
-        <p style={{ ...note, color: "var(--negative)" }}>
-          Could not load the closed-trade details: {realised.error}
-        </p>
-      )}
-      {provisionalNote && <p style={note}>Estimated expiry entries: {provisionalNote}</p>}
-
-      <p style={note}>
-        Draft only, please check with your CA. F&amp;O profit is taxed as business income. These
-        figures have not been checked by a chartered accountant, and Trackr+ does not file
-        your tax return.
-      </p>
+    <div style={{ display: "grid", gridTemplateColumns: `${nameWidth}px 1fr 120px`, alignItems: "center", gap: 12 }}>
+      <span style={{ font: "var(--type-body-sm)", color: "var(--text-primary)", whiteSpace: "nowrap" }}>{name}</span>
+      {bar}
+      <span className={`tabular-nums ${valueClass ?? ""}`} style={{ font: "var(--type-body-sm)", textAlign: "right" }}>
+        {value}
+      </span>
     </div>
+  );
+}
+
+function Pill({ children, title }: { children: ReactNode; title?: string }) {
+  return (
+    <span
+      title={title}
+      className="tabular-nums"
+      style={{
+        padding: "2px 8px",
+        borderRadius: 999,
+        background: "var(--surface-sunken)",
+        font: "var(--type-body-sm)",
+        color: "var(--text-primary)",
+      }}
+    >
+      {children}
+    </span>
   );
 }

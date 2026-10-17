@@ -1,13 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { useAuth } from "@trackr/core";
-import { useFetch } from "@trackr/core";
-import { api, ApiError } from "@trackr/core";
+import { api, ApiError, broadcastPortfolioRefresh, useAuth, useFetch } from "@trackr/core";
 import type { PromoteResultOut, ReviewBatchOut, StageResultOut } from "@trackr/core";
 import { Badge, Button } from "@trackr/ui";
 
-export function StagingBatch({ stageResult }: { stageResult: StageResultOut }) {
+export function StagingBatch({ stageResult, onResolved }: { stageResult: StageResultOut; onResolved?: () => void }) {
   const { token } = useAuth();
   const review = useFetch<ReviewBatchOut>(`/ingest/stage/${stageResult.batch_id}`, undefined, token);
   const [busy, setBusy] = useState(false);
@@ -20,6 +18,8 @@ export function StagingBatch({ stageResult }: { stageResult: StageResultOut }) {
       const res = await api.post<PromoteResultOut>(`/ingest/stage/${stageResult.batch_id}/promote`, { token });
       setMessage(`Promoted: ${res.inserted} inserted, ${res.skipped_duplicates} duplicates skipped.`);
       review.refetch();
+      onResolved?.();
+      broadcastPortfolioRefresh();
     } catch (err) {
       setMessage(err instanceof ApiError ? err.message : "Promote failed");
     } finally {
@@ -37,6 +37,8 @@ export function StagingBatch({ stageResult }: { stageResult: StageResultOut }) {
       });
       setMessage("Batch discarded.");
       review.refetch();
+      onResolved?.();
+      broadcastPortfolioRefresh();
     } catch (err) {
       setMessage(err instanceof ApiError ? err.message : "Discard failed");
     } finally {
@@ -45,19 +47,22 @@ export function StagingBatch({ stageResult }: { stageResult: StageResultOut }) {
   }
 
   const b = review.data;
+  const isCas = b?.adapter === "cas_pdf";
+  const alreadyInLedger = !!b && b.staged > 0 && b.will_skip_as_duplicate === b.staged;
+  const status = b?.status === "PROMOTED" ? "In ledger"
+    : b?.status === "DISCARDED" ? "Discarded"
+    : isCas ? "Processed" : alreadyInLedger ? "Already in ledger" : "Needs review";
 
   return (
     <div style={{ border: "1px solid var(--border)", padding: 14, background: "var(--surface)" }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
         <div style={{ minWidth: 0 }}>
-          <p style={{ margin: 0, font: "var(--type-body)", fontWeight: 500, color: "var(--text-primary)" }}>
-            {b?.filename ?? stageResult.batch_id}
+          <p style={{ margin: 0, font: "var(--type-body)", fontWeight: 500, color: "var(--text-primary)", overflowWrap: "anywhere" }}>
+            {b?.filename ?? "Uploaded file"}
           </p>
-          <p style={{ margin: "2px 0 0", font: "var(--type-label)", fontFamily: "var(--font-mono)", color: "var(--text-tertiary)" }}>
-            {stageResult.batch_id}
-          </p>
+
         </div>
-        {b && <Badge tone="neutral">{b.status}</Badge>}
+        {b && <Badge tone="neutral">{status}</Badge>}
       </div>
 
       {review.loading && (
@@ -69,7 +74,7 @@ export function StagingBatch({ stageResult }: { stageResult: StageResultOut }) {
         <p style={{ margin: "10px 0 0", font: "var(--type-body-sm)", color: "var(--negative)" }}>{review.error}</p>
       )}
 
-      {b && (
+      {b && !isCas && b.status === "STAGED" && (
         <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
           <div>
             <p style={{ margin: 0, font: "var(--type-label)", color: "var(--text-tertiary)" }}>Will insert</p>
@@ -107,11 +112,14 @@ export function StagingBatch({ stageResult }: { stageResult: StageResultOut }) {
         </ul>
       )}
 
-      {b && b.status === "STAGED" && (
+      {b?.status === "PROMOTED" && !message && <p style={{ font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>Transactions from this file have been saved to your ledger.</p>}
+      {b && isCas && <p style={{ font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>CAS balances are processed during upload. No ledger promotion is needed.</p>}
+      {b && alreadyInLedger && b.status === "STAGED" && <p style={{ font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>These transactions are already in your ledger. Nothing needs to be added again.</p>}
+      {b && !isCas && b.status === "STAGED" && (
         <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-          <Button size="sm" onClick={promote} disabled={busy}>
-            Promote to ledger
-          </Button>
+          {b.will_insert > 0 && <Button size="sm" onClick={promote} disabled={busy}>
+            {busy ? "Saving…" : "Promote to ledger"}
+          </Button>}
           <Button size="sm" variant="secondary" onClick={discard} disabled={busy}>
             Discard
           </Button>

@@ -123,9 +123,12 @@ class FileOutcomeOut(BaseModel):
     rejected: int = 0
     reason: str | None = None
     hint: str | None = None
-    #: True only when the file is a PDF we could not unlock -- the fix is a PAN in
-    #: Settings, not a different file, and the UI says so.
+    #: True only when the file is a PDF we could not unlock -- the fix is its password,
+    #: not a different file, and the UI asks for it.
     encrypted: bool = False
+    #: True when a password was typed for this upload and it did not open this file.
+    #: Nothing was saved; the UI says the password is wrong and asks again.
+    wrong_password: bool = False
     notes: list[str] = []
 
 

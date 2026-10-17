@@ -23,6 +23,7 @@ import time
 from datetime import date, timedelta
 from typing import Any
 
+from app.db.fund_reference import sync_route_observations
 from app.db.prices import (
     held_isins,
     price_dates_settled,
@@ -61,6 +62,10 @@ def store_backfilled_days(connection: Any, price_results: list[PipeResult]) -> i
         stored = upsert_prices(connection, [p for p in result.prices if p.isin in wanted])
         if stored:
             price_dates_fetched += 1
+        sync_route_observations(
+            connection,
+            {p.isin for p in result.prices if p.isin in held and p.isin.startswith("INF")},
+        )
         upsert_listings(
             connection,
             {isin: lst for isin, lst in result.listings.items() if isin in wanted},
@@ -74,6 +79,8 @@ def store_backfilled_days(connection: Any, price_results: list[PipeResult]) -> i
         #   `result.succeeded` -- and NO exchange errored. With BSE down, every BSE-only
         #                         security is missing from a healthy-looking NSE file;
         #                         recording those absent would be a permanent, silent lie.
+        # Exchange-routed holdings only (record_absent_prices enforces it too): a mutual
+        # fund missing from a bhavcopy is not evidence of anything.
         if result.fetched and result.succeeded:
             record_absent_prices(
                 connection, result.price_date, sorted(held - {p.isin for p in result.prices})

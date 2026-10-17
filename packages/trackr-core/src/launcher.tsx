@@ -137,7 +137,7 @@ export function useLauncher({ onNavigate, label, blocked = false }: LauncherOpti
    */
   useEffect(() => {
     function onKey(event: globalThis.KeyboardEvent) {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "k") {
         if (isEditable(event.target)) return;
         if (blocked) return;
         event.preventDefault();

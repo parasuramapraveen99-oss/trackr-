@@ -55,9 +55,14 @@ export interface HoldingOut {
   live: boolean;
   // Date the price was observed (YYYY-MM-DD). Null only when genuinely unknown.
   price_date?: string | null;
-  // "settled" | "live" | "carried" -- how last_price was chosen.
-  price_source?: "settled" | "live" | "carried" | null;
+  // "settled" | "live" | "carried" -- how last_price was chosen; "nav" for a mutual
+  // fund valued at its AMFI NAV dated price_date (docs/MF_ETF_PLAN.md section 4).
+  price_source?: "settled" | "live" | "carried" | "nav" | null;
+  instrument_kind?: InstrumentKind | null;
+  fund_category?: string | null;
 }
+
+export type InstrumentKind = "STOCK" | "ETF" | "MUTUAL_FUND" | "UNRESOLVED";
 
 export interface TotalsOut {
   invested: string | null;
@@ -72,6 +77,9 @@ export interface UnpricedHoldingOut {
   symbol: string | null;
   name: string | null;
   invested: string;
+  // Why there is no price when the valuation route explains it (a fund awaiting its
+  // AMFI NAV, a fund unit not yet identified). Null for an ordinary missing close.
+  reason?: string | null;
 }
 
 export interface UnpricedOut {
@@ -187,6 +195,19 @@ export interface PerformanceResponse {
   realised_to_date: string | null;
   benchmark: BenchmarkOut | null;
   warning: string | null;
+  // Securities these LISTED-scope figures leave out, named. reason_code
+  // "MUTUAL_FUND_SCOPE" marks a fund unit reported in /funds/performance instead.
+  excluded?: ExcludedOut[];
+}
+
+// app/schemas/analytical.py's ExcludedOut.
+export interface ExcludedOut {
+  isin: string;
+  symbol: string | null;
+  message: string;
+  deficit: string | null;
+  reason_code?: string | null;
+  as_of: string | null;
 }
 
 // GET /investors/{id}/contribution -- app/schemas/analytical.py's ContributionOut/
@@ -352,6 +373,92 @@ export interface RealisedOut {
   // moved forward by up to BONUS_ALLOTMENT_SENSITIVITY_DAYS.
   acquisition_date_basis: AcquisitionDateBasis | null;
   classification_sensitive: boolean;
+  // Fund units (docs/MF_ETF_PLAN.md section 5). For a fund `term` is "UNRESOLVED" or the
+  // fund term (SHORT, LONG, DEEMED_SHORT) -- never the equity 365-day answer. Base rates
+  // only: surcharge, cess and the annual exemption are not applied per slice.
+  instrument_kind?: InstrumentKind | null;
+  account_id?: string | null;
+  acquisition_date?: string | null;
+  tax_branch?: "SPECIFIED_FUND" | "EQUITY_ORIENTED" | "OTHER_FUND" | null;
+  tax_term?: "SHORT" | "LONG" | "DEEMED_SHORT" | null;
+  rate_status?: "SPECIAL_RATE" | "ORDINARY_RATES" | null;
+  base_rate?: string | null;
+  indexation?: boolean | null;
+  tax_act?: string | null;
+  tax_section?: string | null;
+  tax_rule_version?: string | null;
+  tax_unresolved_reason?: string | null;
+}
+
+// GET /investors/{id}/funds/performance -- app/routers/funds.py. The MUTUAL_FUND scope,
+// never blended with PerformanceResponse's listed-securities figures.
+export interface FundHoldingOut {
+  isin: string;
+  name: string | null;
+  scheme_code: number | null;
+  category: string | null;
+  plan: string | null;
+  option: string | null;
+  quantity: string;
+  invested: string;
+  nav: string | null;
+  nav_date: string | null;
+  market_value: string | null;
+  reason: string | null;
+}
+
+export interface FundPerformanceOut {
+  as_of: string;
+  scope: "MUTUAL_FUND";
+  xirr_all: string | null;
+  xirr_holdings: string | null;
+  xirr_unavailable_reason: string | null;
+  twrr: string | null;
+  twrr_unavailable_reason: string | null;
+  invested: string;
+  market_value: string;
+  unrealised: string;
+  realised_to_date: string;
+  complete: boolean;
+  latest_final_snapshot: string | null;
+  holdings: FundHoldingOut[];
+  excluded: ExcludedOut[];
+}
+
+// GET /investors/{id}/funds/statements: dated CAS evidence, outside return calculations.
+export interface FundStatementHoldingOut {
+  folio_key: string;
+  folio_label: string;
+  isin: string;
+  name: string;
+  amc_name: string;
+  as_of: string;
+  quantity: string | null;
+  nav: string | null;
+  market_value: string | null;
+  status: "DECLARED" | "CONFLICT";
+  reason: string | null;
+  source_batch_ids: string[];
+}
+
+// GET /investors/{id}/funds/snapshots. `final` false: a NAV this row depends on is
+// still awaited, or a holding is excluded -- never a finished figure.
+export interface FundPointOut {
+  as_of: string;
+  invested: string;
+  market_value: string;
+  unrealised: string;
+  realised_to_date: string;
+  final: boolean;
+  pending_isins: string[];
+  excluded_isins: string[];
+}
+
+// GET/PUT /investors/{id}/tax-profile.
+export interface TaxProfileOut {
+  taxpayer_type: "INDIVIDUAL" | "HUF" | "COMPANY" | "FIRM" | "TRUST" | "OTHER";
+  residency: "RESIDENT" | "NON_RESIDENT";
+  supported_for_fund_tax: boolean;
 }
 
 // GET /investors/{id}/dividends -- app/schemas/transactions.py's DividendSummaryOut.
@@ -464,9 +571,21 @@ export interface FileOutcomeOut {
   rejected: number;
   reason: string | null;
   hint: string | null;
-  /** A PDF we could not unlock. The fix is a PAN in Settings, not another file. */
+  /** A PDF we could not unlock. The fix is its password, not another file. */
   encrypted: boolean;
+  /** A password was typed for this upload and it did not open this file. Nothing saved. */
+  wrong_password: boolean;
   notes: string[];
+}
+
+/** GET /investors/{id}/file-passwords -- whether a password is saved per statement
+ * source. Never the password itself: no route returns one. */
+export interface FilePasswordOut {
+  source: string;
+  label: string;
+  hint: string;
+  saved: boolean;
+  updated_at: string | null;
 }
 
 export interface FilesUploadOut {
@@ -861,8 +980,8 @@ export interface BatchSummaryOut {
 // Ask about markets — app/schemas/market_assistant.py. No investor, no context, no
 // history: the request is a typed question or a catalogue topic ID, never both.
 export type MarketAssistantAskIn = ({ question: string } | { topic_id: string }) & {
-  /** Opt-in to official-update checks (external search + model). Absent means false. */
-  allow_external?: boolean;
+  /** Compatibility field: money answers always use public web research. False is rejected. */
+  allow_external?: true;
   /**
    * Earlier typed questions of this drawer conversation, oldest first (max 4), so a
    * follow-up can be resolved. Never portfolio data; the server re-screens each one.
@@ -905,10 +1024,17 @@ export interface MarketAssistantEvidenceOut {
   end: number;
 }
 
+export interface MarketAssistantMessageUsage {
+  limit: number;
+  used: number;
+  remaining: number;
+  resets_at: string;
+}
+
 export interface MarketAssistantAskOut {
   outcome: "answer" | "blocked" | "clarify";
   message: string;
-  /** The displayed answer, always fewer than 100 words; source details are separate. */
+  /** The displayed answer, always fewer than 50 words; source details are separate. */
   text: string;
   reason_code: string | null;
   answer: MarketAssistantAnswerOut | null;
@@ -926,6 +1052,7 @@ export interface MarketAssistantAskOut {
   retrieval?: "lexical" | "bm25" | "hybrid" | null;
   /** Open questions: checked, cited sentences; cites are 1-based positions in evidence. */
   summary?: { text: string; cites: number[] }[];
+  usage?: MarketAssistantMessageUsage | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -947,7 +1074,13 @@ export interface MarketAssistantAskOut {
 // ---------------------------------------------------------------------------
 
 export interface AnalyticsCoverage {
-  priced_pct: number;
+  priced_pct: number | null;
+  /** Other percentages use the priced subtotal when the full value is unknown. */
+  basis?: "complete_priced_book" | "priced_subset";
+  priced_count_pct?: number;
+  priced_count?: number;
+  total_count?: number;
+  known_value_subtotal?: string;
   pe_pct: number;
   pb_pct: number;
   roe_pct: number;
@@ -961,9 +1094,9 @@ export interface AnalyticsCoverage {
 }
 
 export interface AnalyticsKpi {
-  invested: string;
-  market_value: string;
-  unrealised: string;
+  invested: string | null;
+  market_value: string | null;
+  unrealised: string | null;
   unrealised_pct: number | null;
   realised_to_date?: string | null;
   xirr_all?: number | null;
@@ -1000,6 +1133,9 @@ export interface AnalyticsHealth {
 }
 
 export interface FactorScore {
+  status?: string | null;
+  reasons?: string[];
+  eligible_count?: number;
   score: number | null;
   universe: string;
   universe_size: number;
@@ -1007,6 +1143,13 @@ export interface FactorScore {
 }
 
 export interface RiskWindow {
+  status?: string | null;
+  reasons?: string[];
+  metrics?: Record<string, MilestoneMetric>;
+  period?: Record<string, string | null>;
+  basis?: string | null;
+  tracking_error?: number | null;
+  information_ratio?: number | null;
   observations: number;
   cum_return: number | null;
   cagr: number | null;
@@ -1039,7 +1182,7 @@ export interface RiskCoverage {
   start: string;
   end: string;
   observations: number;
-  weight_pct: number;
+  weight_pct: number | null;
   market_value: string;
   included_isins: string[];
   excluded: { isin: string; symbol: string; reason: string }[];
@@ -1053,6 +1196,8 @@ export interface AllocationRow {
 }
 
 export interface AnalyticsCorrelation {
+  isins?: string[];
+  pairs?: { isin_a: string; isin_b: string; correlation: MilestoneMetric }[];
   symbols: string[];
   matrix: (number | null)[][];
   average: number | null;
@@ -1115,9 +1260,35 @@ export interface AnalyticsInsight {
 export interface FundamentalAggregate {
   value: number | null;
   excluded_weight_pct: number;
+  method_version?: string | null;
+  status?: "available" | "provisional" | "unavailable" | null;
+  reasons?: string[];
+  excluded_isins?: string[];
+}
+
+export interface AdvisorMetric {
+  value: string | null;
+  status: "available" | "provisional" | "unavailable";
+  reasons: string[];
+  unit: string;
+  method: string;
+  coverage: { weight_fraction?: string | null; excluded_isins?: string[]; [key: string]: unknown };
+  period: Record<string, string>;
+  source_refs: string[];
+}
+
+export interface AdvisorIntegration {
+  active_method: "current" | "advisor_v1" | "advisor_v2";
+  method_version: string;
+  source_version: string;
+  as_of: string;
+  metrics: Record<string, AdvisorMetric>;
+  lenses: Record<string, unknown>;
+  differences: { metric: string; current: number | null; candidate: number | null; reason: string }[];
 }
 
 export interface AnalyticsFundamentals {
+  benchmark_comparison?: string;
   pe: FundamentalAggregate;
   pb: FundamentalAggregate;
   dividend_yield: FundamentalAggregate;
@@ -1193,6 +1364,8 @@ export interface NarrativeResponse {
 }
 
 export interface ValuationLensDerived {
+  excluded?: Record<string, string>;
+  method_version?: string | null;
   label: string;
   x_field: string;
   y_field: string;
@@ -1218,13 +1391,13 @@ export interface ValuationLensDerived {
  */
 export interface AnalyticsDerived {
   effective_holdings: number | null;
-  concentration_target: number;
+  concentration_target: number | null;
   position_count: number;
   vol_ratio_1y: number | null;
   /** Signed money. Switch wording on the sign; never describe a negative as "more". */
   growth_delta_vs_benchmark: string | null;
   capital_state_pct: Record<string, number>;
-  capital_state_total: string;
+  capital_state_total: string | null;
   lenses: Record<string, ValuationLensDerived>;
 }
 
@@ -1251,7 +1424,69 @@ export interface AnalyticsExposure {
   risk_share_pct?: number | null;
 }
 
+/** Owner-supplied milestone: values stay Decimal strings until visual geometry. */
+export interface MilestoneMetric<T = string> {
+  value: T | null;
+  status: "available" | "provisional" | "unavailable";
+  reasons: string[];
+  unit: string;
+  method: string;
+  coverage: Record<string, unknown>;
+  period: Record<string, string | null>;
+  source_refs: string[];
+}
+export interface MilestoneWindow {
+  risk: Record<string, MilestoneMetric>;
+  growth_series: MilestoneMetric<{ date: string; value: string }[]>;
+  benchmark_growth: MilestoneMetric<{ date: string; value: string }[]>;
+  basis: string;
+  scope: string;
+}
+export interface MilestoneIllustration extends MilestoneMetric<{
+  growth_series: { date: string; value: string }[];
+  initial_weights: Record<string, string>;
+  weights_as_of: string;
+  basis: string;
+}> {
+  window?: MilestoneMetric<MilestoneWindow>;
+  risk?: RiskWindow;
+  risk_contributions?: AnalyticsExposure[];
+}
+export interface MilestoneReport {
+  schema_version: string;
+  method_version: string;
+  input_digest: string;
+  as_of: string;
+  generated_at: string;
+  sources: { id: string; provider: string; dataset: string; observed_at: string; retrieved_at: string; [key: string]: unknown }[];
+  sections: {
+    overview: Record<string, MilestoneMetric>;
+    factor_score: Record<string, { portfolio: MilestoneMetric; holdings: Record<string, string>; eligible_count: number; total_count?: number; universe?: string }>;
+    risk_return: Record<string, MilestoneMetric>;
+    diversification: Record<string, unknown>;
+    fundamentals: Record<string, unknown>;
+    performance: { windows: Record<string, MilestoneMetric<MilestoneWindow>>; [key: string]: unknown };
+    valuation_map: Record<string, unknown>;
+  };
+  status: string;
+  reasons: string[];
+  scope: { asset_class: string; excluded: { isin: string; name: string; asset_class: string; reason: string }[]; actual_series_reason: string | null };
+  illustrations: Record<string, MilestoneIllustration>;
+  reported_inputs: {
+    status?: string;
+    reasons?: string[];
+    positions?: AnalyticsPosition[];
+    fundamentals?: Pick<AnalyticsFundamentals, "pe" | "pb" | "dividend_yield">;
+    lenses?: Record<string, ValuationLensDerived>;
+    metrics?: Record<string, MilestoneMetric>;
+    factors?: Record<string, FactorScore>;
+    characteristics?: AnalyticsResponse["characteristics"];
+  };
+}
+
 export interface AnalyticsResponse {
+  advisor?: MilestoneReport | null;
+  integration?: AdvisorIntegration | null;
   as_of: string;
   generated_at: string;
   benchmark: string;
@@ -1565,4 +1800,45 @@ export interface IdentityReview {
 
 export interface IdentityReviewsResponse {
   items: IdentityReview[];
+}
+
+// GET /investors/{id}/capital-gains?fy=YYYY-YY -- app/routers/capital_gains.py. Shares and
+// fund units together: one s.112A exemption per taxpayer per year, losses set off in the
+// stated order. Base tax only; ordinary-rate (slab) tax is not calculated.
+export interface CapitalGainsLineOut {
+  bucket: "EQUITY_STCG" | "EQUITY_LTCG" | "OTHER_LTCG" | "ORDINARY_STCG";
+  base_rate: string | null;
+  slices: number;
+  gains: string;
+  losses: string;
+  net: string;
+  set_off_received: string;
+  exemption: string;
+  taxable: string;
+  base_tax: string | null;
+}
+
+export interface CapitalGainsUnresolvedOut {
+  isin: string;
+  name: string | null;
+  sell_date: string | null;
+  gain: string;
+  reason: string;
+}
+
+export interface CapitalGainsOut {
+  fy: string;
+  complete: boolean;
+  lines: CapitalGainsLineOut[];
+  exemption_limit: string;
+  exemption_used: string;
+  special_rate_tax: string;
+  ordinary_rate_taxable: string;
+  carry_forward_short_term_loss: string;
+  carry_forward_long_term_loss: string;
+  set_off_order: string[];
+  slices: unknown[];
+  unresolved: CapitalGainsUnresolvedOut[];
+  excluded: { isin: string; message: string }[];
+  notes: string[];
 }

@@ -74,6 +74,11 @@ def store_document(
     """
     digest = content_hash(content)
 
+    # All upload/email paths share this hash lock. A prior SELECT followed by INSERT
+    # alone can race, even when the final unique index correctly rejects a duplicate.
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"document:{investor_id}:{digest}",))
     existing = find_by_hash(conn, digest, investor_id)
     if existing is not None:
         # find_by_hash returns the raw row, so ``id`` is a psycopg UUID object, not the

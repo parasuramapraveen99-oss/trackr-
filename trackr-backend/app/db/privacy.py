@@ -146,6 +146,19 @@ def export_investor(
     # that then travels by email. The list plus a signed URL is the safer shape.
     export["documents"] = documents.documents_for_investor(conn, investor_id)
 
+    from app.db import cas_folios
+
+    if cas_folios.tables_present(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM cas_fund_snapshot WHERE investor_id=%s ORDER BY snap_date",
+                (investor_id,),
+            )
+            columns = [c.name for c in cur.description]
+            export["cas_fund_statements"] = [
+                dict(zip(columns, r, strict=True)) for r in cur.fetchall()
+            ]
+
     # RESEARCH, when this database has the schema for it. Added in place rather than behind a
     # second endpoint: portability is one right, and an investor should not have to know that
     # their notes live in different tables from their trades to get a complete copy.

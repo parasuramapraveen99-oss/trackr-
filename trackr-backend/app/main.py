@@ -7,7 +7,7 @@ this becomes a pure JSON API. See docs/BACKEND_REUSE_AND_GAP_ANALYSIS.md section
 Every handler below logs before responding: request id, method, path, and the full
 traceback for a 500. Never a bare ``except: pass`` -- Rule 2 has zero exceptions.
 
-    cd trackr-backend && DATABASE_URL=postgresql:///portfolio uvicorn app.main:app --reload
+    cd trackr-backend && uvicorn app.main:app --reload --env-file .env
 """
 
 from __future__ import annotations
@@ -73,12 +73,15 @@ from app.routers import (
     brokers,
     butler,
     butler_notebook,
+    capital_gains,
     consent,
     corporate_actions,
     demerger_watch,
     dividends_ops,
+    email_automation,
     families,
     fno,
+    funds,
     grievance,
     holdings,
     ingest,
@@ -813,8 +816,11 @@ app.include_router(investors.router)
 app.include_router(families.router)
 app.include_router(holdings.router)
 app.include_router(fno.router)
+app.include_router(funds.router)
+app.include_router(capital_gains.router)
 app.include_router(transactions.router)
 app.include_router(ingest.router)
+app.include_router(email_automation.router)
 app.include_router(analytical.router)
 app.include_router(analytics.router)
 app.include_router(privacy.router)

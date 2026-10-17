@@ -8,6 +8,7 @@ import type { ClientsOverview, InvestorIn, InvestorOut } from "@/lib/api-types";
 import { useFetch } from "@/lib/use-fetch";
 import { AccountOnboarding } from "../components/AccountOnboarding";
 import { ConsentCapture } from "../components/ConsentCapture";
+import { FilePasswords } from "../components/FilePasswords";
 import { ClientsTree } from "../components/ClientsTree";
 import { PageHeader } from "../components/PageHeader";
 import { PageBody } from "../components/Shell";
@@ -23,6 +24,7 @@ const TABS = [
   { key: "portfolios", label: "Portfolios", blurb: "View your clients and add new ones." },
   { key: "permission", label: "Permission", blurb: "What you've allowed us to process." },
   { key: "brokers", label: "Brokers", blurb: "Where this portfolio's documents come from." },
+  { key: "passwords", label: "File passwords", blurb: "Passwords that open your locked statements." },
   { key: "privacy", label: "Privacy & data", blurb: "Export or delete everything." },
 ] as const;
 
@@ -62,11 +64,15 @@ export default function SettingsPage() {
   const [investorError, setInvestorError] = useState<string | null>(null);
   const [investorCreated, setInvestorCreated] = useState(false);
 
-  // Read once on mount rather than tracking `location.hash` continuously: the rail owns
-  // the tab after the first paint, and a listener would fight it every time we push.
+  // Header links can target another tab while Settings is already mounted.
   useEffect(() => {
-    const hash = window.location.hash.replace("#", "");
-    if (TABS.some((t) => t.key === hash)) setTab(hash as TabKey);
+    const readHash = () => {
+      const hash = window.location.hash.replace("#", "");
+      if (TABS.some((t) => t.key === hash)) setTab(hash as TabKey);
+    };
+    readHash();
+    window.addEventListener("hashchange", readHash);
+    return () => window.removeEventListener("hashchange", readHash);
   }, []);
 
   function selectTab(key: TabKey) {
@@ -246,9 +252,18 @@ export default function SettingsPage() {
             {tab === "brokers" && (
               <Section
                 title="Broker accounts"
-                blurb="Add each broker you use. Each one gets its own email address for forwarding contract notes."
+                blurb="These accounts identify which broker your imports belong to. Add an account when you start using another broker."
               >
                 <AccountOnboarding investorId={investorId} token={token} />
+              </Section>
+            )}
+
+            {tab === "passwords" && (
+              <Section
+                title="File passwords"
+                blurb="Your PAN and saved passwords help open locked statements during import. Stored values are encrypted."
+              >
+                <FilePasswords investorId={investorId} token={token} />
               </Section>
             )}
 

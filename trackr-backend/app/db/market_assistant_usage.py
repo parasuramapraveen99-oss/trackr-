@@ -76,3 +76,57 @@ class PostgresUsageStore:
         except Exception as exc:
             logger.warning("market_assistant usage read failed: %s", type(exc).__name__)
             return 0
+
+
+class MessageUsageUnavailable(Exception):
+    """The daily message allowance could not be read or reserved."""
+
+
+class PostgresMessageStore:
+    """Atomic daily allowance for one opaque subject; no conversation is stored."""
+
+    def __init__(self, url: str, subject_hash: str):
+        self._url = url
+        self._subject = subject_hash
+
+    def used(self, day: date) -> int:
+        try:
+            with connect(self._url) as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT used FROM market_assistant_message_usage "
+                    "WHERE subject_hash = %s AND day = %s", (self._subject, day),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+        except Exception as exc:
+            logger.warning("market_assistant message read failed: %s", type(exc).__name__)
+            raise MessageUsageUnavailable from None
+
+    def reserve(self, day: date, limit: int) -> int | None:
+        if limit <= 0:
+            return None
+        try:
+            with connect(self._url) as conn, conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO market_assistant_message_usage (subject_hash, day, used) "
+                    "VALUES (%s, %s, 1) ON CONFLICT (subject_hash, day) DO UPDATE "
+                    "SET used = market_assistant_message_usage.used + 1 "
+                    "WHERE market_assistant_message_usage.used < %s RETURNING used",
+                    (self._subject, day, limit),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else None
+        except Exception as exc:
+            logger.warning("market_assistant message reserve failed: %s", type(exc).__name__)
+            raise MessageUsageUnavailable from None
+
+    def release(self, day: date) -> None:
+        try:
+            with connect(self._url) as conn, conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE market_assistant_message_usage SET used = greatest(0, used - 1) "
+                    "WHERE subject_hash = %s AND day = %s", (self._subject, day),
+                )
+        except Exception as exc:
+            logger.warning("market_assistant message release failed: %s", type(exc).__name__)
+            raise MessageUsageUnavailable from None

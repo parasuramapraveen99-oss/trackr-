@@ -102,7 +102,8 @@ where = ["."]
 include = ["app*"]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = [".", ".."]
+markers = ["db: needs a real isolated PostgreSQL cluster"]
 
 # Vercel deploys this directory as its own project (Root Directory = trackr-backend/,
 # see docs/DEPLOYMENT.md). app/main.py already matches Vercel's auto-detected entrypoint
@@ -129,6 +130,8 @@ select = [
 # Stubs import the types they will return once implemented; the signatures are the
 # specification and must not be trimmed to satisfy an unused-import check.
 "app/engine/*.py" = ["F401"]
+# Preserve the supplied calculation kernels byte-for-byte so source hashes remain useful.
+"app/analytics/_vendor/advisor/*.py" = ["E501", "I001", "B007", "B905", "F401"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's dependency-injection idiom IS `Depends(...)`/`Query(...)` in an argument

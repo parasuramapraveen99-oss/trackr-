@@ -1,9 +1,9 @@
 """Turn an admission decision into what the user sees.
 
-Answers come from local concepts without opt-in, or from admitted public evidence with
-opt-in: checked model summaries and exact-quote fallbacks. ``Reply.text`` is the single
-displayed answer, always fewer than 100 words. No user text is echoed in a block, so a
-blocked value cannot be echoed back into a screen, a log that captures responses, or a
+Public requests use the model for planning, clarification and scope declines, then Exa
+and checked model summaries for facts. Failed model answers are never replaced with
+quotes or index facts. ``Reply.text`` is always fewer than 50 words. No user text is
+echoed in a block, so a blocked value cannot reach a screen, a log that captures responses, or a
 crash report. Nothing here names the services behind the assistant: sources are named
 by their publisher and source kind, with dates and source-span provenance.
 """
@@ -43,16 +43,20 @@ from app.market_assistant.exa import (
     build_open_request,
     build_request,
 )
-from app.market_assistant.limits import DailyBudget, TTLCache
+from app.market_assistant.limits import MESSAGE_TIMEZONE, DailyBudget, TTLCache
 from app.market_assistant.model import ModelUnavailable, SelectorClient
 from app.market_assistant.open_research import (
     ANSWER_PROMPT,
+    MAX_DISPLAY_WORDS,
     PLANNER_PROMPT,
+    REWRITE_PROMPT,
     ModelOutputRejected,
     Sentence,
+    answer_candidates,
     answer_content,
     parse_plan,
     planner_content,
+    short_answer_candidates,
     source_label,
     validate_answer,
 )
@@ -110,22 +114,15 @@ MSG_OPEN_NEEDS_OPT_IN = (
     "To answer this I need to search public sources. Turn Search On at the top and ask "
     "again, or pick a topic:"
 )
-MSG_OPEN_UNAVAILABLE = "Searching sources is not available right now. Try one of these:"
-MSG_OUT_OF_SCOPE = (
-    "I can help with money questions: stocks, funds, F&O, banking, tax, insurance and savings."
-)
+MSG_OPEN_UNAVAILABLE = "Search is unavailable. Please try again."
+MSG_PLANNER_UNAVAILABLE = "The assistant is unavailable. Please try again."
 MSG_OPEN_ANSWER = "Here's what the sources say:"
 MSG_ADVICE = (
     "I can't decide whether you should buy or sell. These facts can help you decide:"
 )
-MSG_OPEN_EXCERPTS = "Here are direct quotes from the sources:"
-MSG_OPEN_NOTHING = (
-    "I couldn't find reliable sources for this. Try a company or fund name, or rephrase."
-)
+MSG_OPEN_NOTHING = "Search returned no usable sources. Please try again."
+MSG_ANSWER_UNAVAILABLE = "The assistant couldn’t produce a verified answer. Please try again."
 MSG_OPEN_BUDGET = "Today's limit for searching sources is used up. Try again tomorrow."
-MSG_OPEN_CLARIFY = (
-    "Which company, fund or F&O contract do you mean? Please share only its public name."
-)
 OPEN_MAX_AGE_DAYS = 3650
 
 
@@ -162,30 +159,23 @@ class Reply:
 
     @property
     def text(self) -> str:
-        """The one displayed answer, always fewer than 100 whitespace-separated words.
+        """The one displayed answer, always fewer than 50 whitespace-separated words.
 
         Sources and exact excerpts are separate expandable metadata. Keep sentences
         whole so a length cap never removes an important qualification or negation.
         """
-        parts = [self.message]
+        parts = [self.message] if not self.summary or self.message != MSG_OPEN_ANSWER else []
         if self.summary:
-            parts.extend(s.text + " " + "".join(f"[{n}]" for n in s.cites)
-                         for s in self.summary)
-        elif self.evidence:
-            for n, e in enumerate(self.evidence, 1):
-                for sentence in re.split(r"(?<=[.!?])\s+", e.text):
-                    if len(sentence.split()) + len(" ".join(parts).split()) + 1 < 100:
-                        parts.append(f'"{sentence}" [{n}]')
-                        break
+            parts.extend(s.text for s in self.summary)
         elif self.answer:
-            parts.append(self.answer.body)
+            parts.extend(re.split(r"(?<=[.!?])\s+", self.answer.body))
         if self.note:
             parts.append(self.note)
         kept: list[str] = []
         count = 0
         for part in parts:
             words = len(part.split())
-            if count + words < 100:
+            if count + words <= MAX_DISPLAY_WORDS:
                 kept.append(part)
                 count += words
         return " ".join(kept)
@@ -193,15 +183,14 @@ class Reply:
 
 @dataclass
 class SearchDeps:
-    """What a LATEST question may use. ``client`` is None when searching is off;
-    ``selector`` is None when the model step is off, and ranked excerpts are shown."""
+    """Public research dependencies. Missing search or model clients give a service error."""
 
     client: SearchClient | None
     budget: DailyBudget
     cache: TTLCache[tuple[tuple[Excerpt, ...], datetime, str | None, str]]
     selector: SelectorClient | None = None
     model_budget: DailyBudget | None = None
-    today: Callable[[], date] = lambda: datetime.now(UTC).date()
+    today: Callable[[], date] = lambda: datetime.now(MESSAGE_TIMEZONE).date()
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
     #: Phase 5 passage ranking. LEXICAL keeps the Phase 2 behaviour exactly.
     retrieval: RetrievalMode = RetrievalMode.LEXICAL
@@ -310,7 +299,7 @@ def _open_reply(outcome: Outcome, message: str, admission: Admission, **kw) -> R
         message=message,
         reason_code=kw.pop("reason_code", None),
         answer=None,
-        suggestions=tuple(topic(t) for t in admission.suggestions),
+        suggestions=(),
         **kw,
     )
 
@@ -336,23 +325,28 @@ def _open(admission: Admission, deps: SearchDeps) -> Reply:
         )
     except (ModelUnavailable, ModelOutputRejected) as exc:
         logger.info("market_assistant planner failed: %s", getattr(exc, "reason", exc))
-        return _open_reply(Outcome.CLARIFY, MSG_OPEN_UNAVAILABLE, admission,
+        return _open_reply(Outcome.CLARIFY, MSG_PLANNER_UNAVAILABLE, admission,
                            reason_code="planner_unavailable")
     if not plan.in_scope:
-        return _open_reply(Outcome.CLARIFY, MSG_OUT_OF_SCOPE, admission, reason_code="out_of_scope")
+        return _open_reply(Outcome.CLARIFY, plan.reply, admission, reason_code="out_of_scope")
     if plan.clarify:
-        return _open_reply(Outcome.CLARIFY, MSG_OPEN_CLARIFY, admission,
-                           reason_code="missing_entity")
+        return _open_reply(Outcome.CLARIFY, plan.reply, admission, reason_code="missing_entity")
 
     today = deps.today()
     age = plan.max_age_days
+    market_overview = bool(re.search(
+        r"\b(?:indian (?:stock )?markets?|stock market (?:today|update|news)|"
+        r"sensex.*nifty|nifty.*sensex)\b", " ".join(plan.queries), re.I,
+    ))
     folded = question.casefold()
     historical = bool(re.search(r"\b(?:19|20)\d{2}\b", folded)) and not re.search(
         r"\b(?:today|latest|recent|now|current)\b", folded
     )
     if not historical:
         if re.search(r"\b(?:today|right now)\b", folded):
-            age = min(age, 0)
+            # The latest close remains relevant before opening, on weekends and holidays.
+            # It is labelled by its source date, never passed off as today's live price.
+            age = 7 if market_overview else min(age, 0)
         elif re.search(r"\bthis week\b", folded):
             age = min(age, 7)
         elif re.search(r"\b(?:latest|recent|news|current|update)\b", folded):
@@ -362,12 +356,16 @@ def _open(admission: Admission, deps: SearchDeps) -> Reply:
             age = min(age, 180)
     spec = SearchSpec(" ".join(plan.queries), tuple(sorted(SOURCE_DOMAINS)), "", age)
     raw_results = []
+    completed_searches = 0
     # One trusted-source search plus one discovery search. The model chooses public
     # queries, never domains; unknown issuer hosts need an official website reference.
     searches = [(plan.queries[0], False), (plan.queries[-1], True)]
     start = today - timedelta(days=age) if age < OPEN_MAX_AGE_DAYS else None
     for query, discover in searches:
         if not deps.budget.reserve():
+            if completed_searches == 0:
+                return _open_reply(Outcome.CLARIFY, MSG_OPEN_BUDGET, admission,
+                                   reason_code="budget")
             break
         try:
             results = deps.client.search(build_open_request(
@@ -376,60 +374,106 @@ def _open(admission: Admission, deps: SearchDeps) -> Reply:
         except (SearchUnavailable, ValueError) as exc:
             logger.info("market_assistant open search failed: %s", type(exc).__name__)
             continue
+        completed_searches += 1
         raw_results.extend(results)
+    if completed_searches == 0:
+        return _open_reply(Outcome.CLARIFY, MSG_OPEN_UNAVAILABLE, admission,
+                           reason_code="search_unavailable")
     docs = admit_open_documents(raw_results, spec, today)
     # Unknown publication dates cannot support a current-news claim. Publication and
     # check dates have different meanings; never substitute the check date.
     docs = [d for d in docs if (d.published is not None or age == OPEN_MAX_AGE_DAYS)
             and (d.published is None or d.published <= today)]
+    # The two searches can return the same article with different page wrappers.
+    unique: dict[str, Doc] = {}
+    for doc in docs:
+        if doc.url not in unique or len(doc.text) > len(unique[doc.url].text):
+            unique[doc.url] = doc
+    docs = list(unique.values())
     checked_at = deps.now()
     if not docs:
         return _open_reply(Outcome.CLARIFY, MSG_OPEN_NOTHING, admission,
                            reason_code="nothing_found", checked_at=checked_at)
 
     order, used = rank_passages(docs, spec, deps.retrieval, deps.embedder)
-    candidates = candidates_from_ranking(order)
-    fallback = tuple(_excerpt(c) for c in candidates[:3])
+    # Clean before the eight-passage model cap, so titles and captions cannot crowd out
+    # article facts. Ranking itself still receives only the planner's public queries.
+    candidates = answer_candidates(
+        [Candidate(f"c{n}", p.doc, p.start, p.end) for n, p in enumerate(order)],
+        spec.query, limit=32,
+    )
+    if market_overview and re.search(r"\b(?:today|now|right now)\b", folded):
+        candidates = [c for c in candidates if not re.search(
+            r"\b(?:week(?:ly)?|month(?:ly)?|year-to-date|week-on-week|ytd)\b", c.text, re.I,
+        )]
+    if market_overview:
+        # Sector and small-cap indices do not establish the broad market's direction.
+        candidates = [c for c in candidates if re.search(
+            r"\bSensex\b|\bNifty\s*50\b|\bNifty(?=\s+(?:rose|fell|closed|ended|"
+            r"settled|gained|lost|was|is|stood|finished|up|down|index)\b|[,.:])",
+            c.text, re.I,
+        )]
+    if market_overview and candidates:
+        latest = max((c.doc.published for c in candidates if c.doc.published), default=None)
+        if latest:
+            candidates = [c for c in candidates if c.doc.published == latest]
+    candidates = candidates[:8]
     if not candidates:
         return _open_reply(Outcome.CLARIFY, MSG_OPEN_NOTHING, admission,
                            reason_code="nothing_found", checked_at=checked_at)
     sentences: list[Sentence] = []
     cited: list[Candidate] = []
-    if deps.model_budget.reserve():
+    # One short rewrite is allowed for an invalid draft, within the same hard budget.
+    # A provider error is never retried, and the rewrite has the same evidence checks.
+    for prompt in (ANSWER_PROMPT, REWRITE_PROMPT):
+        if not deps.model_budget.reserve():
+            logger.info("market_assistant answer skipped: daily model limit reached")
+            break
+        offered = (candidates if prompt == ANSWER_PROMPT
+                   else short_answer_candidates(candidates, spec.query))
+        if not offered:
+            break
         try:
             sentences, cited = validate_answer(
                 deps.selector.complete(
-                    ANSWER_PROMPT, answer_content(
-                        question, admission.advice, candidates, admission.earlier
+                    prompt, answer_content(
+                        question, admission.advice, offered, admission.earlier
                     )
-                ),
-                candidates,
+                ), offered,
             )
-        except (ModelUnavailable, ModelOutputRejected) as exc:
-            logger.info("market_assistant answer failed: %s", getattr(exc, "reason", exc))
-    else:
-        logger.info("market_assistant answer skipped: daily model limit reached")
+        except ModelUnavailable as exc:
+            logger.info("market_assistant answer unavailable: %s", exc)
+            break
+        except ModelOutputRejected as exc:
+            logger.info("market_assistant answer rejected: %s", exc.reason)
+        if sentences:
+            break
     if sentences:
         message = MSG_ADVICE if admission.advice else MSG_OPEN_ANSWER
+        if market_overview:
+            dated = max((c.doc.published for c in cited if c.doc.published), default=None)
+            if dated:
+                message = f"Latest report ({dated.strftime('%d %b %Y')}):"
         return _open_reply(
             Outcome.ANSWER, message, admission,
             evidence=tuple(_excerpt(c) for c in cited), summary=tuple(sentences),
             checked_at=checked_at, selection=SELECTION_CHECKED, retrieval=used.value,
         )
-    message = MSG_ADVICE if admission.advice else MSG_OPEN_EXCERPTS
     return _open_reply(
-        Outcome.ANSWER, message, admission, evidence=fallback, checked_at=checked_at,
-        selection=SELECTION_RANKED, retrieval=used.value,
+        Outcome.CLARIFY, MSG_ANSWER_UNAVAILABLE, admission, checked_at=checked_at,
+        reason_code="answer_unavailable",
     )
 
 
 def render(
     admission: Admission, deps: SearchDeps | None = None, *, allow_external: bool = True
 ) -> Reply:
-    """``allow_external`` is the user's opt-in; the route passes the request's value, which
-    defaults to false. The default here is true only so pure unit tests of the search path
-    need not repeat it; the route never relies on it."""
-    suggestions = tuple(topic(t) for t in admission.suggestions)
+    """Public routes convert safe admissions with ``as_research`` and always enable search.
+
+    Catalogue rendering below is retained for the legacy pure interface; HTTP requests
+    never use it as a substitute for research or a failed model answer.
+    """
+    suggestions = ()
     if admission.outcome is Outcome.OPEN:
         if not allow_external:
             return _open_reply(Outcome.CLARIFY, MSG_OPEN_NEEDS_OPT_IN, admission,
@@ -481,7 +525,7 @@ def render(
 
 def lead(excerpt: Excerpt) -> str:
     """The server's own words above a quote. The selector picks a template ID; only this
-    function turns it into text, so the model never writes anything the user reads."""
+    function turns it into the source label, independently of the model's answer."""
     if excerpt.source_kind == "issuer":
         return f"Company statement from {excerpt.publisher}:"
     if excerpt.source_kind == "news":

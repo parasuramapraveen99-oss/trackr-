@@ -25,13 +25,14 @@ from pydantic import BaseModel
 from app import securities
 from app.auth.dependencies import require_owned_investor
 from app.database import get_conn, money, rate
+from app.db.fund_reference import latest_fund_navs
 from app.db.inferred_cash_flows import confirmed_by, record_confirmation
 from app.db.prices import latest_prices
 from app.db.repository import load_transactions
 from app.engine.holdings import compute_holdings_partitioned
 from app.engine.types import ZERO, Holding, Transaction, TxnType
 from app.engine.valuation import value_holdings
-from app.prices.current import resolve_current_prices
+from app.prices.current import SOURCE_NAV, resolve_current_prices
 from app.prices.live import ist_now
 from app.schemas.holdings import HoldingsResponse, SummaryResponse
 
@@ -112,9 +113,20 @@ def _portfolio(
     # last real trading day's close), so this is "the last close before the one shown"
     # whether the current price is a live intraday quote or today's settled bhavcopy.
     has_priced = any(h.isin in prices for h in holdings)
+    # A fund's previous value is its previous NAV, never an exchange close: a listed fund
+    # unit can have both, and mixing them would make a day move out of two sources.
+    nav_quotes = {i: q for i, q in current.quotes.items() if q.source == SOURCE_NAV}
     previous_closes = (
-        latest_prices(connection, isins, as_of - timedelta(days=1)) if has_priced else {}
+        latest_prices(
+            connection, [i for i in isins if i not in nav_quotes], as_of - timedelta(days=1)
+        )
+        if has_priced
+        else {}
     )
+    for isin, quote in nav_quotes.items():
+        before = latest_fund_navs(connection, [isin], quote.price_date - timedelta(days=1))
+        if isin in before:
+            previous_closes[isin] = before[isin].nav
     valued, unpriced = value_partition(holdings, prices, as_of, previous_closes)
     meta = securities.lookup(connection, [h.isin for h in holdings] + [s.isin for s in skipped])
 
@@ -129,6 +141,7 @@ def _portfolio(
         "live_isins": live_isins,
         "live_as_of": ist_now().isoformat() if live_isins else None,
         "quotes": current.quotes,
+        "unpriced_reasons": current.unpriced_reasons,
     }
 
 
@@ -154,6 +167,8 @@ def _row(book: dict[str, Any], holding: Holding) -> dict[str, Any]:
         "live": holding.isin in book.get("live_isins", set()),
         "price_date": quote.price_date.isoformat() if quote and quote.price_date else None,
         "price_source": quote.source if quote else None,
+        "instrument_kind": described.get("instrument_kind"),
+        "fund_category": described.get("fund_category"),
     }
 
 
@@ -182,6 +197,7 @@ def _unpriced(book: dict[str, Any]) -> dict[str, Any]:
                 "symbol": securities.describe(book["meta"], h.isin)["symbol"],
                 "name": securities.display_name(book["meta"], h.isin),
                 "invested": money(h.invested),
+                "reason": book.get("unpriced_reasons", {}).get(h.isin),
             }
             for h in book["unpriced"]
         ],
@@ -263,18 +279,7 @@ def _sector_allocation(book: dict[str, Any]) -> list[dict[str, Any]]:
     does not cover every ISIN) groups under its own ``sector: None`` entry rather than
     being merged into a real sector or excluded from the response.
     """
-    total = book["market_value"]
-    groups = _group_holdings(book, lambda h: securities.describe(book["meta"], h.isin)["sector"])
-    return [
-        {
-            "sector": sector,
-            "label": sector or UNCLASSIFIED_SECTOR_LABEL,
-            "market_value": money(group_value),
-            "weight_pct": rate(group_value / total) if total != ZERO else None,
-            "children": children,
-        }
-        for sector, group_value, children in groups
-    ]
+    return _classification_allocation(book, "sector")
 
 
 def _market_cap_allocation(book: dict[str, Any]) -> list[dict[str, Any]]:
@@ -285,19 +290,25 @@ def _market_cap_allocation(book: dict[str, Any]) -> list[dict[str, Any]]:
     does not cover every ISIN) groups under its own ``market_cap_bucket: None`` entry
     rather than being merged into a real bucket or excluded from the response.
     """
+    return _classification_allocation(book, "market_cap_bucket")
+
+
+def _classification_allocation(book: dict[str, Any], field: str) -> list[dict[str, Any]]:
+    """Company classifications plus explicit fund groups, preserving native fields."""
     total = book["market_value"]
     groups = _group_holdings(
-        book, lambda h: securities.describe(book["meta"], h.isin)["market_cap_bucket"]
+        book,
+        lambda h: securities.allocation_label(securities.describe(book["meta"], h.isin), field),
     )
     return [
         {
-            "market_cap_bucket": bucket,
-            "label": bucket or UNCLASSIFIED_MARKET_CAP_LABEL,
+            field: securities.describe(book["meta"], children[0]["isin"]).get(field),
+            "label": group_label,
             "market_value": money(group_value),
             "weight_pct": rate(group_value / total) if total != ZERO else None,
             "children": children,
         }
-        for bucket, group_value, children in groups
+        for group_label, group_value, children in groups
     ]
 
 

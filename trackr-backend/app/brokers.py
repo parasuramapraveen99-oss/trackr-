@@ -14,7 +14,8 @@ a registry that a real, tested parser is already in:
 
     ``documents``  <- app.ingest.file_validation.ROUTING, the deterministic upload path
     ``forwarding`` <- app.ingest.addresses, which reads app.ingest.webhook._ADAPTER_FACTORIES
-    ``pdf_password`` <- app.ingest.webhook.PDF_PASSWORD_CASE, by applying the transform
+    ``pdf_password`` <- app.db.document_passwords.SOURCE_HINTS, a hint only: the password
+                        itself is whatever the investor types, used exactly
 
 None of those three is retyped here, so none of them can drift. A broker declared with no
 adapters is a valid, honest entry: the account exists, files are accepted and classified,
@@ -30,14 +31,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from app.db.document_passwords import SOURCE_HINTS
 from app.ingest.addresses import broker_has_email_adapter, broker_has_forwarding
 from app.ingest.file_validation import LABELS, ROUTING
-from app.ingest.webhook import PDF_PASSWORD_CASE
-
-#: A structurally valid PAN whose case is mixed, so applying a broker's password
-#: transform to it reveals which direction that transform goes. Never a real PAN, and
-#: never stored -- it exists only to read a rule that is already written in code.
-_SAMPLE_PAN = "AbCdE1234F"
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,23 +128,10 @@ def _documents_for(adapters: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _pdf_password_rule(code: str) -> str:
-    """How this broker locks its contract-note PDFs, in a sentence, or "" when we have no
-    documented rule.
-
-    Derived by APPLYING the broker's own transform to a sample PAN rather than by keeping
-    a second table of sentences beside ``PDF_PASSWORD_CASE``. docs/INGESTION.md calls the
-    per-broker casing "a real trap" precisely because the brokers disagree; a description
-    that could drift from the transform it describes would be the same trap one level up.
-    """
-    case = PDF_PASSWORD_CASE.get(code.strip().lower())
-    if case is None:
-        return ""
-    cased = case(_SAMPLE_PAN)
-    if cased.isupper():
-        return "Your PAN, in capitals"
-    if cased.islower():
-        return "Your PAN, in lower case"
-    return "Your PAN"
+    """A hint for what this broker usually locks its PDFs with, or "" when we have none.
+    Shown next to the password box; never used to open a file -- the investor types the
+    password and it is tried exactly as typed (app.ingest.file_validation.unlock_pdf)."""
+    return SOURCE_HINTS.get(code.strip().lower(), "")
 
 
 def describe(broker: Broker, ingest_domain: str) -> dict[str, object]:

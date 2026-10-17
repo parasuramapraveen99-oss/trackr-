@@ -1,14 +1,16 @@
 """Staged imports: stage, review, promote, discard.
 
 The rule this module exists to enforce: **an adapter never writes to the ledger.** Parsing
-produces staged rows and stops. A second explicit call, attributed to a person, promotes
-them. No adapter-parsed row reaches the ledger without that human step.
+produces staged rows and stops. A separate attributed promotion promotes them, either
+through authenticated human review or the versioned, investor-authorized deterministic
+email policy in app.jobs.email. That policy uses this same promotion boundary and audit;
+an adapter never chooses to promote its own output.
 
 Why that matters more than it looks: a parser that auto-commits is a parser whose bugs land
 in a client's cost basis before anyone reads the output. Staging turns a bad parse into a
 discarded batch rather than a correction exercise.
 
-ONE NARROW, DELIBERATE EXCEPTION: ``promote_batch`` ends by sweeping the promoted
+SEPARATE CORPORATE-ACTION POLICY: ``promote_batch`` ends by sweeping the promoted
 account for known corporate actions (``app.db.corporate_actions.
 apply_known_actions_for_account``), which -- unlike everything above -- writes to the
 ledger with no staging and no human promote click. That is not the same category of
@@ -34,7 +36,16 @@ from typing import Any
 
 from app import isin as isin_rules
 from app import securities as securities_master
-from app.db import audit, documents, fno_reference, holdings, precedence, repository
+from app.db import (
+    audit,
+    cas_check,
+    cas_folios,
+    documents,
+    fno_reference,
+    holdings,
+    precedence,
+    repository,
+)
 from app.db import identity as db_identity
 from app.engine.dedupe import make_dedupe_key, make_fno_dedupe_key
 from app.engine.fno_types import FnoSide, FnoTradeKind
@@ -498,6 +509,16 @@ def stage_batch(
     # Must precede the import_batch insert below, which reads its counts off this result.
     result = _screen_isins(conn, result)
 
+    folios = []
+    parse_declared_folios = getattr(adapter, "parse_declared_folios", None)
+    if parse_declared_folios is not None and not result.rejections:
+        folios = parse_declared_folios(content)
+    declared = []
+    parse_declared_holdings = getattr(adapter, "parse_declared_holdings", None)
+    if parse_declared_holdings is not None and not result.rejections:
+        declared = parse_declared_holdings(content, account_id)
+        result.notes.extend(cas_check.check_notes(conn, adapter, content, declared))
+
     # Identity check BEFORE store_document: a note belonging to somebody else must not be
     # written into this investor's document store on its way to being refused. Optional
     # protocol -- an adapter whose source carries no PAN (every tradebook CSV) simply does
@@ -575,10 +596,9 @@ def stage_batch(
         },
     )
 
+    cas_folios.record(conn, investor_id, batch_id, folios)
     declared_holdings = 0
-    parse_declared_holdings = getattr(adapter, "parse_declared_holdings", None)
-    if parse_declared_holdings is not None:
-        declared = parse_declared_holdings(content, account_id)
+    if declared:
         declared_holdings = holdings.record_snapshot(conn, declared)
         if declared_holdings:
             _replay_for_statement(conn, account_id)
@@ -637,7 +657,7 @@ def reparse_batch(
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT status, account_id, filename, document_id, adapter, sha256 "
+            "SELECT status, account_id, filename, document_id, adapter, sha256, investor_id "
             # FOR UPDATE: the same batch lock promote and the F&O heal take, so a reparse
             # never interleaves with either (see HEAL_LOCK_KEY).
             "FROM import_batch WHERE id = %s FOR UPDATE",
@@ -646,7 +666,7 @@ def reparse_batch(
         row = cur.fetchone()
         if row is None:
             raise BatchNotFoundError(batch_id)
-        batch_status, account_id, filename, document_id, adapter_name, sha256 = row
+        batch_status, account_id, filename, document_id, adapter_name, sha256, investor_id = row
         if batch_status != STATUS_STAGED:
             raise BatchAlreadyResolvedError(f"batch {batch_id} is {batch_status}")
         if document_id is None:
@@ -663,6 +683,28 @@ def reparse_batch(
     result: ParseResult = adapter.parse(
         content, account_id=str(account_id), filename=filename or ""
     )
+
+    # Reprocessing stored bytes must enforce the same identity boundary as a fresh
+    # upload. In particular, older CAS batches predate the adapter's identity reader.
+    # Check before replacing rows or recording new declared quantities.
+    if hasattr(adapter, "identity"):
+        result.notes.extend(db_identity.verify(
+            conn,
+            adapter.identity(content),
+            investor_id=str(investor_id),
+            account_id=str(account_id),
+            actor_uid=actor_uid,
+        ))
+
+    folios = []
+    parse_declared_folios = getattr(adapter, "parse_declared_folios", None)
+    if parse_declared_folios is not None and not result.rejections:
+        folios = parse_declared_folios(content)
+    declared = []
+    parse_declared_holdings = getattr(adapter, "parse_declared_holdings", None)
+    if parse_declared_holdings is not None and not result.rejections:
+        declared = parse_declared_holdings(content, str(account_id))
+        result.notes.extend(cas_check.check_notes(conn, adapter, content, declared))
 
     # Screened here too, for the same reason stage_batch screens: this REPLACES the
     # batch's rows, so an unscreened reparse would be a way to land a damaged identifier
@@ -688,10 +730,9 @@ def reparse_batch(
     # Counts from the rows just written, never from arithmetic on the old ones.
     recompute_batch_counts(conn, batch_id)
 
+    cas_folios.record(conn, str(investor_id), batch_id, folios)
     declared_holdings = 0
-    parse_declared_holdings = getattr(adapter, "parse_declared_holdings", None)
-    if parse_declared_holdings is not None:
-        declared = parse_declared_holdings(content, str(account_id))
+    if declared:
         declared_holdings = holdings.record_snapshot(conn, declared)
         if declared_holdings:
             _replay_for_statement(conn, account_id)
@@ -824,6 +865,13 @@ def review_batch(conn: Any, batch_id: str) -> dict[str, Any]:
     }
 
 
+def lock_promotion_account(conn: Any, account_id: str) -> None:
+    """One account's source precedence decision at a time, across all import paths."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"trade-promotion:{account_id}",))
+
+
 def promote_batch(
     conn: Any, batch_id: str, actor_uid: str, acknowledge_uncertain: bool = False
 ) -> ImportSummary:
@@ -863,6 +911,13 @@ def promote_batch(
         raise ValueError("promotion requires an actor: who is putting this in the ledger?")
 
     with conn.cursor() as cur:
+        # Serialize source precedence across manual AND automatic batches for this
+        # account. Different source dedupe keys cannot arbitrate simultaneous notes
+        # and tradebooks. Take the account lock before the batch lock everywhere.
+        cur.execute("SELECT account_id FROM import_batch WHERE id = %s", (batch_id,))
+        account_row = cur.fetchone()
+        if account_row and account_row[0]:
+            lock_promotion_account(conn, str(account_row[0]))
         # FOR UPDATE: a concurrent F&O heal (or a second promote) waits for this one, so
         # no row turns STAGED inside a batch that is being promoted (2026-10-08 race).
         cur.execute(
@@ -925,11 +980,16 @@ def promote_batch(
         else:
             to_insert.append(txn)
 
-    # A superseded row cannot be deleted - the ledger is append-only - so it is REVERSED,
-    # which is the correction pattern DATA_MODEL already specifies. The history of what was
-    # believed, and when it changed, survives.
-    reversals = _reversals_for(conn, [sid for _, _, sid in superseded])
-    transactions = reversals + to_insert
+    # A superseded row is voided by a linked correction (migration 076), not by an
+    # opposite BUY/SELL. Same-day acquisitions replay before disposals, so an ordinary
+    # SELL reversal would blend the two sources' costs and manufacture a realised event.
+    from app.db.auto_reversal import reverse_transaction
+
+    for _, reason, superseded_id in superseded:
+        reverse_transaction(conn, superseded_id,
+                            f"superseded by higher-precedence evidence: {reason}",
+                            rule="SOURCE_PRECEDENCE")
+    transactions = to_insert
 
     # transaction.isin references security, so the master has to know these ISINs before
     # any row can land. Requiring it to be pre-populated would mean no import could ever be
@@ -1034,7 +1094,8 @@ def promote_batch(
         from app.db.corporate_actions import apply_known_actions_for_account
 
         try:
-            apply_known_actions_for_account(conn, account_id, actor_uid=actor_uid)
+            with conn.transaction():
+                apply_known_actions_for_account(conn, account_id, actor_uid=actor_uid)
         except Exception:
             logger.warning(
                 "corporate-action auto-apply sweep failed for account %s after promoting "
@@ -1500,55 +1561,6 @@ def _heal_batch(
             },
         )
     return counts
-
-
-def _reversals_for(conn: Any, transaction_ids: list[str]) -> list[Transaction]:
-    """Reversing rows for transactions a better source has superseded.
-
-    Append-only means the earlier row cannot be deleted. DATA_MODEL's correction pattern is
-    a reversing entry, so that is what this builds: the same trade with the opposite
-    txn_type, marked MANUAL with an explanation in raw_payload.
-    """
-    if not transaction_ids:
-        return []
-
-    opposite = {TxnType.BUY: TxnType.SELL, TxnType.SELL: TxnType.BUY}
-    reversals: list[Transaction] = []
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT account_id, isin, txn_date, txn_type, quantity, price, charges, stt, "
-            "source, source_ref FROM transaction WHERE id = ANY(%s)",
-            (transaction_ids,),
-        )
-        for row in cur.fetchall():
-            original = TxnType(str(row[3]))
-            if original not in opposite:
-                continue
-            reversals.append(
-                Transaction(
-                    isin=row[1],
-                    txn_date=row[2],
-                    txn_type=opposite[original],
-                    quantity=row[4],
-                    price=row[5],
-                    charges=row[6],
-                    # stt is a SUBSET of charges (never zeroed independently) --
-                    # carrying it through the same way charges is carried through keeps
-                    # the "stt <= charges" invariant true on this synthetic row too.
-                    stt=row[7],
-                    account_id=str(row[0]),
-                    source=Source.MANUAL,
-                    source_ref=f"REVERSAL-{row[9]}",
-                    raw_payload={
-                        "correction": "reversing entry",
-                        "reason": (
-                            f"superseded by a higher-precedence source; the original was "
-                            f"{row[8]} and carried no charges"
-                        ),
-                    },
-                )
-            )
-    return reversals
 
 
 def discard_batch(conn: Any, batch_id: str, reason: str, actor_uid: str | None = None) -> None:

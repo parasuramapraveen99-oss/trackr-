@@ -6,6 +6,7 @@ import { useAuth } from "@trackr/core";
 import { useFetch, usePortfolioRefresh } from "@trackr/core";
 import type { BenchmarkSeriesResponse, IndexSeriesResponse, SnapshotOut } from "@trackr/core";
 import { formatLakh } from "@trackr/core";
+import { sampleSnapshotRows } from "./snapshot-sampling";
 // The 1M/3M/6M/1Y/3Y/Max definitions live in lib/ranges.ts so this chart and the
 // dividends card cannot end up meaning different things by the same button.
 import { HISTORY_START, RANGES, startFor, type RangeKey } from "../ranges";
@@ -121,30 +122,8 @@ function sample(rows: SnapshotOut[], benchmarkByDate: Map<string, string>): Samp
   const firstDate = first.as_of;
   const lastDate = last.as_of;
 
-  const step = Math.max(1, Math.ceil(rows.length / TARGET_POINTS));
-  const picked: (SnapshotOut | null)[] = [];
-  let hasGap = false;
-
-  for (let i = 0; i < rows.length; i += step) {
-    const row = rows[i];
-    if (!row) continue;
-    const prev = picked.length > 0 ? picked[picked.length - 1] : null;
-    if (prev) {
-      const dayGap = (new Date(row.as_of).getTime() - new Date(prev.as_of).getTime()) / 86_400_000;
-      // Compare against the sampling stride, not the raw threshold: at a wide range
-      // consecutive picked rows are legitimately far apart.
-      if (dayGap > GAP_THRESHOLD_DAYS * step * 1.5) {
-        picked.push(null);
-        hasGap = true;
-      }
-    }
-    picked.push(row);
-  }
-
-  // Always end on the latest row, since the most recent figure is the one being asked
-  // about.
-  const lastPicked = picked[picked.length - 1];
-  if (lastPicked && lastPicked.as_of !== lastDate) picked.push(last);
+  const picked = sampleSnapshotRows(rows, TARGET_POINTS, GAP_THRESHOLD_DAYS);
+  const hasGap = picked.some((row) => row === null);
 
   // Short ranges span days, not months, so "Aug 26" repeated nine times labels nothing.
   const spanDays = (new Date(lastDate).getTime() - new Date(firstDate).getTime()) / 86_400_000;

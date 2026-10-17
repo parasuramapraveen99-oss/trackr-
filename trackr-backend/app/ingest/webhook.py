@@ -22,26 +22,12 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from app.db import consent, crypto, documents, forwarding_confirmation
+from app.db import consent, document_passwords, documents, forwarding_confirmation
 from app.ingest.base import Adapter
 from app.ingest.cas_pdf import CasPdfAdapter
+from app.ingest.file_validation import Unlock, unlock_pdf
 from app.ingest.zerodha_contract_note import ZerodhaContractNoteAdapter
 from app.jobs import queue
-
-#: broker -> the case transform applied to the investor's PAN to unlock a contract-note
-#: PDF. docs/INGESTION.md "PDF password rules -- a real trap": a single hardcoded case
-#: silently breaks the brokers that disagree, so this stays a per-broker lookup.
-PDF_PASSWORD_CASE = {
-    "zerodha": str.upper,
-    "groww": str.upper,
-    "upstox": str.lower,
-    # CDSL's own CAS FAQ: "PAN of the first/sole demat account holder in CAPITAL letters".
-    # NSDL's eCAS follows the same rule. app.ingest.cas_pdf._password_candidates tries
-    # variants on top of whatever it is handed, so this is the documented starting point
-    # rather than the only thing attempted.
-    "cdsl": str.upper,
-    "nsdl": str.upper,
-}
 
 #: (broker, doctype) -> adapter factory, taking the unlocked PDF password. Only
 #: combinations with a real, tested parser are listed -- CLAUDE.md: never invent parsing
@@ -63,10 +49,10 @@ _ADAPTER_FACTORIES: dict[tuple[str, str], Any] = {
     # both depositories because whichever holds the earlier-opened demat account is the
     # one that mails it (SEBI CIR/MRD/DP/31/2014).
     ("cdsl", "cas"): lambda password, accounts: CasPdfAdapter(
-        pan=password, broker_accounts=accounts
+        password=password, broker_accounts=accounts
     ),
     ("nsdl", "cas"): lambda password, accounts: CasPdfAdapter(
-        pan=password, broker_accounts=accounts
+        password=password, broker_accounts=accounts
     ),
 }
 
@@ -151,7 +137,7 @@ def resolve_account(conn: Any, investor_id: str, broker: str, doctype: str = "")
     "cdsl account" to match, so the investor's first account (by id) only files the
     batch: ``CasPdfAdapter`` resolves the account every row and holding belongs to from
     the statement's own DP summary, and REFUSES the statement
-    (``CasAccountUnresolvedError``) when it cannot -- it never lands on this one.
+    (``CasStatementError``) when it cannot -- it never lands on this one.
     Requiring a matching broker row here would make a CAS unroutable for every investor,
     which is the opposite of what it is for.
     """
@@ -176,28 +162,10 @@ def resolve_account(conn: Any, investor_id: str, broker: str, doctype: str = "")
     return str(row[0])
 
 
-def raw_pan(conn: Any, investor_id: str) -> str:
-    """The investor's PAN as stored, with no case transform applied. Empty string when
-    none is on file. Exists as its own function (rather than inlined in
-    ``pdf_password``) so app.routers.ingest's upload endpoints can resolve the same
-    PAN without duplicating the investor_secret/crypto.decrypt query."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT pan_enc FROM investor_secret WHERE investor_id = %s", (investor_id,))
-        row = cur.fetchone()
-    if row is None or row[0] is None:
-        return ""
-    return crypto.decrypt(row[0])
-
-
-def pdf_password(conn: Any, investor_id: str, broker: str) -> str:
-    """PAN, cased per broker. Empty string when no PAN is on file or the broker has no
-    documented password rule -- unlocking then fails inside pdfplumber, which is the
-    honest outcome. Guessing a password is worse than failing to open the file."""
-    case = PDF_PASSWORD_CASE.get(broker)
-    if case is None:
-        return ""
-    pan = raw_pan(conn, investor_id)
-    return case(pan) if pan else ""
+def unlock_with_saved_passwords(conn: Any, investor_id: str, content: bytes) -> Unlock:
+    """Open a forwarded PDF the same way an upload is opened: no password first, then the
+    investor's PAN, then each password they saved (app.db.document_passwords.unlock_candidates)."""
+    return unlock_pdf(content, document_passwords.unlock_candidates(conn, investor_id))
 
 
 def investor_broker_accounts(conn: Any, investor_id: str) -> dict[str, str]:
@@ -218,7 +186,11 @@ def investor_broker_accounts(conn: Any, investor_id: str) -> dict[str, str]:
         return {row[0]: str(row[1]) for row in cur.fetchall()}
 
 
-def adapter_for(conn: Any, investor_id: str, broker: str, doctype: str) -> Adapter:
+def adapter_for(
+    conn: Any, investor_id: str, broker: str, doctype: str, password: str = ""
+) -> Adapter:
+    """The registered adapter for (broker, doctype), built with ``password`` -- the one
+    ``unlock_with_saved_passwords`` found opens the file ("" for a file with none)."""
     factory = _ADAPTER_FACTORIES.get((broker, doctype))
     if factory is None:
         raise UnsupportedDocumentError(f"no adapter for broker={broker!r} doctype={doctype!r}")
@@ -227,7 +199,7 @@ def adapter_for(conn: Any, investor_id: str, broker: str, doctype: str) -> Adapt
         if doctype in _CROSS_BROKER_DOCTYPES
         else None
     )
-    return factory(pdf_password(conn, investor_id, broker), accounts)
+    return factory(password, accounts)
 
 
 def handle_inbound_email(

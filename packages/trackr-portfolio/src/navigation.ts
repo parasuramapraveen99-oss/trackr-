@@ -119,7 +119,7 @@ export const PORTFOLIO_GROUPS: PortfolioGroup[] = [
       },
       {
         href: "/reconcile",
-        label: "Check holdings",
+        label: "Reconcile holdings",
         icon: "reconcile",
         summary: "Match your holdings with your broker or CAS statement",
       },

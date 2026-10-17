@@ -101,6 +101,8 @@ export { DividendCard } from "./widgets/DividendCard";
 export { DataToReview } from "./widgets/DataToReview";
 export { DividendDrawer } from "./widgets/DividendDrawer";
 export { FnoCard, useFnoPositions } from "./widgets/FnoCard";
+export { FundsCard } from "./widgets/FundsCard";
+export { CapitalGainsCard } from "./widgets/CapitalGainsCard";
 export { HistoricalValueChart } from "./widgets/HistoricalValueChart";
 export type { LiveValuePoint } from "./widgets/HistoricalValueChart";
 export { MissingPriceNotice } from "./widgets/MissingPriceNotice";

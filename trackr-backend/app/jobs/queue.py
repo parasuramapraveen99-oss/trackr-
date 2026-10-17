@@ -56,6 +56,7 @@ class Job:
     investor_id: str | None
     attempts: int
     max_attempts: int
+    claim_token: str | None = None
 
 
 def _check_payload(payload: dict[str, Any]) -> None:
@@ -74,6 +75,8 @@ def enqueue(
     *,
     investor_id: str | None = None,
     max_attempts: int = 3,
+    work_key: str | None = None,
+    delay_seconds: int = 0,
 ) -> str:
     """Record one unit of deferred work. Returns the job id.
 
@@ -86,15 +89,29 @@ def enqueue(
     """
     _check_payload(payload)
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO job (kind, payload, investor_id, max_attempts)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id
-            """,
-            (kind, json.dumps(payload), investor_id, max_attempts),
-        )
-        return str(cur.fetchone()[0])
+        for _ in range(3):
+            cur.execute(
+                """
+                INSERT INTO job (kind, payload, investor_id, max_attempts, work_key, available_at)
+                VALUES (%s, %s, %s, %s, %s, now() + make_interval(secs => %s))
+                ON CONFLICT (work_key) WHERE work_key IS NOT NULL
+                    AND status IN ('PENDING', 'RUNNING') DO NOTHING
+                RETURNING id
+                """,
+                (kind, json.dumps(payload), investor_id, max_attempts, work_key, delay_seconds),
+            )
+            inserted = cur.fetchone()
+            if inserted:
+                return str(inserted[0])
+            # Do not UPDATE a running job merely to dedupe it: its worker can hold a
+            # lease lock during long work. A plain read does not block on that lock.
+            cur.execute("SELECT id FROM job WHERE work_key = %s "
+                        "AND status IN ('PENDING', 'RUNNING')", (work_key,))
+            active = cur.fetchone()
+            if active:
+                return str(active[0])
+            # A concurrent completion between INSERT and SELECT freed the key.
+    raise RuntimeError("Concurrent queue changes prevented admission; retry the transaction")
 
 
 def claim(
@@ -121,6 +138,19 @@ def claim(
     between claim and commit releases the row by rolling back rather than stranding it.
     """
     with conn.cursor() as cur:
+        # A worker killed on its final claim cannot call fail(). Make that outcome
+        # explicit instead of leaving an unclaimable RUNNING row forever. Locked live
+        # work is skipped: drain holds the job row while making financial writes.
+        cur.execute(
+            """WITH exhausted AS (
+                SELECT id FROM job WHERE status = 'RUNNING' AND attempts >= max_attempts
+                  AND claimed_at < now() - make_interval(secs => %s)
+                FOR UPDATE SKIP LOCKED
+            ) UPDATE job j SET status = 'FAILED', finished_at = now(), claimed_at = NULL,
+                claim_token = NULL, last_error = 'Worker lease expired on final attempt'
+              FROM exhausted e WHERE j.id = e.id""",
+            (lease_seconds,),
+        )
         cur.execute(
             """
             WITH claimable AS (
@@ -129,6 +159,7 @@ def claim(
                         OR (status = 'RUNNING'
                             AND claimed_at < now() - make_interval(secs => %(lease)s)))
                    AND attempts < max_attempts
+                   AND available_at <= now()
                    AND (%(kind)s::text IS NULL OR kind = %(kind)s)
                    AND (%(investor)s::uuid IS NULL OR investor_id = %(investor)s)
                  ORDER BY created_at
@@ -138,10 +169,12 @@ def claim(
             UPDATE job j
                SET status = 'RUNNING',
                    claimed_at = now(),
+                   claim_token = gen_random_uuid(),
                    attempts = j.attempts + 1
               FROM claimable c
              WHERE j.id = c.id
-            RETURNING j.id, j.kind, j.payload, j.investor_id, j.attempts, j.max_attempts
+            RETURNING j.id, j.kind, j.payload, j.investor_id, j.attempts, j.max_attempts,
+                      j.claim_token
             """,
             {
                 "lease": lease_seconds,
@@ -160,25 +193,41 @@ def claim(
             investor_id=str(r[3]) if r[3] else None,
             attempts=r[4],
             max_attempts=r[5],
+            claim_token=str(r[6]),
         )
         for r in rows
     ]
 
 
-def complete(conn: Any, job_id: str) -> None:
+def lock_claim(conn: Any, job: Job) -> bool:
+    """Fence stale workers and hold the lease row through this job's transaction."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM job WHERE id = %s AND status = 'RUNNING' "
+            "AND claim_token = %s FOR UPDATE",
+            (job.id, job.claim_token),
+        )
+        return cur.fetchone() is not None
+
+
+def complete(conn: Any, job_id: str, *, claim_token: str | None = None) -> None:
     """Mark a job done. Clears the lease so nothing can re-claim it."""
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE job
-               SET status = 'DONE', finished_at = now(), claimed_at = NULL, last_error = NULL
-             WHERE id = %s
+               SET status = 'DONE', finished_at = now(), claimed_at = NULL, last_error = NULL,
+                   claim_token = NULL
+             WHERE id = %s AND (%s::uuid IS NULL OR claim_token = %s)
             """,
-            (job_id,),
+            (job_id, claim_token, claim_token),
         )
 
 
-def fail(conn: Any, job_id: str, error: str, *, permanent: bool = False) -> None:
+def fail(
+    conn: Any, job_id: str, error: str, *, permanent: bool = False,
+    claim_token: str | None = None,
+) -> bool:
     """Record a failure, and decide whether it may be retried.
 
     ``permanent=True`` means no retry can ever succeed -- an unparseable file, a document
@@ -202,13 +251,29 @@ def fail(conn: Any, job_id: str, error: str, *, permanent: bool = False) -> None
                    END,
                    last_error = %(error)s,
                    claimed_at = NULL,
+                   claim_token = NULL,
+                   available_at = now() + make_interval(secs =>
+                       LEAST(3600, 30 * power(2, LEAST(attempts, 7)))::int),
                    finished_at = CASE
                        WHEN %(permanent)s OR attempts >= max_attempts THEN now()
                        ELSE NULL
                    END
-             WHERE id = %(id)s
+             WHERE id = %(id)s AND (%(claim_token)s::uuid IS NULL
+                                     OR claim_token = %(claim_token)s)
             """,
-            {"id": job_id, "error": error[:2000], "permanent": permanent},
+            {"id": job_id, "error": error[:2000], "permanent": permanent,
+             "claim_token": claim_token},
+        )
+        return cur.rowcount > 0
+
+
+def reschedule(conn: Any, job: Job, seconds: int) -> None:
+    """Continue bounded portfolio work durably, without relying on an HTTP self-kick."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE job SET status = 'PENDING', attempts = 0, claim_token = NULL, "
+            "claimed_at = NULL, available_at = now() + make_interval(secs => %s) "
+            "WHERE id = %s AND claim_token = %s", (seconds, job.id, job.claim_token),
         )
 
 
@@ -221,7 +286,6 @@ def pending_count(conn: Any, *, kind: str | None = None) -> int:
             """
             SELECT count(*) FROM job
              WHERE status IN ('PENDING', 'RUNNING')
-               AND attempts < max_attempts
                AND (%(kind)s::text IS NULL OR kind = %(kind)s)
             """,
             {"kind": kind},

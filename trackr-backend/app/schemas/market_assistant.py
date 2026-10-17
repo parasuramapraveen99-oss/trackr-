@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 from app.market_assistant.admission import MAX_HISTORY, MAX_QUESTION_CHARS
 
@@ -24,15 +24,21 @@ class AskIn(BaseModel):
     question: str | None = Field(default=None, min_length=1, max_length=MAX_QUESTION_CHARS)
     #: A suggestion chip: a catalogue ID instead of text.
     topic_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
-    #: Opt-in to external public research: privacy, LLM relevance/planning, Exa,
-    #: evidence-backed answer. False means no external calls and local concepts only.
-    allow_external: StrictBool = False
+    #: Compatibility field: public research is always on for admitted money questions.
+    allow_external: StrictBool = True
     #: Earlier typed questions of this conversation, oldest first, for follow-ups. The
     #: client resets them per drawer session and per portfolio; the server re-screens each
     #: one (``admit_history``), drops any it would refuse, and never logs or stores them.
     history: list[Annotated[str, Field(min_length=1, max_length=MAX_QUESTION_CHARS)]] = Field(
         default_factory=list, max_length=MAX_HISTORY
     )
+
+    @field_validator("allow_external")
+    @classmethod
+    def _search_is_always_on(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError("Public search is always on.")
+        return value
 
     @model_validator(mode="after")
     def _exactly_one(self) -> AskIn:
@@ -86,6 +92,13 @@ class SummarySentenceOut(BaseModel):
     cites: list[int]
 
 
+class MessageUsageOut(BaseModel):
+    limit: int
+    used: int
+    remaining: int
+    resets_at: datetime
+
+
 class AskOut(BaseModel):
     outcome: Literal["answer", "blocked", "clarify"]
     message: str
@@ -108,3 +121,4 @@ class AskOut(BaseModel):
     #: Open questions only: a short cited summary. Empty when none passed the checks, in
     #: which case ``evidence`` holds the source excerpts on their own.
     summary: list[SummarySentenceOut] = []
+    usage: MessageUsageOut | None = None

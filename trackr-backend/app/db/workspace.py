@@ -286,6 +286,9 @@ def search_securities(
         """
         SELECT isin FROM security
          WHERE asset_class = 'EQ'
+           -- An INF ISIN is a mutual-fund/ETF unit, never a company: security.asset_class
+           -- is EQ only by column default for those rows (docs/MF_ETF_PLAN.md s.4).
+           AND isin NOT LIKE 'INF%%'
            AND (isin ILIKE %s ESCAPE '\\' OR symbol ILIKE %s ESCAPE '\\'
                 OR name ILIKE %s ESCAPE '\\')
            AND (%s::text IS NULL OR isin > %s::text)
@@ -426,7 +429,7 @@ def link_company(
 
     security = _one(conn, "SELECT isin, asset_class::text AS asset_class FROM security "
                           "WHERE isin = %s", (isin,))
-    if security is None or security["asset_class"] != "EQ":
+    if security is None or security["asset_class"] != "EQ" or isin.startswith("INF"):
         raise WorkspaceError(404, UNKNOWN_SECURITY,
                              "no listed equity with this ISIN is known to the system")
     already = company_linked(conn, investor_id, isin)

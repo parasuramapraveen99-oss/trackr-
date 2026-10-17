@@ -1,13 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api-client";
 import {
   declineForwarding,
   isDismissedThisSession,
-  isForwardingDeclined,
   markDismissed,
   useOnboardingOpenRequest,
   type OnboardingStep,
@@ -59,10 +58,10 @@ const ALL_STEPS: StepDef[] = [
   },
   {
     key: "forward",
-    rail: { label: "Keep it current" },
-    title: "Keep it up to date",
+    rail: { label: "Gmail forwarding" },
+    title: "Set up Gmail forwarding",
     subtitle:
-      "This step is optional. Forward your broker's emails to your own Trackr+ address, and new trades come in on their own.",
+      "Follow the highlighted clicks from Gmail settings to your attachment-only forwarding filter.",
   },
 ];
 
@@ -98,10 +97,8 @@ const ALL_STEPS: StepDef[] = [
  * an empty portfolio could be left with the flow's last word being about email rather than
  * about getting their data in (L12, L14).
  *
- * THE FORWARDING STEP DOES NOT ALWAYS EXIST. It is present only when the deployment can
- * actually receive mail, decided by one backend condition rather than a frontend flag. On
- * a deployment with no inbound domain the rail is four steps and nobody is ever shown an
- * address that cannot receive anything.
+ * Gmail forwarding stays visible in the rail. The guide can be previewed before a
+ * real address is available; the address and automation controls still reflect the server.
  */
 export function OnboardingWizard() {
   const { investorId, token, ready } = useAuth();
@@ -203,27 +200,16 @@ export function OnboardingWizard() {
   );
   useOnboardingOpenRequest(reopen);
 
-  /**
-   * The steps that exist for this account, right now.
-   *
-   * Forwarding is dropped entirely where the deployment cannot receive mail, or where the
-   * person has already said they are not interested — a durable "stop offering me this"
-   * that is the one genuine per-browser preference in the whole flow.
-   */
-  const steps = useMemo(() => {
-    const offerForwarding =
-      (state?.forwarding_available ?? false) &&
-      accounts.some((a) => a.forwarding_addresses.length > 0) &&
-      !(investorId && isForwardingDeclined(investorId));
-    return ALL_STEPS.filter((s) => s.key !== "forward" || offerForwarding);
-  }, [state, accounts, investorId]);
+  // The guide is part of setup even when inbound email is unavailable or the
+  // account has no legacy per-broker address. Availability gates setup actions,
+  // never the tutorial or an explicit request to revisit it.
+  const steps = ALL_STEPS;
 
   const stepIndex = Math.max(
     0,
     steps.findIndex((s) => s.key === stepKey)
   );
   const step = steps[stepIndex] ?? steps[0]!;
-  const isLast = stepIndex === steps.length - 1;
 
   /** One close, one meaning: the wizard goes away and the dashboard checklist stays.
    *  Nothing here decides whether setup is "done" — the server does, on the next read. */
@@ -241,8 +227,7 @@ export function OnboardingWizard() {
   const goTo = useCallback(
     (key: StepKey) => {
       const exists = steps.some((s) => s.key === key);
-      // The forwarding step can be absent. Landing on the dashboard is the right answer
-      // for "the step after the last one", however many there are.
+      // Keep explicit step requests inside this setup dialog.
       if (!exists) finish();
       else setStepKey(key);
     },
@@ -336,7 +321,7 @@ export function OnboardingWizard() {
           (batchIds.length > 0 || hasImported || (state?.transactions ?? 0) > 0)
         );
       case "forward":
-        return accessGranted && accounts.length > 0;
+        return true;
     }
   }
 
@@ -356,12 +341,12 @@ export function OnboardingWizard() {
         };
       case "files":
         return {
-          label: batchIds.length > 0 || hasImported ? "Show me my numbers" : "Skip for now",
+          label: batchIds.length > 0 || hasImported ? "Show me my numbers" : "Continue to Gmail forwarding",
           disabled: busy,
           // Nothing uploaded means nothing to price, promote or benchmark: the numbers
           // step would be four ticks reporting on an empty ledger, which reads as the
           // product failing rather than as the person having chosen to skip.
-          onClick: () => (batchIds.length > 0 || hasImported ? goTo("align") : finish()),
+          onClick: () => goTo(batchIds.length > 0 || hasImported ? "align" : "forward"),
         };
       case "align":
         return {

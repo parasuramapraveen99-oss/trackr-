@@ -69,6 +69,7 @@ SPECS: dict[str, Spec] = {
     # --- money ---------------------------------------------------------------------
     "invested": Spec(MONEY, 0),
     "market_value": Spec(MONEY, 0),
+    "known_value_subtotal": Spec(MONEY, 0),
     "unrealised": Spec(MONEY, 0),
     "day_change": Spec(MONEY, 0),
     "realised_to_date": Spec(MONEY, 0),
@@ -100,6 +101,7 @@ SPECS: dict[str, Spec] = {
     "single_name_threshold": Spec(PERCENT, 1),
     "top_two_threshold": Spec(PERCENT, 1),
     "priced_pct": Spec(PERCENT, 1),
+    "priced_count_pct": Spec(PERCENT, 1),
     "pe_pct": Spec(PERCENT, 1),
     "pb_pct": Spec(PERCENT, 1),
     "roe_pct": Spec(PERCENT, 1),
@@ -149,6 +151,8 @@ SPECS: dict[str, Spec] = {
 
     # --- counts ----------------------------------------------------------------------
     "position_count": Spec(COUNT, 0),
+    "priced_count": Spec(COUNT, 0),
+    "total_count": Spec(COUNT, 0),
     "observations": Spec(COUNT, 0),
     "universe_size": Spec(COUNT, 0, comparable=False),
     "count": Spec(COUNT, 0),

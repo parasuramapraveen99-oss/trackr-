@@ -118,7 +118,7 @@ function WizardShellContent({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        padding: 24,
+        padding: 16,
         background: "var(--overlay-scrim)",
         backdropFilter: "blur(2px)",
         animation: "trackr-fade-in var(--duration-base) var(--ease-smooth) both",
@@ -134,9 +134,9 @@ function WizardShellContent({
           display: "flex",
           flexDirection: "column",
           width: "100%",
-          maxWidth: 620,
-          height: "min(620px, calc(100vh - 48px))",
-          maxHeight: "calc(100vh - 48px)",
+          maxWidth: 1160,
+          height: "min(820px, calc(100dvh - 32px))",
+          maxHeight: "calc(100dvh - 32px)",
           margin: "auto",
           background: "var(--surface)",
           borderTop: "1px solid var(--ledger-rule)",
@@ -152,6 +152,7 @@ function WizardShellContent({
             justifyContent: "space-between",
             gap: 12,
             padding: "14px 20px",
+            flexShrink: 0,
             borderBottom: "1px solid var(--border)",
           }}
         >
@@ -179,7 +180,7 @@ function WizardShellContent({
 
         <StepRail steps={steps} stepIndex={stepIndex} onStepSelect={onStepSelect} />
 
-        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "24px 28px 8px" }}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "22px clamp(14px, 3vw, 28px) 18px" }}>
           <h2
             style={{
               margin: 0,
@@ -213,6 +214,7 @@ function WizardShellContent({
             gap: 12,
             flexWrap: "wrap",
             padding: "14px 20px",
+            flexShrink: 0,
             borderTop: "1px solid var(--border)",
             background: "var(--surface-sunken)",
           }}
@@ -260,6 +262,7 @@ function StepRail({
         listStyle: "none",
         margin: 0,
         padding: "12px 20px",
+        flexShrink: 0,
         borderBottom: "1px solid var(--border)",
         overflowX: "auto",
       }}

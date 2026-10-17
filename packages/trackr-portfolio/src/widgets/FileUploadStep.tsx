@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type DragEvent } from "react";
-import { api, ApiError, useAuth } from "@trackr/core";
-import type { AccountOut, BrokerOut, FileOutcomeOut, FilesUploadOut } from "@trackr/core";
+import { useCallback, useEffect, useId, useRef, useState, type CSSProperties, type DragEvent } from "react";
+import { api, ApiError, broadcastPortfolioRefresh, useAuth } from "@trackr/core";
+import type { AccountOut, BrokerOut, FileOutcomeOut, FilePasswordOut, FilesUploadOut } from "@trackr/core";
 import { Banner, Icon, Input, Select } from "@trackr/ui";
+import { ImportIllustration, UploadIllustration } from "./ImportIllustration";
+import visual from "./ImportExperience.module.css";
 
 /**
  * Tier 1, client-side copy.
@@ -82,20 +84,26 @@ function tier1(file: File): Rejected | null {
  * what it is and one saying what to do instead, and the other files still import.
  *
  * AND ONE SPECIAL REJECTION: a locked PDF. That is the one failure whose fix is not a
- * different file, so it is the one failure that gets an inline form — see PanUnlock.
+ * different file, so it is the one failure that gets an inline form — see
+ * FilePasswordUnlock.
  */
 export function FileUploadStep({
   accounts,
   brokers,
   onStaged,
+  onUploaded,
   onBusyChange,
+  compact = false,
 }: {
   accounts: AccountOut[];
+  /** Keep the illustrated introduction in onboarding; the Import page uses a compact picker. */
+  compact?: boolean;
   /** The registry, for per-broker "where do I find these files" steps. */
   brokers: BrokerOut[];
-  /** Batch ids with rows waiting. The next step promotes them — this one never writes to
-   * the ledger, matching the server route it calls. */
+  /** Trade batches awaiting review. CAS balances are processed without trade promotion. */
   onStaged: (batchIds: string[]) => void;
+  /** Refresh import history even when a CAS produces no trade rows. */
+  onUploaded?: () => void;
   onBusyChange?: (busy: boolean) => void;
 }) {
   const { investorId, token } = useAuth();
@@ -106,6 +114,9 @@ export function FileUploadStep({
   const [outcomes, setOutcomes] = useState<FileOutcomeOut[]>([]);
   const [rejectedLocally, setRejectedLocally] = useState<Rejected[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const inFlight = useRef(false);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [failedFiles, setFailedFiles] = useState<File[]>([]);
 
   /**
    * Files that came back locked, kept so unlocking can retry them without asking anyone
@@ -113,7 +124,36 @@ export function FileUploadStep({
    * file it was given earlier unless we hold the File object, so we hold it — in memory
    * only, for the life of this step.
    */
-  const [lockedFiles, setLockedFiles] = useState<File[]>([]);
+  const [lockedFiles, setLockedFiles] = useState<Record<string, File>>({});
+  /** The statement sources a password can be saved for, with labels — from the server so
+   * the dropdown can never offer a source it would refuse. */
+  const [sources, setSources] = useState<FilePasswordOut[]>([]);
+  /** Files whose last typed password did not open them. Cleared when they open. */
+  const [wrongPassword, setWrongPassword] = useState<Record<string, boolean>>({});
+  /** Loading the password sources failed. Its own message: nothing was uploaded, so it
+   * must not read as a failed upload. */
+  const [sourcesError, setSourcesError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!investorId) return;
+    let cancelled = false;
+    api
+      .get<FilePasswordOut[]>(`/investors/${investorId}/file-passwords`, { token })
+      .then((rows) => {
+        if (!cancelled) setSources(rows);
+      })
+      .catch((err) => {
+        if (!cancelled)
+          setSourcesError(
+            err instanceof ApiError && err.status === 404
+              ? "The server doesn't have file passwords yet: it is running older code than this page. Restart or redeploy the backend."
+              : friendly(err)
+          );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [investorId, token]);
 
   useEffect(() => {
     // Default to the only account when there is only one; with several, the picker below
@@ -126,8 +166,8 @@ export function FileUploadStep({
   }, [uploading, onBusyChange]);
 
   const upload = useCallback(
-    async (picked: File[]) => {
-      if (!investorId || !accountId || picked.length === 0) return;
+    async (picked: File[], typed?: { source: string; password: string }) => {
+      if (!investorId || !accountId || picked.length === 0 || inFlight.current) return;
 
       const local: Rejected[] = [];
       const sendable: File[] = [];
@@ -136,16 +176,27 @@ export function FileUploadStep({
         if (problem) local.push(problem);
         else sendable.push(file);
       }
-      setRejectedLocally(local);
+      setRejectedLocally((previous) => [
+        ...previous.filter((item) => !picked.some((file) => file.name === item.filename)),
+        ...local,
+      ]);
       setError(null);
       if (sendable.length === 0) return;
 
+      inFlight.current = true;
+      setPendingFiles(sendable);
+      setFailedFiles([]);
       setUploading(true);
       try {
         const form = new FormData();
         form.set("investor_id", investorId);
         form.set("account_id", accountId);
         for (const file of sendable) form.append("files", file);
+        if (typed) {
+          // Tried on these files exactly as typed, and saved only if it opens one.
+          form.set("password", typed.password);
+          form.set("password_source", typed.source);
+        }
 
         const result = await api.post<FilesUploadOut>("/ingest/files", { formData: form, token });
         // Append rather than replace: adding a second batch of files is a normal thing to
@@ -154,18 +205,37 @@ export function FileUploadStep({
           ...previous.filter((o) => !result.files.some((f) => f.filename === o.filename)),
           ...result.files,
         ]);
-        // Hold on to anything that came back locked so PanUnlock can retry it directly.
-        const lockedNames = new Set(result.files.filter((f) => f.encrypted).map((f) => f.filename));
-        setLockedFiles(sendable.filter((f) => lockedNames.has(f.name)));
+        // Hold on to anything that came back locked so its unlock box can retry it
+        // directly; forget anything that has now opened.
+        setLockedFiles((previous) => {
+          const next = { ...previous };
+          for (const file of sendable) {
+            const outcome = result.files.find((f) => f.filename === file.name);
+            if (outcome?.encrypted) next[file.name] = file;
+            else delete next[file.name];
+          }
+          return next;
+        });
+        setWrongPassword((previous) => {
+          const next = { ...previous };
+          for (const outcome of result.files) next[outcome.filename] = outcome.wrong_password;
+          return next;
+        });
         if (result.staged_batch_ids.length > 0) onStaged(result.staged_batch_ids);
+        onUploaded?.();
+        if (result.files.some((file) => file.ok)) broadcastPortfolioRefresh();
+        return result;
       } catch (err) {
         setError(friendly(err));
+        setFailedFiles(sendable);
       } finally {
+        inFlight.current = false;
+        setPendingFiles([]);
         setUploading(false);
         if (inputRef.current) inputRef.current.value = "";
       }
     },
-    [investorId, accountId, token, onStaged]
+    [investorId, accountId, token, onStaged, onUploaded]
   );
 
   function onDrop(event: DragEvent<HTMLDivElement>) {
@@ -175,9 +245,9 @@ export function FileUploadStep({
   }
 
   const imported = outcomes.filter((o) => o.ok);
-  const rejected = outcomes.filter((o) => !o.ok);
-  const trades = imported.reduce((sum, o) => sum + o.parsed, 0);
-  const locked = rejected.filter((o) => o.encrypted);
+  // Locked files get their own unlock box below, not a plain "rejected" row.
+  const rejected = outcomes.filter((o) => !o.ok && !o.encrypted);
+  const locked = outcomes.filter((o) => !o.ok && o.encrypted && lockedFiles[o.filename]);
 
   const selected = accounts.find((a) => a.id === accountId);
 
@@ -197,99 +267,117 @@ export function FileUploadStep({
       {error && (
         <Banner tone="negative" title="That upload didn't go through">
           {error}
+          {failedFiles.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <ul style={{ paddingLeft: 18, overflowWrap: "anywhere" }}>
+                {failedFiles.map((file, index) => <li key={index}>{file.name} · Upload not confirmed</li>)}
+              </ul>
+              <button type="button" disabled={uploading} onClick={() => void upload(failedFiles)}>
+                Retry upload
+              </button>
+            </div>
+          )}
+        </Banner>
+      )}
+
+      {sourcesError && (
+        <Banner tone="negative" title="Couldn't load your saved file passwords">
+          {sourcesError} You can still upload files; locked ones can't be unlocked until this is fixed.
         </Banner>
       )}
 
       {accounts.length > 1 && (
-        <label
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            flexWrap: "wrap",
-            font: "var(--type-body-sm)",
-            color: "var(--text-secondary)",
-          }}
-        >
-          These files are from
-          <Select
-            id="upload-account"
-            value={accountId}
-            onChange={setAccountId}
-            options={accounts.map((a) => ({
-              value: a.id,
-              label: a.label ? `${a.label} (${a.broker})` : a.broker,
-            }))}
-          />
-          <span style={{ color: "var(--text-tertiary)" }}>
-            Upload one broker&apos;s files, then switch and do the next.
-          </span>
-        </label>
+        <fieldset disabled={uploading || locked.length > 0} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              flexWrap: "wrap",
+              font: "var(--type-body-sm)",
+              color: "var(--text-secondary)",
+            }}
+          >
+            These files are from
+            <Select
+              id="upload-account"
+              value={accountId}
+              onChange={setAccountId}
+              options={accounts.map((a) => ({
+                value: a.id,
+                label: a.label ? `${a.label} (${a.broker})` : a.broker,
+              }))}
+            />
+            <span style={{ color: "var(--text-tertiary)" }}>
+              Upload one broker&apos;s files, then switch and do the next.
+            </span>
+          </label>
+        </fieldset>
       )}
 
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={onDrop}
-        onClick={() => inputRef.current?.click()}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") inputRef.current?.click();
-        }}
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          gap: 6,
-          padding: "28px 20px",
-          border: "1px dashed " + (dragging ? "var(--ink-900)" : "var(--border-strong)"),
-          background: dragging ? "var(--surface-hover)" : "var(--surface-sunken)",
-          cursor: uploading ? "progress" : "pointer",
-          textAlign: "center",
-          transition: "background-color var(--duration-fast) ease, border-color var(--duration-fast) ease",
-        }}
-      >
-        <Icon name="import" size={22} style={{ color: "var(--text-tertiary)" }} />
-        <p
-          style={{
-            margin: 0,
-            font: "var(--type-body)",
-            fontWeight: "var(--weight-medium)" as CSSProperties["fontWeight"],
-            color: "var(--text-primary)",
-          }}
-        >
-          {uploading ? "Reading your files…" : "Drop your broker files here"}
-        </p>
-        <p style={{ margin: 0, font: "var(--type-body-sm)", color: "var(--text-tertiary)", maxWidth: "46ch" }}>
-          Pick as many as you like, all at once. Contract notes, tradebooks, PDFs or
-          spreadsheets. We work out what each one is.
-        </p>
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          accept=".pdf,.csv,.xlsx"
-          onChange={(e) => void upload(Array.from(e.target.files ?? []))}
-          style={{ display: "none" }}
-        />
+      <div className={visual.experience}>
+        <div className={compact ? visual.compactLayout : visual.layout}>
+          {!compact && <div className={visual.intro}>
+            <ImportIllustration />
+            <span className={visual.eyebrow}>Your portfolio starts here</span>
+            <h3>A few files.<br />Your whole investment story.</h3>
+            <p>Bring your stock contract notes, mutual fund CAS and tradebooks together. Drop your files beside this panel to get started.</p>
+            <div className={visual.fileTypes}><span>Contract notes</span><span>Mutual fund CAS</span><span>Tradebooks</span></div>
+          </div>}
+          <div className={compact ? visual.compactUploadSide : visual.uploadSide}>
+            {!compact && <div className={visual.uploadHeading}><Icon name="plus" size={16} /> New import</div>}
+            <div
+              className={`${visual.dropZone} ${compact ? visual.compactDropZone : ""} ${dragging ? visual.dragging : ""}`}
+              onDragOver={(e) => { e.preventDefault(); if (!uploading) setDragging(true); }}
+              onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false); }}
+              onDrop={onDrop}
+              onClick={() => { if (!uploading) inputRef.current?.click(); }}
+              role="button"
+              aria-label={uploading ? "Reading your files" : "Upload broker statements"}
+              tabIndex={uploading ? -1 : 0}
+              aria-disabled={uploading}
+              aria-busy={uploading}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  if (!uploading) inputRef.current?.click();
+                }
+              }}
+            >
+              {!compact && <UploadIllustration />}
+              <span className={visual.uploadButton}><Icon name="import" size={16} />{uploading ? "Reading your files…" : "Choose files"}</span>
+              <p>or drag and drop files here</p>
+              <input ref={inputRef} type="file" disabled={uploading} aria-label="Upload statements" multiple accept=".pdf,.csv,.xlsx" onChange={(e) => void upload(Array.from(e.target.files ?? []))} style={{ display: "none" }} />
+            </div>
+            <span className={visual.formatHint}>PDF, CSV or XLSX · Up to 25 MB per file<br />Select several files in one go. We identify each one.</span>
+          </div>
+        </div>
+        {!compact && <div className={visual.journey}><span><b>1</b> Choose files</span><span>→</span><span><b>2</b> We read them</span><span>→</span><span><b>3</b> Review your imports</span></div>}
       </div>
 
+      {uploading && (
+        <div role="status" aria-live="polite" style={{ display: "grid", gap: 10, padding: 14, background: "var(--surface-sunken)", border: "1px solid var(--border)" }}>
+          <style>{`@keyframes trackr-upload-spin { to { transform: rotate(360deg); } } @media (prefers-reduced-motion: reduce) { .trackr-upload-spinner { animation: none !important; } }`}</style>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span aria-hidden="true" className="trackr-upload-spinner" style={{ width: 18, height: 18, flexShrink: 0, border: "2px solid var(--border-strong)", borderTopColor: "var(--text-primary)", borderRadius: "50%", animation: "trackr-upload-spin 0.8s linear infinite" }} />
+            <strong style={{ font: "var(--type-body-sm)" }}>Uploading and processing {pendingFiles.length} file{pendingFiles.length === 1 ? "" : "s"}…</strong>
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 18, font: "var(--type-body-sm)", color: "var(--text-secondary)", overflowWrap: "anywhere" }}>
+            {pendingFiles.map((file, index) => <li key={index}>{file.name} · Processing</li>)}
+          </ul>
+          <span style={{ font: "var(--type-label)", color: "var(--text-tertiary)" }}>Keep this page open until the results appear.</span>
+        </div>
+      )}
+
       {locked.length > 0 && (
-        <PanUnlock
-          filenames={locked.map((o) => o.filename)}
-          brokerName={selected ? brokerNameOf(brokers, selected.broker) : "Your broker"}
-          passwordRule={selected ? passwordRuleOf(brokers, selected.broker) : ""}
-          onUnlocked={() => {
-            // Same files, same account, now with a password on file. Clearing their
-            // outcomes first stops the old "locked" rows sitting under the new result.
-            const retry = lockedFiles;
-            setOutcomes((previous) => previous.filter((o) => !o.encrypted));
-            setLockedFiles([]);
-            void upload(retry);
+        <FilePasswordUnlock
+          filenames={locked.map((outcome) => outcome.filename)}
+          sources={sources}
+          initialSource={guessSource(locked[0]!.filename, selected?.broker ?? "", sources)}
+          wrongPassword={locked.some((outcome) => wrongPassword[outcome.filename])}
+          busy={uploading}
+          onSubmit={async (source, password) => {
+            await upload(locked.map((outcome) => lockedFiles[outcome.filename]!), { source, password });
           }}
         />
       )}
@@ -303,6 +391,7 @@ export function FileUploadStep({
               filename={outcome.filename}
               headline={describe(outcome)}
               detail={outcome.notes.join(" ") || null}
+              collapsibleDetail={outcome.document === "cas_pdf" && outcome.rejected === 0}
             />
           ))}
           {rejected.map((outcome) => (
@@ -326,66 +415,46 @@ export function FileUploadStep({
         </ul>
       )}
 
-      {trades > 0 && (
-        <p style={{ margin: 0, font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>
-          {trades.toLocaleString("en-IN")} trade{trades === 1 ? "" : "s"} ready. Add more files
-          for a longer history, or continue.
-        </p>
-      )}
 
-      <WhereToFindFiles accounts={accounts} brokers={brokers} />
+      {!compact && <WhereToFindFiles accounts={accounts} brokers={brokers} />}
     </div>
   );
 }
 
-/**
- * A password-protected PDF: the one rejection whose fix is a field, not a different file.
- *
- * ASKED HERE RATHER THAN ON THE SIGNUP FORM, deliberately. A PAN is sensitive, and a PAN
- * field on registration is a sensitive question asked before its purpose is visible — and
- * asked of every person, including the ones importing a tradebook CSV who will never need
- * it. Here its purpose is on screen: a named file we could not open, and one sentence
- * saying why. The server already told us this is the case (`encrypted`, set only for a PDF
- * we could not open because it is locked — distinct from an unreadable one), so this form
- * appears exactly when it is the answer and never otherwise.
- *
- * The password rule comes from the broker registry, which derives it from the transform
- * the parser actually applies — docs/INGESTION.md calls per-broker PAN casing "a real
- * trap", and a hint that could disagree with the code would be the same trap again.
- */
-function PanUnlock({
+/** One password is tried against every remaining locked file in this upload. Files
+ * with another password stay listed for a separate retry; successful ones are removed. */
+function FilePasswordUnlock({
   filenames,
-  brokerName,
-  passwordRule,
-  onUnlocked,
+  sources,
+  initialSource,
+  wrongPassword,
+  busy,
+  onSubmit,
 }: {
   filenames: string[];
-  brokerName: string;
-  passwordRule: string;
-  onUnlocked: () => void;
+  sources: FilePasswordOut[];
+  initialSource: string;
+  wrongPassword: boolean;
+  busy: boolean;
+  onSubmit: (source: string, password: string) => Promise<void>;
 }) {
-  const { investorId, token } = useAuth();
-  const [pan, setPan] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const formId = useId();
+  const [source, setSource] = useState(initialSource);
+  const [password, setPassword] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+
+  useEffect(() => {
+    if (!source && initialSource) setSource(initialSource);
+  }, [initialSource, source]);
+
+  const hint = sources.find((s) => s.source === source)?.hint ?? "";
+  const disabled = busy || password.length === 0 || !source;
 
   async function unlock() {
-    if (!investorId || pan.trim().length === 0) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await api.put(`/investors/${investorId}/pan`, { token, json: { pan: pan.trim().toUpperCase() } });
-      setPan("");
-      onUnlocked();
-    } catch (err) {
-      setError(
-        err instanceof ApiError && err.status === 400
-          ? "That doesn't look like a PAN. It's ten characters, like ABCDE1234F."
-          : friendly(err)
-      );
-    } finally {
-      setSaving(false);
-    }
+    if (disabled) return;
+    setSubmitted(true);
+    await onSubmit(source, password);
+    setPassword("");
   }
 
   return (
@@ -396,7 +465,7 @@ function PanUnlock({
         gap: 10,
         padding: "12px 14px",
         border: "1px solid var(--border)",
-        borderLeft: "2px solid var(--warning)",
+        borderLeft: `2px solid ${wrongPassword ? "var(--negative)" : "var(--warning)"}`,
         background: "var(--surface)",
       }}
     >
@@ -406,60 +475,110 @@ function PanUnlock({
           font: "var(--type-body-sm)",
           fontWeight: "var(--weight-medium)" as CSSProperties["fontWeight"],
           color: "var(--text-primary)",
+          overflowWrap: "anywhere",
         }}
       >
-        {filenames.length === 1 ? `${filenames[0]} is` : `${filenames.length} of these files are`}{" "}
-        password-protected
+        {filenames.length} locked file{filenames.length === 1 ? "" : "s"} · One password for all
       </p>
       <p style={{ margin: 0, font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>
-        {brokerName} locks these files. The password is{" "}
-        {(passwordRule || "Your PAN").replace(/^Your/, "your")}. Add it once and we will open
-        this file and every future one. We keep it encrypted, use it only to open your
-        documents, and never show it back to you.
+        Enter the shared password once. Any files it doesn&apos;t open stay here so you can
+        try another password. A verified password is saved encrypted for the selected statement source.
       </p>
-      {error && (
-        <p style={{ margin: 0, font: "var(--type-body-sm)", color: "var(--negative)" }}>{error}</p>
+      <ul style={{ margin: 0, paddingLeft: 18, font: "var(--type-body-sm)", color: "var(--text-secondary)", overflowWrap: "anywhere" }}>
+        {filenames.map((filename, index) => <li key={index}>{filename}</li>)}
+      </ul>
+      {wrongPassword && submitted && (
+        <p role="alert" style={{ margin: 0, font: "var(--type-body-sm)", color: "var(--negative)" }}>
+          That password didn&apos;t open the remaining files. Try their password below.
+        </p>
       )}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <Input
-          id="unlock-pan"
-          value={pan}
-          onChange={(v) => setPan(v.toUpperCase())}
-          placeholder="ABCDE1234F"
-          style={{ maxWidth: 180, fontFamily: "var(--font-mono)" }}
-        />
-        <button
-          type="button"
-          onClick={() => void unlock()}
-          disabled={saving || pan.trim().length === 0}
-          style={{
-            padding: "8px 16px",
-            border: "1px solid var(--ink-900)",
-            borderRadius: "var(--radius-md)",
-            background: "var(--ink-900)",
-            color: "var(--text-inverse)",
-            font: "var(--type-body-sm)",
-            fontWeight: "var(--weight-medium)" as CSSProperties["fontWeight"],
-            cursor: saving || pan.trim().length === 0 ? "not-allowed" : "pointer",
-            opacity: saving || pan.trim().length === 0 ? 0.5 : 1,
-          }}
-        >
-          {saving ? "Unlocking…" : "Unlock"}
-        </button>
-      </div>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void unlock();
+        }}
+        style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}
+      >
+        <fieldset disabled={busy} style={{ border: 0, padding: 0, margin: 0, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", minWidth: 0 }}>
+          <label htmlFor={`${formId}-source`} style={{ font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>Statement source</label>
+          <Select
+            id={`${formId}-source`}
+            value={source}
+            onChange={setSource}
+            options={sources
+              .filter((s) => s.source !== "pan")
+              .map((s) => ({ value: s.source, label: s.label }))}
+          />
+          <label htmlFor={`${formId}-password`} style={{ font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>Statement password</label>
+          <Input
+            id={`${formId}-password`}
+            disabled={busy}
+            type="password"
+            value={password}
+            onChange={setPassword}
+            placeholder="Password"
+            // "new-password" stops the browser filling in the Trackr+ login password here.
+            autoComplete="new-password"
+            style={{ maxWidth: 200 }}
+          />
+          <button
+            type="submit"
+            disabled={disabled}
+            style={{
+              padding: "8px 16px",
+              border: "1px solid var(--ink-900)",
+              borderRadius: "var(--radius-md)",
+              background: "var(--ink-900)",
+              color: "var(--text-inverse)",
+              font: "var(--type-body-sm)",
+              fontWeight: "var(--weight-medium)" as CSSProperties["fontWeight"],
+              cursor: disabled ? "not-allowed" : "pointer",
+              opacity: disabled ? 0.5 : 1,
+            }}
+          >
+            {busy ? "Unlocking…" : "Unlock files"}
+          </button>
+        </fieldset>
+      </form>
+      {hint && (
+        <p style={{ margin: 0, font: "var(--type-label)", color: "var(--text-tertiary)" }}>{hint}</p>
+      )}
+      {sources.some((s) => s.source === "pan" && !s.saved) && (
+        <p style={{ margin: 0, font: "var(--type-label)", color: "var(--text-tertiary)" }}>
+          Tip: save your PAN in Settings → File passwords and most statements will open by themselves.
+        </p>
+      )}
     </div>
   );
+}
+
+/**
+ * Which statement a locked file probably is, from its name alone — a starting choice for
+ * the dropdown, never a decision: the person can change it, and the server only saves the
+ * password once it has actually opened the file.
+ */
+function guessSource(filename: string, broker: string, sources: FilePasswordOut[]): string {
+  const known = new Set(sources.filter((s) => s.source !== "pan").map((s) => s.source));
+  const pick = (code: string) => (known.has(code) ? code : "");
+  const name = filename.toLowerCase();
+  if (/_txn(\s*\(\d+\))?\.pdf$/.test(name) || name.includes("cdsl")) return pick("cdsl");
+  if (name.includes("nsdl")) return pick("nsdl");
+  if (name.includes("cams")) return pick("cams");
+  if (name.includes("kfin") || name.includes("karvy")) return pick("kfintech");
+  return pick(broker.trim().toLowerCase()) || [...known][0] || "";
 }
 
 /** What an accepted file turned out to be, said in the person's words rather than the
  * adapter's. `document` is the server's classification, so this never guesses. */
 function describe(outcome: FileOutcomeOut): string {
+  if (outcome.document === "cas_pdf" && outcome.rejected === 0) return "Processed successfully";
   const kind =
     outcome.document === "tradebook_csv"
       ? "Tradebook"
       : outcome.document === "contract_note_pdf" || outcome.document === "contract_note_xlsx"
         ? "Contract note"
         : "File";
+  if (outcome.rejected > 0) return `${kind}: ${outcome.parsed.toLocaleString("en-IN")} trade${outcome.parsed === 1 ? "" : "s"} found · ${outcome.rejected.toLocaleString("en-IN")} row${outcome.rejected === 1 ? " needs" : "s need"} review`;
   if (outcome.parsed === 0) return `${kind}: no new trades in this one`;
   return `${kind}: ${outcome.parsed.toLocaleString("en-IN")} trade${outcome.parsed === 1 ? "" : "s"} found`;
 }
@@ -469,11 +588,13 @@ function OutcomeRow({
   filename,
   headline,
   detail,
+  collapsibleDetail = false,
 }: {
   tone: "ok" | "bad";
   filename: string;
   headline: string;
   detail: string | null;
+  collapsibleDetail?: boolean;
 }) {
   const accent = tone === "ok" ? "var(--positive)" : "var(--warning)";
   return (
@@ -506,9 +627,16 @@ function OutcomeRow({
         <p style={{ margin: "2px 0 0", font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>
           {headline}
         </p>
-        {detail && (
+        {detail && (collapsibleDetail ? (
+          <details style={{ marginTop: 4 }}>
+            <summary style={{ cursor: "pointer", font: "var(--type-label)", color: "var(--text-tertiary)" }}>
+              Details
+            </summary>
+            <p style={{ margin: "6px 0 0", font: "var(--type-label)", color: "var(--text-tertiary)", overflowWrap: "anywhere" }}>{detail}</p>
+          </details>
+        ) : (
           <p style={{ margin: "2px 0 0", font: "var(--type-label)", color: "var(--text-tertiary)" }}>{detail}</p>
-        )}
+        ))}
       </div>
     </li>
   );
@@ -571,14 +699,6 @@ function WhereToFindFiles({ accounts, brokers }: { accounts: AccountOut[]; broke
       </div>
     </details>
   );
-}
-
-function brokerNameOf(brokers: BrokerOut[], code: string): string {
-  return brokers.find((b) => b.code === code.trim().toUpperCase())?.name ?? code;
-}
-
-function passwordRuleOf(brokers: BrokerOut[], code: string): string {
-  return brokers.find((b) => b.code === code.trim().toUpperCase())?.pdf_password ?? "";
 }
 
 function friendly(err: unknown): string {

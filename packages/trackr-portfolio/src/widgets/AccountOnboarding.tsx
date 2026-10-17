@@ -4,7 +4,6 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { api, ApiError, useFetch } from "@trackr/core";
 import type { AccountIn, AccountOut, BrokerOut } from "@trackr/core";
 import { Badge, Banner, Button, Field, Input, Select, Skeleton } from "@trackr/ui";
-import { EmailForwardingSetup } from "./EmailForwardingSetup";
 
 const EMPTY: AccountIn = { broker: "", dp_id: null, client_id: null, is_advised: true, label: null };
 
@@ -116,81 +115,86 @@ export function AccountOnboarding({
 
   return (
     <div style={{ display: "grid", gap: 20 }}>
-      <form onSubmit={handleSubmit} style={{ display: "grid", gap: 12 }}>
-        {error && <Banner tone="negative">{error}</Banner>}
+      <details open={accountList.length === 0}>
+        <summary style={{ cursor: "pointer", font: "var(--type-body-sm)", color: "var(--text-primary)", padding: "4px 0" }}>
+          {accountList.length === 0 ? "Add a broker account" : "Add another account"}
+        </summary>
+        <form onSubmit={handleSubmit} style={{ display: "grid", gap: 12, marginTop: 12 }}>
+          {error && <Banner tone="negative">{error}</Banner>}
 
-        <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))" }}>
-          <Field label="Broker" htmlFor="account-broker">
-            <Select
-              id="account-broker"
-              value={form.broker}
-              onChange={(v) => set("broker", v)}
-              options={options}
-              style={{ width: "100%" }}
-            />
-          </Field>
-          {form.broker === "__other" && (
-            <Field label="Broker name" htmlFor="account-broker-other">
-              <Input
-                id="account-broker-other"
-                value={otherBroker}
-                onChange={setOtherBroker}
-                placeholder="NAME IT"
-                style={{ textTransform: "uppercase" }}
+          <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))" }}>
+            <Field label="Broker" htmlFor="account-broker">
+              <Select
+                id="account-broker"
+                value={form.broker}
+                onChange={(v) => set("broker", v)}
+                options={options}
+                style={{ width: "100%" }}
               />
             </Field>
-          )}
-          <Field label="Label" hint="Optional. A name for this account." htmlFor="account-label">
-            <Input
-              id="account-label"
-              value={form.label ?? ""}
-              onChange={(v) => set("label", v || null)}
-              placeholder="Primary Zerodha"
-            />
-          </Field>
-        </div>
-
-        <details>
-          <summary style={{ cursor: "pointer", font: "var(--type-body-sm)", color: "var(--text-tertiary)" }}>
-            DP ID and Client ID (optional)
-          </summary>
-          <div
-            style={{
-              display: "grid",
-              gap: 12,
-              gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-              marginTop: 10,
-            }}
-          >
-            <Field label="DP ID" htmlFor="account-dp">
+            {form.broker === "__other" && (
+              <Field label="Broker name" htmlFor="account-broker-other">
+                <Input
+                  id="account-broker-other"
+                  value={otherBroker}
+                  onChange={setOtherBroker}
+                  placeholder="NAME IT"
+                  style={{ textTransform: "uppercase" }}
+                />
+              </Field>
+            )}
+            <Field label="Label" hint="Optional. A name for this account." htmlFor="account-label">
               <Input
-                id="account-dp"
-                value={form.dp_id ?? ""}
-                onChange={(v) => set("dp_id", v || null)}
-                style={{ fontFamily: "var(--font-mono)" }}
-              />
-            </Field>
-            <Field
-              label="Client ID"
-              hint="Your broker's own code for this account. Fills itself in from the first document that states it."
-              htmlFor="account-client"
-            >
-              <Input
-                id="account-client"
-                value={form.client_id ?? ""}
-                onChange={(v) => set("client_id", v || null)}
-                style={{ fontFamily: "var(--font-mono)" }}
+                id="account-label"
+                value={form.label ?? ""}
+                onChange={(v) => set("label", v || null)}
+                placeholder="Primary Zerodha"
               />
             </Field>
           </div>
-        </details>
 
-        <div>
-          <Button type="submit" disabled={submitting || !chosenBroker}>
-            {submitting ? "Adding…" : "Add account"}
-          </Button>
-        </div>
-      </form>
+          <details>
+            <summary style={{ cursor: "pointer", font: "var(--type-body-sm)", color: "var(--text-tertiary)" }}>
+              DP ID and Client ID (optional)
+            </summary>
+            <div
+              style={{
+                display: "grid",
+                gap: 12,
+                gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+                marginTop: 10,
+              }}
+            >
+              <Field label="DP ID" htmlFor="account-dp">
+                <Input
+                  id="account-dp"
+                  value={form.dp_id ?? ""}
+                  onChange={(v) => set("dp_id", v || null)}
+                  style={{ fontFamily: "var(--font-mono)" }}
+                />
+              </Field>
+              <Field
+                label="Client ID"
+                hint="Your broker's own code for this account. Fills itself in from the first document that states it."
+                htmlFor="account-client"
+              >
+                <Input
+                  id="account-client"
+                  value={form.client_id ?? ""}
+                  onChange={(v) => set("client_id", v || null)}
+                  style={{ fontFamily: "var(--font-mono)" }}
+                />
+              </Field>
+            </div>
+          </details>
+
+          <div>
+            <Button type="submit" disabled={submitting || !chosenBroker}>
+              {submitting ? "Adding…" : "Add account"}
+            </Button>
+          </div>
+        </form>
+      </details>
 
       {accounts.loading ? (
         // Two account-card-shaped placeholders, for the same reason the consent panel has
@@ -221,7 +225,7 @@ function AccountCard({ account, brokers }: { account: AccountOut; brokers: Broke
   const known = brokers.find((b) => b.code === account.broker.trim().toUpperCase());
   return (
     <div style={{ border: "1px solid var(--border)", background: "var(--surface)", padding: 14 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <p
           style={{
             margin: 0,
@@ -235,13 +239,7 @@ function AccountCard({ account, brokers }: { account: AccountOut; brokers: Broke
         <Badge tone="neutral" mono>
           {account.broker}
         </Badge>
-        {known?.pdf_password && (
-          <span style={{ font: "var(--type-body-sm)", color: "var(--text-tertiary)" }}>
-            PDF password: {known.pdf_password.toLowerCase()}
-          </span>
-        )}
       </div>
-      <EmailForwardingSetup account={account} brokerHasEmailAdapter={known?.email_adapter} />
     </div>
   );
 }

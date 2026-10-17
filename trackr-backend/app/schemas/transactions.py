@@ -140,6 +140,22 @@ class RealisedOut(BaseModel):
     holding_days: int | None
     acquisition_date_basis: str | None = None
     classification_sensitive: bool = False
+    # --- fund units (docs/MF_ETF_PLAN.md section 5). For STOCK rows only
+    # instrument_kind is set and ``term`` keeps its equity meaning. For a fund unit
+    # ``term`` is UNRESOLVED, or the fund term (SHORT, LONG, DEEMED_SHORT) -- never the
+    # equity 365-day answer. Rates are BASE rates: no surcharge, cess or exemption.
+    instrument_kind: str | None = None
+    account_id: str | None = None
+    acquisition_date: date | None = None
+    tax_branch: str | None = None
+    tax_term: str | None = None
+    rate_status: str | None = None
+    base_rate: str | None = None
+    indexation: bool | None = None
+    tax_act: str | None = None
+    tax_section: str | None = None
+    tax_rule_version: str | None = None
+    tax_unresolved_reason: str | None = None
 
 
 class DividendYearOut(BaseModel):

@@ -36,8 +36,9 @@ from typing import Any
 
 from app.db import documents, imports
 from app.db.identity import IdentityMismatchError
-from app.ingest import webhook
-from app.ingest.cas_pdf import CasAccountUnresolvedError
+from app.ingest import file_validation, webhook
+from app.ingest.cas_pdf import CasStatementError
+from app.jobs import email as email_jobs
 from app.jobs import queue
 from app.jobs.queue import KIND_PARSE_DOCUMENT
 from app.storage.base import ObjectNotFoundError
@@ -110,8 +111,24 @@ def _parse_document(conn: Any, store: Any, payload: dict[str, Any]) -> dict[str,
     except ObjectNotFoundError as exc:
         raise PermanentJobError(f"stored object missing: {document['storage_key']}") from exc
 
+    # A forwarded PDF opens with no password or with one the investor saved, exactly as
+    # typed. Locked with none of them is permanent until they save the right one -- retrying
+    # cannot change that, and parsing it anyway would only report "no trades".
+    password = ""
+    if content[:5] == b"%PDF-":
+        unlock = webhook.unlock_with_saved_passwords(conn, investor_id, content)
+        if unlock.outcome == file_validation.UNLOCK_WRONG_PASSWORD:
+            raise PermanentJobError(
+                "This forwarded file is locked and none of your saved passwords open it. "
+                "Upload it once on the Import page and enter its password; forwarded copies "
+                "will open by themselves after that."
+            )
+        if unlock.outcome == file_validation.UNLOCK_DAMAGED:
+            raise PermanentJobError("This forwarded file is damaged or not a complete PDF.")
+        password = unlock.password
+
     try:
-        adapter = webhook.adapter_for(conn, investor_id, broker, doctype)
+        adapter = webhook.adapter_for(conn, investor_id, broker, doctype, password)
     except webhook.UnsupportedDocumentError as exc:
         raise PermanentJobError(str(exc)) from exc
 
@@ -159,7 +176,10 @@ def _monitor_tick(conn: Any, store: Any, payload: dict[str, Any]) -> dict[str, A
 
 
 _HANDLERS = {KIND_PARSE_DOCUMENT: _parse_document, "butler_tick": _butler_tick,
-             "hosted_job_tick": _hosted_tick, "monitor_tick": _monitor_tick}
+             "hosted_job_tick": _hosted_tick, "monitor_tick": _monitor_tick,
+             "email_delivery": email_jobs.extract_delivery,
+             "email_document": email_jobs.parse_document,
+             "email_portfolio_refresh": email_jobs.refresh_portfolio}
 
 
 def drain_once(
@@ -193,6 +213,7 @@ def drain_once(
 
         batch = min(claim_batch, limit - (done + failed))
         jobs = queue.claim(conn, batch, investor_id=investor_id)
+        email_jobs.reconcile_failures(conn)
         # THE CLAIM IS COMMITTED BEFORE ANY WORK. See the module docstring.
         conn.commit()
         if not jobs:
@@ -201,6 +222,9 @@ def drain_once(
         for job in jobs:
             handler = _HANDLERS.get(job.kind)
             try:
+                if not queue.lock_claim(conn, job):
+                    conn.rollback()
+                    continue
                 if handler is None:
                     raise PermanentJobError(f"no handler for job kind {job.kind!r}")
                 outcome = handler(conn, store, job.payload)
@@ -208,10 +232,10 @@ def drain_once(
                 # Already staged. Not a failure: re-forwarding a page you already sent is
                 # explicitly supported, and `sha256` UNIQUE is what makes it a no-op.
                 conn.rollback()
-                queue.complete(conn, job.id)
+                queue.complete(conn, job.id, claim_token=job.claim_token)
                 conn.commit()
                 done += 1
-            except (PermanentJobError, IdentityMismatchError, CasAccountUnresolvedError) as exc:
+            except (PermanentJobError, IdentityMismatchError, CasStatementError) as exc:
                 conn.rollback()
                 # ORDER IS LOAD-BEARING. Record the job's own failure FIRST and commit it,
                 # then attempt the document flag as a separate transaction. Reversed, any
@@ -219,7 +243,10 @@ def drain_once(
                 # refuses the queue.fail as well -- leaving a RUNNING job with no reason,
                 # re-tried once per lease expiry. A try/except cannot rescue that, because
                 # the transaction is already poisoned by the time it is caught.
-                queue.fail(conn, job.id, str(exc), permanent=True)
+                changed = queue.fail(conn, job.id, str(exc), permanent=True,
+                                     claim_token=job.claim_token)
+                if changed:
+                    email_jobs.record_failure(conn, job.kind, job.payload, str(exc))
                 conn.commit()
                 _mark_document_failed(conn, job.payload)
                 permanent += 1
@@ -227,12 +254,19 @@ def drain_once(
                 logger.warning("job %s permanently failed: %s", job.id, exc)
             except Exception as exc:  # noqa: BLE001 - one bad document must not stop the loop
                 conn.rollback()
-                queue.fail(conn, job.id, f"{type(exc).__name__}: {exc}", permanent=False)
+                changed = queue.fail(conn, job.id, f"{type(exc).__name__}: {exc}", permanent=False,
+                                     claim_token=job.claim_token)
+                if changed and job.attempts >= job.max_attempts:
+                    email_jobs.record_failure(conn, job.kind, job.payload,
+                                              "Processing failed after retries; original retained")
                 conn.commit()
                 failed += 1
                 logger.warning("job %s failed (retryable): %s", job.id, exc, exc_info=True)
             else:
-                queue.complete(conn, job.id)
+                if isinstance(outcome, dict) and "reschedule_seconds" in outcome:
+                    queue.reschedule(conn, job, outcome["reschedule_seconds"])
+                else:
+                    queue.complete(conn, job.id, claim_token=job.claim_token)
                 conn.commit()
                 done += 1
                 if isinstance(outcome, dict) and outcome.get("fno_awaiting_master"):
@@ -296,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--claim-batch", type=int, default=DEFAULT_CLAIM_BATCH)
     parser.add_argument("--investor-id", default=None, help="drain one investor's work only")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--watch", action="store_true", help="keep polling the durable queue")
+    parser.add_argument("--poll-seconds", type=float, default=10.0)
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -312,24 +348,23 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
     store = get_store(settings)
 
-    with connect(settings.database_url) as conn:
-        summary = drain_once(
-            conn,
-            store,
-            limit=args.limit,
-            budget_seconds=args.budget_seconds,
-            claim_batch=args.claim_batch,
-            investor_id=args.investor_id,
+    if args.poll_seconds <= 0 or args.claim_batch <= 0:
+        parser.error("poll-seconds and claim-batch must be positive")
+    while True:
+        with connect(settings.database_url) as conn:
+            summary = drain_once(
+                conn, store, limit=args.limit, budget_seconds=args.budget_seconds,
+                claim_batch=args.claim_batch, investor_id=args.investor_id,
+            )
+        logger.info(
+            "drained: %(done)s done, %(failed)s failed (%(permanent)s permanent), "
+            "%(pending)s still pending, %(elapsed_seconds)ss", summary,
         )
-    logger.info(
-        "drained: %(done)s done, %(failed)s failed (%(permanent)s permanent), "
-        "%(pending)s still pending, %(elapsed_seconds)ss",
-        summary,
-    )
-    # Non-zero only when nothing could be done AND work remains -- that is the shape a
-    # cron or CI step should alert on. Individual document failures are data, not an
-    # operational fault, and are visible in the summary and on the job rows.
-    return 1 if summary["done"] == 0 and summary["pending"] > 0 else 0
+        if not args.watch:
+            break
+        time.sleep(args.poll_seconds)
+    # Waiting for a scheduled retry/continuation is ordinary idle work, not failure.
+    return 1 if summary["done"] == 0 and summary["failed"] > 0 else 0
 
 
 if __name__ == "__main__":

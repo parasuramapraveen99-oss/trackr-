@@ -52,6 +52,17 @@ class SetPanIn(BaseModel):
     pan: str
 
 
+class FilePasswordOut(BaseModel):
+    """GET /investors/{id}/file-passwords -- one row per statement source. Says whether a
+    password is saved, never what it is: there is no route that returns one."""
+
+    source: str
+    label: str
+    hint: str
+    saved: bool
+    updated_at: datetime | None = None
+
+
 class AccountIn(BaseModel):
     """POST /investors/{id}/accounts request body."""
 

@@ -22,6 +22,16 @@ import type {
   AnalyticsResponse, BenchmarkSeriesResponse, ContributionResponse, SnapshotOut,
 } from "@trackr/core";
 
+import { sampleMoneyRows, moneyPaths } from "./money-path";
+
+export const COMPANY_LENSES = {
+  valuation: { label: "Valuation", x: "P/E", y: "P/B", percent: false },
+  growth: { label: "Growth", x: "Profit 1Y", y: "Sales 1Y", percent: true },
+  profitability: { label: "Profitability", x: "ROE", y: "Net margin", percent: true },
+  quality: { label: "Leverage", x: "Debt / equity", y: "Interest cover", percent: false },
+} as const;
+export type CompanyLens = keyof typeof COMPANY_LENSES;
+
 /* ------------------------------------------------------------------ primitives --- */
 
 const MASK = "••••";
@@ -53,7 +63,7 @@ const INK: React.CSSProperties = { fill: "var(--text-primary)", font: "600 11px 
 const INK2: React.CSSProperties = { fill: "var(--text-secondary)", font: "500 11px var(--font-label)" };
 
 /** Measured width of a container, so every chart draws to its real pixels. */
-function useWidth(): [React.RefObject<HTMLDivElement>, number] {
+export function useWidth(): [React.RefObject<HTMLDivElement>, number] {
   const ref = useRef<HTMLDivElement>(null);
   const [w, setW] = useState(0);
   useLayoutEffect(() => {
@@ -70,7 +80,7 @@ function useWidth(): [React.RefObject<HTMLDivElement>, number] {
 /* tooltip: one fixed element for the whole board */
 type TipApi = { show: (e: React.MouseEvent, text: ReactNode) => void; hide: () => void };
 const TipContext = createContext<TipApi>({ show: () => {}, hide: () => {} });
-const useTip = () => useContext(TipContext);
+export const useTip = () => useContext(TipContext);
 
 export function TipProvider({ children }: { children: ReactNode }) {
   const [tip, setTip] = useState<{ x: number; y: number; text: ReactNode } | null>(null);
@@ -142,43 +152,32 @@ export const Small = ({ children }: { children: ReactNode }) => (
 
 /* ------------------------------------------------------------------ outcome ------ */
 
-/** Worth vs the same dated cash flows bought into the index, plus money paid in. */
+/** Recorded worth and cash-flow-matched index, alongside current holdings cost. */
 export function MoneyPath({ snapshots, bench }: { snapshots: SnapshotOut[]; bench: BenchmarkSeriesResponse | null }) {
   const [ref, w] = useWidth();
   const { masked } = usePrivacy();
   const hover = useTip();
   const byDate = useMemo(() => new Map((bench?.points ?? []).map((p) => [p.as_of, p.value])), [bench]);
-  const rows = useMemo(() => {
-    const step = Math.max(1, Math.floor(snapshots.length / 220));
-    return snapshots.filter((_, i) => i % step === 0 || i === snapshots.length - 1);
-  }, [snapshots]);
+  const rows = useMemo(() => sampleMoneyRows(snapshots, byDate), [snapshots, byDate]);
   const h = 250, m = { t: 10, r: 74, b: 22, l: 52 };
-  if (rows.length < 2) return <div ref={ref} style={{ height: h }} />;
-  const scale = decimalScale([...rows.flatMap((r) => [r.invested, r.market_value]), ...rows.map((r) => byDate.get(r.as_of) ?? null), "0"]);
+  const observed = rows.filter((r): r is SnapshotOut => r != null);
+  if (observed.length < 2) return <div ref={ref} style={{ height: h }} />;
+  const scale = decimalScale([...observed.flatMap((r) => [r.invested, r.market_value]), ...observed.map((r) => byDate.get(r.as_of) ?? null), "0"]);
   const iw = Math.max(1, w - m.l - m.r), ih = h - m.t - m.b;
-  const X = (i: number) => m.l + (i / (rows.length - 1)) * iw;
+  const firstDate = Date.parse(observed[0]!.as_of), lastDate = Date.parse(observed[observed.length - 1]!.as_of);
+  const X = (r: SnapshotOut) => m.l + ((Date.parse(r.as_of) - firstDate) / Math.max(1, lastDate - firstDate)) * iw;
   const Y = (v: string | null | undefined) => { const p = scale.position(v); return p == null ? null : m.t + (1 - p) * ih; };
-  const path = (get: (r: SnapshotOut) => string | null | undefined, step = false) => {
-    let d = "", pen = false;
-    rows.forEach((r, i) => {
-      const y = Y(get(r));
-      if (y == null) { pen = false; return; }
-      if (!pen) d += `M${X(i)},${y}`;
-      else d += step ? `H${X(i)}V${y}` : `L${X(i)},${y}`;
-      pen = true;
-    });
-    return d;
-  };
-  const worth = path((r) => r.market_value);
-  const area = `${worth}L${X(rows.length - 1)},${m.t + ih}L${X(0)},${m.t + ih}Z`;
-  const last = rows[rows.length - 1]!;
+  const paths = (get: (r: SnapshotOut) => string | null | undefined, step = false) =>
+    moneyPaths(rows, X, (r) => Y(get(r)), m.t + ih, step);
+  const worth = paths((r) => r.market_value);
+  const last = observed[observed.length - 1]!;
   const lastIdx = byDate.get(last.as_of) ?? null;
-  const years = [...new Set(rows.map((r) => r.as_of.slice(0, 4)))];
+  const years = [...new Set(observed.map((r) => r.as_of.slice(0, 4)))];
   const onMove = (e: React.MouseEvent<SVGRectElement>) => {
     const box = e.currentTarget.getBoundingClientRect();
-    const i = Math.max(0, Math.min(rows.length - 1, Math.round(((e.clientX - box.left) / box.width) * (rows.length - 1))));
-    const r = rows[i]!;
-    hover.show(e, <>{r.as_of}<br />Worth {compactInr(r.market_value, masked)} · Index {compactInr(byDate.get(r.as_of) ?? null, masked)} · Paid {compactInr(r.invested, masked)}</>);
+    const target = firstDate + Math.max(0, Math.min(1, (e.clientX - box.left) / box.width)) * (lastDate - firstDate);
+    const r = observed.reduce((a, b) => Math.abs(Date.parse(a.as_of) - target) < Math.abs(Date.parse(b.as_of) - target) ? a : b);
+    hover.show(e, <>{r.as_of}<br />Worth {compactInr(r.market_value, masked)} · Index {compactInr(byDate.get(r.as_of) ?? null, masked)} · Holdings cost {compactInr(r.invested, masked)}{r.excluded_isins?.length ? <><br />Excluded: {r.excluded_isins.join(", ")}</> : null}</>);
   };
   return (
     <div ref={ref}>
@@ -187,16 +186,16 @@ export function MoneyPath({ snapshots, bench }: { snapshots: SnapshotOut[]; benc
           {scale.ticks.map((t) => { const y = Y(t)!; return (
             <g key={t}><line x1={m.l} x2={w - m.r} y1={y} y2={y} style={{ stroke: "var(--chart-grid)" }} />
               <text x={m.l - 6} y={y} dy=".32em" textAnchor="end" style={AXIS}>{compactInr(t, masked)}</text></g>); })}
-          {years.map((yr) => { const i = rows.findIndex((r) => r.as_of.startsWith(yr)); return i > 0 || years.length === 1
-            ? <text key={yr} x={X(i)} y={h - 6} style={AXIS}>{yr}</text> : null; })}
-          <path d={area} style={{ fill: "var(--chart-1-tint)" }} />
-          <path d={path((r) => r.invested, true)} style={{ fill: "none", stroke: "var(--ink-300)", strokeWidth: 1 }} />
-          <path d={path((r) => byDate.get(r.as_of))} style={{ fill: "none", stroke: "var(--ink-400)", strokeWidth: 1.6, strokeDasharray: "4 3" }} />
-          <path d={worth} style={{ fill: "none", stroke: "var(--chart-1)", strokeWidth: 2.2 }} />
+          {years.map((yr) => { const i = observed.findIndex((r) => r.as_of.startsWith(yr)); return i > 0 || years.length === 1
+            ? <text key={yr} x={X(observed[i]!)} y={h - 6} style={AXIS}>{yr}</text> : null; })}
+          <path d={worth.area} style={{ fill: "var(--chart-1-tint)" }} />
+          <path d={paths((r) => r.invested, true).line} style={{ fill: "none", stroke: "var(--ink-300)", strokeWidth: 1 }} />
+          <path d={paths((r) => byDate.get(r.as_of)).line} style={{ fill: "none", stroke: "var(--ink-400)", strokeWidth: 1.6, strokeDasharray: "4 3" }} />
+          <path d={worth.line} style={{ fill: "none", stroke: "var(--chart-1)", strokeWidth: 2.2 }} />
           {[[last.market_value, "var(--chart-1)"], [lastIdx, "var(--ink-400)"]].map(([v, c]) => {
             const y = Y(v); return y == null ? null : (
-              <g key={c}><circle cx={X(rows.length - 1)} cy={y} r={3.5} style={{ fill: c! }} />
-                <text x={X(rows.length - 1) + 8} y={y} dy=".32em" style={{ ...INK, font: "600 12px var(--font-label)" }}>{compactInr(v, masked)}</text></g>);
+              <g key={c}><circle cx={X(last)} cy={y} r={3.5} style={{ fill: c! }} />
+                <text x={X(last) + 8} y={y} dy=".32em" style={{ ...INK, font: "600 12px var(--font-label)" }}>{compactInr(v, masked)}</text></g>);
           })}
           <rect x={m.l} y={m.t} width={iw} height={ih} style={{ fill: "transparent" }} onMouseMove={onMove} onMouseLeave={hover.hide} />
         </svg>
@@ -500,7 +499,7 @@ export function BadDayHistogram({ data }: { data: RiskData }) {
           );
         })}
         {cut != null && <line x1={X(cut)} x2={X(cut)} y1={m.t} y2={h - m.b} style={{ stroke: "var(--negative)", strokeDasharray: "3 2" }} />}
-        {[lo, 0, hi].map((t) => <text key={t} x={X(t)} y={h - 3} textAnchor="middle" style={AXIS}>{pctF(t, 0, true)}</text>)}
+        {[...new Set([lo, 0, hi])].filter((t) => t >= lo && t <= hi).map((t) => <text key={t} x={X(t)} y={h - 3} textAnchor={t === lo ? "start" : t === hi ? "end" : "middle"} style={AXIS}>{pctF(t, 0, true)}</text>)}
       </svg>)}</div>
   );
 }
@@ -540,7 +539,8 @@ export function SwingDial({ data }: { data: RiskData }) {
   const v = r?.volatility ?? null, b = r?.bench_volatility ?? null, beta = r?.beta ?? null;
   const h = 120, bw = w * 0.55, mx = Math.max(v ?? 0, b ?? 0) * 1.1 || 1;
   const cx = bw + (w - bw) / 2, cy = 92, R = Math.max(10, Math.min(46, (w - bw) / 2 - 8));
-  const ang = (x: number) => Math.PI + (Math.min(2, Math.max(0, x)) / 2) * Math.PI;
+  const betaLow = Math.min(0, Math.floor(beta ?? 0)), betaHigh = Math.max(2, Math.ceil(beta ?? 2));
+  const ang = (x: number) => Math.PI + ((x - betaLow) / (betaHigh - betaLow)) * Math.PI;
   const arc = (a0: number, a1: number, r0: number, r1: number) =>
     `M${cx + r1 * Math.cos(a0)},${cy + r1 * Math.sin(a0)}A${r1},${r1} 0 0 1 ${cx + r1 * Math.cos(a1)},${cy + r1 * Math.sin(a1)}L${cx + r0 * Math.cos(a1)},${cy + r0 * Math.sin(a1)}A${r0},${r0} 0 0 0 ${cx + r0 * Math.cos(a0)},${cy + r0 * Math.sin(a0)}Z`;
   return (
@@ -558,8 +558,8 @@ export function SwingDial({ data }: { data: RiskData }) {
         {beta != null && <line x1={cx} y1={cy} x2={cx + Math.cos(ang(beta)) * (R - 2)} y2={cy + Math.sin(ang(beta)) * (R - 2)} style={{ stroke: "var(--text-primary)", strokeWidth: 2.2, strokeLinecap: "round" }} />}
         <circle cx={cx} cy={cy} r={3.5} style={{ fill: "var(--text-primary)" }} />
         <text x={cx} y={cy + 18} textAnchor="middle" style={INK}>{beta == null ? "β —" : `β ${beta.toFixed(2)}`}</text>
-        <text x={cx - R} y={cy + 12} textAnchor="middle" style={AXIS}>0</text>
-        <text x={cx + R} y={cy + 12} textAnchor="middle" style={AXIS}>2</text>
+        <text x={cx - R} y={cy + 12} textAnchor="middle" style={AXIS}>{betaLow}</text>
+        <text x={cx + R} y={cy + 12} textAnchor="middle" style={AXIS}>{betaHigh}</text>
       </svg>)}</div>
   );
 }
@@ -578,15 +578,15 @@ export function RiskButterfly({ data }: { data: RiskData }) {
     <div ref={ref}>{w > 0 && (
       <svg width={w} height={h} role="img" aria-label="Share of money against share of risk">
         {rows.map((r, i) => {
-          const y = i * bh + 3, risk = r.risk_share_pct ?? 0, heavy = risk > r.weight_pct * 1.25;
+          const y = i * bh + 3, risk = r.risk_share_pct, heavy = risk != null && risk > r.weight_pct * 1.25;
           const left = narrow ? mid : mid - 44, right = narrow ? mid + half + 24 : mid + 44;
           return (
-            <g key={r.isin} {...{ onMouseMove: (e: React.MouseEvent) => hover.show(e, `${r.symbol}: ${ppF(r.weight_pct)} of money → ${ppF(risk)} of risk`), onMouseLeave: hover.hide }}>
+            <g key={r.isin} {...{ onMouseMove: (e: React.MouseEvent) => hover.show(e, `${r.symbol}: ${ppF(r.weight_pct)} of money → ${risk == null ? "—" : ppF(risk)} of risk`), onMouseLeave: hover.hide }}>
               <rect x={0} y={y - 2} width={w} height={bh} style={{ fill: "transparent" }} />
               <text x={narrow ? 0 : mid} y={y + 7} dy=".32em" textAnchor={narrow ? "start" : "middle"} style={heavy ? INK : INK2}>{r.symbol}</text>
               <rect x={narrow ? left : left - X(r.weight_pct)} y={y} width={X(r.weight_pct)} height={bh - 8} rx={2} style={{ fill: "var(--ink-300)" }} />
-              <rect x={risk >= 0 ? right : right - X(-risk)} y={y} width={X(Math.abs(risk))} height={bh - 8} rx={2}
-                style={{ fill: risk < 0 ? "var(--positive)" : "var(--negative)", opacity: heavy ? 1 : 0.6 }} />
+              {risk == null ? <line x1={right} x2={right + 20} y1={y + 6} y2={y + 6} style={{ stroke: "var(--border-strong)", strokeDasharray: "2 3" }} /> : <rect x={risk >= 0 ? right : right - X(-risk)} y={y} width={X(Math.abs(risk))} height={bh - 8} rx={2}
+                style={{ fill: risk < 0 ? "var(--positive)" : "var(--negative)", opacity: heavy ? 1 : 0.6 }} />}
             </g>
           );
         })}
@@ -596,50 +596,70 @@ export function RiskButterfly({ data }: { data: RiskData }) {
 
 /* ------------------------------------------------------------------ companies ---- */
 
-/** P/E × P/B on log axes, bubble = money, crosshair = the index's published P/E and P/B. */
-export function ValuationBubbles({ data }: { data: AnalyticsResponse }) {
+/** Same bubble map; server-selected axes, references, exclusions and status. */
+export function ValuationBubbles({ data, lens = "valuation" }: { data: AnalyticsResponse; lens?: CompanyLens }) {
   const [ref, w] = useWidth();
   const hover = useTip();
-  const ipe = data.fundamentals.benchmark?.pe ?? null, ipb = data.fundamentals.benchmark?.pb ?? null;
-  const pts = data.positions.filter((p) => (p.pe ?? 0) > 0 && (p.pb ?? 0) > 0);
-  const h = Math.max(240, Math.min(330, Math.round(w * 0.6))), m = { l: 34, r: 14, t: 10, b: 24 };
-  if (!pts.length) return <div ref={ref} style={{ height: h }} />;
-  const pe = pts.map((p) => p.pe!), pb = pts.map((p) => p.pb!);
-  const xd = [Math.min(...pe, ipe ?? Infinity) * 0.8, Math.max(...pe, ipe ?? 0) * 1.25];
-  const yd = [Math.min(...pb, ipb ?? Infinity) * 0.8, Math.max(...pb, ipb ?? 0) * 1.25];
-  const lg = (v: number, d: number[], a: number, b: number) => a + ((Math.log(v) - Math.log(d[0]!)) / (Math.log(d[1]!) - Math.log(d[0]!))) * (b - a);
-  const X = (v: number) => lg(v, xd, m.l, w - m.r), Y = (v: number) => lg(v, yd, h - m.b, m.t);
-  const mw = Math.max(...pts.map((p) => p.weight ?? 0)) || 1, R = (wt: number) => 2.5 + Math.sqrt(wt / mw) * Math.min(32, w / 18);
-  const ticks = (d: number[]) => [1, 2, 3, 5, 10, 20, 30, 50, 100, 200].filter((t) => t >= d[0]! && t <= d[1]!);
-  return (
-    <div ref={ref}>{w > 0 && (
-      <svg width={w} height={h} role="img" aria-label="Price paid for each company against the index">
-        {ipe != null && ipb != null && <>
-          <rect x={X(ipe)} y={m.t} width={Math.max(0, w - m.r - X(ipe))} height={Math.max(0, Y(ipb) - m.t)} style={{ fill: "var(--negative-tint)", opacity: 0.75 }} />
-          <rect x={m.l} y={Y(ipb)} width={Math.max(0, X(ipe) - m.l)} height={Math.max(0, h - m.b - Y(ipb))} style={{ fill: "var(--positive-tint)", opacity: 0.75 }} />
-          <line x1={X(ipe)} x2={X(ipe)} y1={m.t} y2={h - m.b} style={{ stroke: "var(--ink-400)", strokeDasharray: "4 3" }} />
-          <line y1={Y(ipb)} y2={Y(ipb)} x1={m.l} x2={w - m.r} style={{ stroke: "var(--ink-400)", strokeDasharray: "4 3" }} />
-        </>}
-        {ticks(xd).map((t) => <text key={`x${t}`} x={X(t)} y={h - 6} textAnchor="middle" style={AXIS}>{t}</text>)}
-        {ticks(yd).map((t) => <text key={`y${t}`} x={m.l - 6} y={Y(t)} dy=".32em" textAnchor="end" style={AXIS}>{t}</text>)}
-        <text x={w - m.r} y={h - m.b - 6} textAnchor="end" style={AXIS}>P/E →</text>
-        <text x={m.l + 4} y={m.t + 10} style={AXIS}>↑ P/B</text>
-        {[...pts].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0)).map((p) => (
-          <circle key={p.isin} cx={X(p.pe!)} cy={Y(p.pb!)} r={R(p.weight ?? 0)}
-            style={{ fill: "var(--chart-1)", fillOpacity: 0.5, stroke: "var(--chart-1)" }}
-            onMouseMove={(e) => hover.show(e, `${sym(p)} · ${ppF(p.weight)} · P/E ${p.pe!.toFixed(1)} · P/B ${p.pb!.toFixed(1)}`)} onMouseLeave={hover.hide} />
-        ))}
-        {pts.filter((p) => (p.weight ?? 0) >= 3).map((p) => (
-          <text key={`l${p.isin}`} x={X(p.pe!)} y={Y(p.pb!)} dy=".32em" textAnchor="middle" style={{ ...INK, fontSize: 10, pointerEvents: "none" }}>{sym(p)}</text>
-        ))}
-      </svg>)}</div>
-  );
+  const config = COMPANY_LENSES[lens], derived = data.derived.lenses[lens];
+  const h = Math.max(240, Math.min(330, Math.round(w * 0.6))), m = { l: 42, r: 14, t: 10, b: 24 };
+  const value = (p: AnalyticsResponse["positions"][number], field: string | undefined): number | null => {
+    const v = field ? p[field as keyof typeof p] : null;
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  };
+  const pts = data.positions.flatMap((p) => {
+    if (!derived || derived.excluded?.[p.isin]) return [];
+    const x = value(p, derived.x_field), y = value(p, derived.y_field);
+    return x == null || y == null || (lens === "valuation" && (x <= 0 || y <= 0)) ? [] : [{ p, x, y }];
+  });
+  if (!pts.length) return <div ref={ref} style={{ height: h, display: "grid", placeItems: "center", color: "var(--text-tertiary)" }}>—</div>;
+  const rx = derived?.x_average ?? null, ry = derived?.y_average ?? null;
+  const log = lens === "valuation";
+  const domain = (values: number[], reference: number | null) => {
+    const all = reference != null && (!log || reference > 0) ? [...values, reference] : values;
+    const lo = Math.min(...all), hi = Math.max(...all);
+    const pad = (hi - lo || Math.abs(hi) || 1) * 0.15;
+    return log ? [lo * 0.8, hi * 1.25] : [lo - pad, hi + pad];
+  };
+  const xd = domain(pts.map((p) => p.x), rx), yd = domain(pts.map((p) => p.y), ry);
+  const scale = (v: number, d: number[], a: number, b: number) => {
+    const f = log ? Math.log : (n: number) => n;
+    return a + ((f(v) - f(d[0]!)) / (f(d[1]!) - f(d[0]!))) * (b - a);
+  };
+  const X = (v: number) => scale(v, xd, m.l, w - m.r), Y = (v: number) => scale(v, yd, h - m.b, m.t);
+  const mw = Math.max(...pts.map(({ p }) => p.weight ?? 0)) || 1;
+  const R = (wt: number) => 2.5 + Math.sqrt(wt / mw) * Math.min(32, w / 18);
+  const ticks = (d: number[]) => log
+    ? [0.1, 0.2, 0.5, 1, 2, 3, 5, 10, 20, 30, 50, 100, 200, 500].filter((t) => t >= d[0]! && t <= d[1]!)
+    : Array.from({ length: 4 }, (_, i) => d[0]! + (d[1]! - d[0]!) * i / 3);
+  const fmt = (v: number) => config.percent ? pctF(v, 0) : v.toFixed(1);
+  return <div ref={ref}>{w > 0 && <svg width={w} height={h} role="img" aria-label={`${config.label} of each company; reference is the eligible holdings mean`}>
+    {rx != null && ry != null && (!log || (rx > 0 && ry > 0)) && <>
+      {lens === "valuation" && <>
+        <rect x={X(rx)} y={m.t} width={Math.max(0, w - m.r - X(rx))} height={Math.max(0, Y(ry) - m.t)} style={{ fill: "var(--negative-tint)", opacity: 0.75 }} />
+        <rect x={m.l} y={Y(ry)} width={Math.max(0, X(rx) - m.l)} height={Math.max(0, h - m.b - Y(ry))} style={{ fill: "var(--positive-tint)", opacity: 0.75 }} />
+      </>}
+      <line x1={X(rx)} x2={X(rx)} y1={m.t} y2={h - m.b} style={{ stroke: "var(--ink-400)", strokeDasharray: "4 3" }} />
+      <line y1={Y(ry)} y2={Y(ry)} x1={m.l} x2={w - m.r} style={{ stroke: "var(--ink-400)", strokeDasharray: "4 3" }} />
+    </>}
+    {ticks(xd).map((t) => <text key={`x${t}`} x={X(t)} y={h - 6} textAnchor="middle" style={AXIS}>{fmt(t)}</text>)}
+    {ticks(yd).map((t) => <text key={`y${t}`} x={m.l - 6} y={Y(t)} dy=".32em" textAnchor="end" style={AXIS}>{fmt(t)}</text>)}
+    <text x={w - m.r} y={h - m.b - 6} textAnchor="end" style={AXIS}>{config.x} →</text>
+    <text x={m.l + 4} y={m.t + 10} style={AXIS}>↑ {config.y}</text>
+    {[...pts].sort((a, b) => (b.p.weight ?? 0) - (a.p.weight ?? 0)).map(({ p, x, y }) => <circle key={p.isin} cx={X(x)} cy={Y(y)} r={R(p.weight ?? 0)}
+      style={{ fill: "var(--chart-1)", fillOpacity: 0.5, stroke: "var(--chart-1)" }}
+      onMouseMove={(e) => hover.show(e, `${sym(p)} · ${ppF(p.weight)}${data.coverage.basis === "priced_subset" ? " of priced subtotal" : ""} · ${config.x} ${fmt(x)} · ${config.y} ${fmt(y)}${p.fundamentals_as_of ? ` · inputs ${p.fundamentals_as_of}` : ""} · ${derived?.position_statuses[p.isin]?.replaceAll("_", " ") ?? "unrated"}`)} onMouseLeave={hover.hide} />)}
+    {pts.filter(({ p }) => (p.weight ?? 0) >= 3).map(({ p, x, y }) => <text key={`l${p.isin}`} x={X(x)} y={Y(y)} dy=".32em" textAnchor="middle" style={{ ...INK, fontSize: 10, pointerEvents: "none" }}>{sym(p)}</text>)}
+  </svg>}</div>;
 }
 
 /** The book's ratios as bars, with the index's published value as a tick where one exists. */
 export function BookVsIndex({ data }: { data: AnalyticsResponse }) {
   const [ref, w] = useWidth();
-  const f = data.fundamentals, c = data.characteristics, ib = f.benchmark ?? {};
+  const hover = useTip();
+  const f = data.fundamentals, c = data.characteristics;
+  const comparable = f.benchmark_comparison === "compatible";
+  const ib: Record<string, number | null> = comparable ? f.benchmark ?? {} : {};
+  const excluded = (label: string) => label === "P/E" ? f.pe.excluded_weight_pct : label === "P/B" ? f.pb.excluded_weight_pct : f.dividend_yield.excluded_weight_pct;
   const rows: [string, number | null | undefined, number | null | undefined, (v: number) => string][] = [
     ["P/E", f.pe.value, ib.pe, (v) => v.toFixed(1)],
     ["P/B", f.pb.value, ib.pb, (v) => v.toFixed(1)],
@@ -658,7 +678,7 @@ export function BookVsIndex({ data }: { data: AnalyticsResponse }) {
           const lo = Math.min(0, v, iv ?? 0) * 1.35, hi = Math.max(0, v, iv ?? 0) * 1.35 || Math.abs(lo) * 0.25;
           const X = (x: number) => m.l + ((x - lo) / (hi - lo || 1)) * iw;
           return (
-            <g key={label}>
+            <g key={label} onMouseMove={(e) => hover.show(e, `${label}: ${fmt(v)}${["P/E", "P/B", "Yield"].includes(label) ? ` · ${excluded(label).toFixed(1)}% of priced weight excluded` : ""}`)} onMouseLeave={hover.hide}>
               <text y={y + 5} dy=".32em" style={INK2}>{label}</text>
               <rect x={m.l} y={y} width={iw} height={10} rx={5} style={{ fill: "var(--surface-sunken)" }} />
               <rect x={Math.min(X(0), X(v))} y={y} width={Math.abs(X(v) - X(0))} height={10} rx={5} style={{ fill: v < 0 ? "var(--negative)" : "var(--chart-1)", opacity: 0.85 }} />
@@ -668,7 +688,13 @@ export function BookVsIndex({ data }: { data: AnalyticsResponse }) {
             </g>
           );
         })}
-      </svg>)}</div>
+      </svg>)}
+      {!comparable && <div style={{ font: "500 11px var(--font-label)", color: "var(--text-tertiary)", display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <span title="Reported index ratios use different aggregation, loss and coverage conventions; no comparable spread is established.">Reported index</span>
+        {(["pe", "pb", "dividend_yield"] as const).map((key) => f.benchmark?.[key] != null && <span key={key}>{key === "dividend_yield" ? "Yield" : key === "pe" ? "P/E" : "P/B"} {key === "dividend_yield" ? pctF(f.benchmark[key], 1) : f.benchmark[key]!.toFixed(1)}</span>)}
+        {f.benchmark_as_of && <span>{f.benchmark_as_of}</span>}
+      </div>}
+    </div>
   );
 }
 
@@ -680,8 +706,8 @@ export function CoverageRings({ data }: { data: AnalyticsResponse }) {
   const hover = useTip();
   const c = data.coverage, P = data.positions;
   const miss = (pred: (p: (typeof P)[number]) => boolean) => P.filter(pred).map(sym);
-  const rings: [string, number, string[]][] = [
-    ["Price", c.priced_pct, []],
+  const rings: [string, number | null, string[]][] = [
+    ["Price", c.priced_pct, data.unresolved.map(sym)],
     ["P/E", c.pe_pct, miss((p) => p.pe == null)],
     ["ROE", c.roe_pct, miss((p) => p.roe == null)],
     ["D/E", c.debt_to_equity_pct, miss((p) => p.debt_to_equity == null)],
@@ -695,13 +721,13 @@ export function CoverageRings({ data }: { data: AnalyticsResponse }) {
   };
   return (
     <div ref={ref}>{w > 0 && (
-      <svg width={w} height={Math.ceil(rings.length / cols) * (per + 16)} role="img" aria-label="Share of money each input covers">
+      <svg width={w} height={Math.ceil(rings.length / cols) * (per + 16)} role="img" aria-label="Coverage of the priced subtotal; full-book price coverage is unknown when a value is missing">
         {rings.map(([l, v, missing], i) => (
           <g key={l} transform={`translate(${(i % cols) * per + per / 2},${Math.floor(i / cols) * (per + 16) + per / 2 - 4})`}
-            onMouseMove={(e) => hover.show(e, `${l}: ${v.toFixed(1)}% of money covered${missing.length ? ` · missing ${missing.slice(0, 8).join(", ")}` : ""}`)} onMouseLeave={hover.hide}>
+            onMouseMove={(e) => hover.show(e, `${l}: ${v == null ? `value coverage unknown · ${c.priced_count ?? P.length}/${c.total_count ?? P.length + data.unresolved.length} positions priced` : `${v.toFixed(1)}% of ${c.basis === "priced_subset" ? "priced subtotal" : "money"} covered`}${missing.length ? ` · missing ${missing.slice(0, 8).join(", ")}` : ""}`)} onMouseLeave={hover.hide}>
             <circle r={R - 3} style={{ fill: "none", stroke: "var(--surface-sunken)", strokeWidth: 6 }} />
-            <path d={ring(v / 100, R - 3)} style={{ fill: "none", strokeWidth: 6, strokeLinecap: "round", stroke: v >= 95 ? "var(--positive)" : v >= 75 ? "var(--warning)" : "var(--negative)" }} />
-            <text textAnchor="middle" dy=".35em" style={{ fill: "var(--text-primary)", font: "500 14px var(--font-figure)" }}>{Math.round(v)}</text>
+            {v != null && <path d={ring(v / 100, R - 3)} style={{ fill: "none", strokeWidth: 6, strokeLinecap: "round", stroke: v >= 95 ? "var(--positive)" : v >= 75 ? "var(--warning)" : "var(--negative)" }} />}
+            <text textAnchor="middle" dy=".35em" style={{ fill: "var(--text-primary)", font: "500 14px var(--font-figure)" }}>{v == null ? "—" : Math.round(v)}</text>
             <text textAnchor="middle" y={R + 12} style={AXIS}>{l}</text>
           </g>
         ))}
@@ -784,7 +810,6 @@ export function FactorStrips({ data }: { data: AnalyticsResponse }) {
   const bh = 46, m = { l: 92, r: 44 }, iw = Math.max(1, w - m.l - m.r);
   const X = (v: number) => m.l + (v / 100) * iw;
   const mw = Math.max(1, ...data.positions.map((p) => p.weight ?? 0));
-  const real = Object.values(data.factors).some((f) => f.score != null);
   return (
     <div ref={ref}>{w > 0 && (
       <svg width={w} height={FACTOR_ROWS.length * bh + 16} role="img" aria-label="Factor percentiles against the market universe">
@@ -792,12 +817,19 @@ export function FactorStrips({ data }: { data: AnalyticsResponse }) {
         {[0, 50, 100].map((t) => <text key={t} x={X(t)} y={FACTOR_ROWS.length * bh + 12} textAnchor="middle" style={AXIS}>{t}</text>)}
         {FACTOR_ROWS.map(([key, label, how], i) => {
           const f = data.factors[key], y = i * bh + 14;
+          const howMeasured = data.advisor ? ({
+            momentum: "252-to-21-session price return; tied peer percentiles",
+            value: "mean of earnings-yield and book-yield peer percentiles",
+            quality: "mean of ROE, net margin and lower-leverage peer percentiles",
+            low_volatility: "lower 252-session sample volatility; tied peer percentiles",
+          } as Record<string, string>)[key] ?? how : how;
           return (
             <g key={key}>
+              <title>{`${howMeasured} · ${f?.eligible_count ?? f?.universe_size ?? 0} eligible peers · ${f?.reasons?.join(" · ") ?? ""}`}</title>
               <text y={y + 6} dy=".32em" style={INK2}>{label}</text>
-              <rect x={m.l} y={y} width={iw} height={12} rx={6} style={{ fill: real ? "var(--surface-sunken)" : "url(#tp-hatch-factor)" }} />
+              <rect x={m.l} y={y} width={iw} height={12} rx={6} style={{ fill: f?.score != null ? "var(--surface-sunken)" : "url(#tp-hatch-factor)" }} />
               <line x1={X(50)} x2={X(50)} y1={y - 5} y2={y + 17} style={{ stroke: "var(--ink-400)" }} />
-              {real && data.positions.map((p) => {
+              {data.positions.map((p) => {
                 const v = p.factors?.[key];
                 return v == null ? null : (
                   <circle key={p.isin} cx={X(v)} cy={y + 6} r={2 + Math.sqrt((p.weight ?? 0) / mw) * 7}
@@ -807,7 +839,7 @@ export function FactorStrips({ data }: { data: AnalyticsResponse }) {
               })}
               {f?.score != null && <>
                 <rect x={X(f.score) - 2} y={y - 7} width={4} height={26} rx={2} style={{ fill: "var(--text-primary)" }}
-                  onMouseMove={(e) => hover.show(e, `Book ${label.toLowerCase()}: ${f.score!.toFixed(0)}th percentile of ${f.universe} (${f.universe_size} names) · covers ${ppF(f.coverage_pct, 0)} of money · ${how}`)} onMouseLeave={hover.hide} />
+                  onMouseMove={(e) => hover.show(e, `Book ${label.toLowerCase()}: ${f.score!.toFixed(0)}th percentile of ${f.universe} (${f.universe_size} names) · covers ${ppF(f.coverage_pct, 0)} of money · ${howMeasured}`)} onMouseLeave={hover.hide} />
                 <text x={w - m.r + 6} y={y + 6} dy=".32em" style={{ fill: "var(--text-primary)", font: "500 15px var(--font-figure)" }}>{f.score.toFixed(0)}</text>
               </>}
               {f?.score == null && <text x={w - m.r + 6} y={y + 6} dy=".32em" style={AXIS}>—</text>}

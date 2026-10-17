@@ -24,6 +24,7 @@ export function UnpricedBanner({ unpriced }: { unpriced: UnpricedOut }) {
         {unpriced.holdings.map((h) => (
           <li key={h.isin}>
             {h.symbol ?? h.isin}, {h.name ?? "unnamed"} ({formatMoney(h.invested)})
+            {h.reason ? <span className="text-navy-500">: {h.reason}</span> : null}
           </li>
         ))}
       </ul>

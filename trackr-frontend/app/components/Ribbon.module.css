@@ -1,0 +1,9 @@
+.ribbon { min-width: 0; }
+@media (max-width: 1000px) {
+  .siblings { display: none !important; }
+}
+@media (max-width: 600px) {
+  .ribbon { padding: 0 10px !important; gap: 8px !important; }
+  .sectionLabel, .secondaryTool { display: none !important; }
+  .sectionsTrigger { padding: 8px !important; }
+}

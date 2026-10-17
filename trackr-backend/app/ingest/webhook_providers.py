@@ -81,7 +81,7 @@ class InboundMessage:
 #: How deep to follow nested ``message/rfc822`` parts. Gmail's bulk forward produces
 #: exactly one level, so anything past a couple of levels is either a forward of a
 #: forward or someone probing for a parser bomb. Bounded rather than trusted.
-_MAX_NESTING_DEPTH = 4
+_MAX_NESTING_DEPTH = 20
 
 #: Attachment container types that are a MESSAGE rather than a document. These are what
 #: Gmail's "Forward as attachment" produces, and what nothing in this codebase could read
@@ -156,6 +156,10 @@ def _walk_parts(
     original's date is the day the note was issued.
     """
     if depth > _MAX_NESTING_DEPTH:
+        out.append({"filename": msg.get_filename() or "nested-message.eml",
+                    "content_type": msg.get_content_type(), "content_b64": "",
+                    "email_meta": meta,
+                    "extraction_error": "MIME nesting limit exceeded; original delivery retained"})
         return
 
     content_type = (msg.get_content_type() or "").lower()
@@ -179,19 +183,22 @@ def _walk_parts(
     # and duplicating that judgement in two places is how the two drift apart.
     filename = msg.get_filename() or ""
     disposition = (msg.get_content_disposition() or "").lower()
-    if disposition != "attachment" and not filename:
+    if (disposition != "attachment" and not filename
+            and not content_type.startswith("application/")
+            and content_type not in ("text/csv", "text/tab-separated-values")):
         return
     try:
         payload = msg.get_payload(decode=True)
     except Exception:  # noqa: BLE001 - one unreadable part must not lose the others
-        return
-    if not payload:
+        out.append({"filename": filename, "content_type": content_type,
+                    "content_b64": "", "email_meta": meta,
+                    "extraction_error": "Attachment could not be decoded; original retained"})
         return
     out.append(
         {
             "filename": _header(msg, "Content-Description") if not filename else filename,
             "content_type": content_type or "application/octet-stream",
-            "content_b64": base64.b64encode(payload).decode("ascii"),
+            "content_b64": base64.b64encode(payload or b"").decode("ascii"),
             "email_meta": meta,
         }
     )
@@ -214,6 +221,9 @@ def unwrap_attachments(attachments: list[dict[str, Any]]) -> list[dict[str, Any]
     """
     unwrapped: list[dict[str, Any]] = []
     for attachment in attachments:
+        if attachment.get("extraction_error"):
+            unwrapped.append(attachment)
+            continue
         content_type = str(attachment.get("content_type", "")).lower().split(";")[0].strip()
         filename = str(attachment.get("filename", ""))
         is_message = content_type in _MESSAGE_TYPES or filename.lower().endswith(".eml")

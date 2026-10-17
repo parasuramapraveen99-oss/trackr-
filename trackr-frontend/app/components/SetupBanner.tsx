@@ -80,8 +80,6 @@ export function SetupBanner() {
   const s = state.data;
   const accountList = accounts.data ?? [];
   const brokerNames = accountList.map((a) => a.label ?? a.broker).join(", ");
-  const forwardingOffered =
-    s.forwarding_available && accountList.some((a) => a.forwarding_addresses.length > 0);
 
   return (
     <section
@@ -190,12 +188,12 @@ export function SetupBanner() {
             action={s.transactions > 0 ? null : "Upload files"}
             step="files"
           />
-          {forwardingOffered && !forwardingDeclined && (
+          {!forwardingDeclined && (
             <ChecklistRow
               done={false}
               optional
-              label="Email forwarding"
-              detail="Optional. New trades come in on their own"
+              label="Gmail forwarding"
+              detail="Optional. Watch the visual setup guide"
               action="Set up"
               step="forward"
               onDismiss={() => {

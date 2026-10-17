@@ -3,9 +3,9 @@ POST /ingest/stage/{batch_id}/promote, POST /ingest/stage/{batch_id}/discard.
 
 Everything here is a thin HTTP layer over ``app/db/imports.py``'s already-tested staging
 state machine (``stage_batch`` / ``review_batch`` / ``promote_batch`` / ``discard_batch``)
-and, for the inbound-email path, ``app/ingest/webhook.py``. No adapter writes to the
-ledger from this router: staging only, until ``promote`` -- an authenticated,
-attributed, separate call. See docs/INGESTION.md "Staging: why nothing auto-commits".
+and, for Mailgun, the durable admission path in ``app/ingest/mailgun.py``. No adapter
+writes to the ledger. Promotion is a separate attributed operation, through human
+review or the investor-authorized policy in ``app/jobs/email.py``.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import (
     APIRouter,
@@ -35,11 +35,11 @@ from app.auth.dependencies import (
 )
 from app.config import Settings, get_settings
 from app.database import get_conn
-from app.db import consent, imports, repository
+from app.db import consent, crypto, document_passwords, imports, repository
 from app.db.identity import IdentityMismatchError
 from app.db.imports import DuplicateUploadError
 from app.ingest import file_validation, webhook, webhook_providers
-from app.ingest.cas_pdf import CasAccountUnresolvedError, CasPdfAdapter
+from app.ingest.cas_pdf import CasPdfAdapter, CasStatementError
 from app.ingest.file_validation import FileVerdict
 from app.ingest.llm_adapter import LlmDocumentAdapter
 from app.ingest.webhook_providers import WebhookNotConfiguredError
@@ -84,12 +84,8 @@ _XLSX_ADAPTERS = {
 
 
 #: adapter name -> factory for the PDF path. Unlike the two above this one takes the
-#: investor's own PDF password, so it is constructed through ``_build_adapter`` rather
-#: than called directly -- see app.ingest.webhook.pdf_password for where that comes from.
-#:
-#: ``cas_pdf`` is built separately in ``_build_adapter`` because it takes a ``pan=`` rather
-#: than a ``password=``: CDSL's rule is the PAN in capitals and the adapter tries casing
-#: variants itself, so handing it the raw PAN is more robust than pre-casing it here.
+#: password that opens the file, so it is constructed through ``_build_adapter`` rather
+#: than called directly -- see ``_unlock`` for where that password comes from.
 _PDF_ADAPTERS = {"zerodha_contract_note": ZerodhaContractNoteAdapter}
 
 
@@ -137,7 +133,7 @@ def _build_adapter(
         # ISIN and quantity across EVERY broker on one PAN. stage_batch already branches on
         # parse_declared_holdings, so nothing downstream needed changing -- only this
         # registration, which is what made a written parser reachable.
-        return CasPdfAdapter(pan=pdf_password, broker_accounts=broker_accounts)
+        return CasPdfAdapter(password=pdf_password, broker_accounts=broker_accounts)
     if name == LlmDocumentAdapter.name:
         return LlmDocumentAdapter(password=pdf_password, client=_llm_client(settings))
     raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"no adapter for {name!r}")
@@ -161,28 +157,53 @@ _DOCTYPES: dict[str, tuple[str, str]] = {
 }
 
 
-def _account_broker(conn: Any, account_id: str) -> str:
-    """The broker this account belongs to, lowercased -- what picks the PDF password
-    rule (app.ingest.webhook.PDF_PASSWORD_CASE). Empty when the account has none."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT lower(broker) FROM account WHERE id = %s", (account_id,))
-        row = cur.fetchone()
-    return (row[0] or "") if row else ""
+def _saved_passwords(conn: Any, investor_id: str) -> list[tuple[str, str]]:
+    """What to try on a locked file before asking: the investor's PAN (both cases), then
+    each statement password they saved -- decrypted, for opening files only.
 
-
-def _pdf_password_for(conn: Any, investor_id: str, account_id: str) -> str:
-    """This investor's PDF password for this account's broker, or "" when there is none.
-
-    Never fails the upload: a missing PAN, a broker with no documented password rule, or
-    an unreadable ``investor_secret`` row all mean "we have no password", and an encrypted
-    note then comes back as the "this PDF is locked" verdict -- which is the sentence the
-    person can act on. Guessing is worse than saying so (app.ingest.webhook.pdf_password).
+    A password we hold but cannot decrypt is a server fault (wrong or missing
+    PORTFOLIO_ENCRYPTION_KEY) -- said as one, rather than quietly trying nothing and telling
+    the investor their file is locked when the real problem is ours.
     """
     try:
-        return webhook.pdf_password(conn, investor_id, _account_broker(conn, account_id))
-    except Exception:  # noqa: BLE001 - crypto/key errors must not fail a whole upload
-        logger.warning("could not resolve PDF password for investor %s", investor_id, exc_info=True)
-        return ""
+        return document_passwords.unlock_candidates(conn, investor_id)
+    except Exception as exc:  # noqa: BLE001 - crypto/key errors
+        logger.error(
+            "could not decrypt saved file passwords for investor %s", investor_id, exc_info=True
+        )
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "Your saved file passwords could not be read: the server's encryption key is "
+            "misconfigured. Nothing was imported.",
+        ) from exc
+
+
+def _unlock(
+    content: bytes, saved: list[tuple[str, str]], typed: tuple[str, str] | None = None
+) -> file_validation.Unlock:
+    """Open one uploaded file: no password, then the password just typed (if any), then
+    each saved one -- every one exactly as given. Not a PDF: nothing to unlock."""
+    if content[:5] != b"%PDF-":
+        return file_validation.Unlock(file_validation.UNLOCK_OPENED)
+    candidates = ([typed] if typed else []) + saved
+    return file_validation.unlock_pdf(content, candidates)
+
+
+def _stored_original(conn: Any, store: Any, batch_id: str) -> bytes:
+    """The bytes a batch was staged from -- what a re-parse has to open again."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT d.storage_key FROM import_batch b JOIN document d ON d.id = b.document_id "
+            "WHERE b.id = %s",
+            (batch_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"batch {batch_id} has no stored document to re-parse",
+        )
+    return store.get(row[0])
 
 
 def _reject_invalid_files(
@@ -425,6 +446,7 @@ def _rejected_outcome(verdict: FileVerdict) -> dict[str, Any]:
         "reason": verdict.reason,
         "hint": verdict.hint,
         "encrypted": verdict.encrypted,
+        "wrong_password": False,
         "notes": verdict.notes,
     }
 
@@ -439,6 +461,8 @@ async def ingest_files(
     investor_id: str = Form(...),
     account_id: str = Form(...),
     files: list[UploadFile] = File(...),
+    password: str | None = Form(default=None),
+    password_source: str | None = Form(default=None),
     conn: Any = Depends(get_conn),
     settings: Settings = Depends(get_settings),
     current_user: dict[str, Any] = Depends(get_current_user),
@@ -472,7 +496,19 @@ async def ingest_files(
     investor_code = _investor_code(conn, investor_id)
     consent.require_consent(conn, investor_id)
 
-    password = _pdf_password_for(conn, investor_id, account_id)
+    # A password typed just now, for a locked file. Tried on these files only; saved for
+    # its source only once it has actually opened one of them -- a wrong password is never
+    # stored (migration 082).
+    typed: tuple[str, str] | None = None
+    if password:
+        if password_source not in document_passwords.SOURCES:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"password_source must be one of {list(document_passwords.SOURCES)}",
+            )
+        typed = (password_source, password)
+    saved = _saved_passwords(conn, investor_id)
+    typed_saved = False
     store = get_store(settings)
 
     outcomes: list[dict[str, Any]] = []
@@ -482,7 +518,41 @@ async def ingest_files(
     for upload in files:
         filename = upload.filename or ""
         content = await upload.read()
-        verdict = file_validation.classify(content, filename, password)
+        unlock = _unlock(content, saved, typed)
+        password_used = unlock.password
+        if (
+            typed is not None
+            and not typed_saved
+            and unlock.outcome == file_validation.UNLOCK_OPENED
+            and unlock.password == typed[1]
+            and unlock.password
+        ):
+            try:
+                document_passwords.save(
+                    conn, investor_id, typed[0], typed[1], actor_uid=str(current_user["id"])
+                )
+            except crypto.EncryptionNotConfiguredError as exc:
+                # The password was right; we just cannot store it safely. Say that, rather
+                # than a bare 500 the investor would read as "your password failed".
+                raise HTTPException(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "That password opened your file, but the server cannot save it: its "
+                    "encryption key is not configured. Nothing was imported.",
+                ) from exc
+            typed_saved = True
+        verdict = file_validation.classify(content, filename, password_used)
+        if verdict.encrypted and typed is not None:
+            # They typed a password and it opened nothing -- the one answer they need is
+            # that THIS password is wrong, so they can fix it and try again.
+            outcomes.append(
+                _rejected_outcome(verdict)
+                | {
+                    "reason": "That password didn't open this file. Check it and try again.",
+                    "hint": None,
+                    "wrong_password": True,
+                }
+            )
+            continue
         if not verdict.ok or verdict.adapter is None:
             # No deterministic parser claimed this file. Where the LLM path is enabled it
             # gets one attempt; where it is not, this is the dead end it has always been.
@@ -492,7 +562,11 @@ async def ingest_files(
             # handed to a transcriber, and app/ingest/redaction.py refuses to transmit
             # anything that does not carry a trade table, so an unrelated document a
             # client attached by mistake still goes nowhere.
-            if _llm_client(settings) is None:
+            #
+            # A LOCKED PDF NEVER GOES TO THE MODEL. The model cannot open it either, and
+            # handing it over turned "password-protected" into "no trades found -- check
+            # the date range", which hid the PAN prompt the browser shows on `encrypted`.
+            if verdict.encrypted or _llm_client(settings) is None:
                 outcomes.append(_rejected_outcome(verdict))
                 continue
             verdict = replace(verdict, ok=True, adapter=LlmDocumentAdapter.name)
@@ -511,7 +585,7 @@ async def ingest_files(
                         conn,
                         _build_adapter(
                             verdict.adapter,
-                            password,
+                            password_used,
                             settings,
                             webhook.investor_broker_accounts(conn, investor_id),
                         ),
@@ -556,9 +630,10 @@ async def ingest_files(
                 }
             )
             continue
-        except CasAccountUnresolvedError as exc:
-            # A CAS that cannot be tied to exactly one of this investor's accounts. Raised
-            # inside the savepoint before anything is stored, so nothing is left behind.
+        except CasStatementError as exc:
+            # A CAS that cannot be tied to exactly one of this investor's accounts, or whose
+            # holdings do not reproduce its own totals. Raised inside the savepoint before
+            # anything is stored, so nothing is left behind.
             outcomes.append(
                 {
                     "filename": filename,
@@ -584,7 +659,13 @@ async def ingest_files(
             # browser -- hand its id back so the retry resumes it instead of saying
             # "already imported" about trades that are not in the ledger.
             existing = imports.batch_summary(conn, exc.batch_id)
-            pending = existing is not None and existing["status"] == imports.STATUS_STAGED
+            # CAS balances were recorded during staging; they never need trade promotion.
+            is_cas = verdict.adapter == CasPdfAdapter.name
+            pending = (
+                not is_cas
+                and existing is not None
+                and existing["status"] == imports.STATUS_STAGED
+            )
             if pending:
                 staged_batch_ids.append(exc.batch_id)
             outcomes.append(
@@ -601,10 +682,14 @@ async def ingest_files(
                     "hint": None,
                     "encrypted": False,
                     "notes": [
-                        "Already uploaded and still waiting for review — resumed, nothing "
-                        "was staged twice."
-                        if pending
-                        else "Already imported earlier — nothing was added twice."
+                        "CAS balances already processed — no ledger promotion is needed."
+                        if is_cas
+                        else (
+                            "Already uploaded and still waiting for review — resumed, nothing "
+                            "was staged twice."
+                            if pending
+                            else "Already imported earlier — nothing was added twice."
+                        )
                     ],
                 }
             )
@@ -641,10 +726,11 @@ async def ingest_files(
                 f"{awaiting} F&O trade(s) are waiting for the exchange's F&O contract list "
                 "for their day; it is being fetched and they will resolve automatically."
             )
-        elif result["parsed"] == 0:
+        elif result["parsed"] == 0 and verdict.adapter != CasPdfAdapter.name:
             # The file was the right kind and still yielded nothing. That is a real
             # answer -- an empty date range, or a note whose every row was rejected --
-            # and it must not read as success on the screen.
+            # and it must not read as success on the screen. Not for a CAS: it never
+            # carries trades, and its own notes already say what it recorded.
             notes.append(
                 "We recognised this file but found no trades in it. "
                 "Check the date range you exported."
@@ -678,7 +764,9 @@ async def ingest_files(
 @router.get("/batches", response_model=list[BatchSummaryOut])
 def list_batches(
     investor_id: str,
-    batch_status: str | None = Query(default="STAGED", alias="status"),
+    batch_status: Literal["ALL", "STAGED", "PROMOTED", "DISCARDED"] = Query(
+        default="STAGED", alias="status"
+    ),
     conn: Any = Depends(get_conn),
     _current_user: dict[str, Any] = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
@@ -687,7 +775,7 @@ def list_batches(
     Owner-scoped like everything else under the investor; defaults to STAGED because
     that is the state a reviewer needs back."""
     assert_owned_investor(conn, _current_user, investor_id)
-    return imports.list_batches(conn, investor_id, batch_status)
+    return imports.list_batches(conn, investor_id, None if batch_status == "ALL" else batch_status)
 
 
 def _reject_if_oversized(request: Request, settings: Settings) -> None:
@@ -702,17 +790,18 @@ def _reject_if_oversized(request: Request, settings: Settings) -> None:
         )
 
 
-@router.post("/email", response_model=list[StageResultOut], status_code=status.HTTP_202_ACCEPTED)
+@router.post("/email/mime", response_model=list[StageResultOut], status_code=status.HTTP_200_OK)
+@router.post("/email", response_model=list[StageResultOut], status_code=status.HTTP_200_OK)
 async def ingest_email(
     request: Request,
     conn: Any = Depends(get_conn),
     settings: Settings = Depends(get_settings),
 ) -> list[dict[str, Any]]:
-    """Inbound-parse webhook (SendGrid / Mailgun / Postmark). Public internet surface:
-    verifies the request's provider-specific credential and translates its
-    provider-specific shape -- see app/ingest/webhook_providers.py -- before anything
-    reaches app/ingest/webhook.py's provider-ignorant ``handle_inbound_email``. Routing
-    beyond that is by the ``to`` address alone -- see app/ingest/webhook.py."""
+    """Provider-authenticated intake. Mailgun commits a complete encrypted delivery and
+    pending extraction job, then returns 200; all expensive work happens in the worker.
+    The /mime alias selects Mailgun's raw-MIME delivery mode. Legacy providers retain
+    their attachment archive path, with an explicit commit before acknowledgement.
+    """
     # The dependency-injected settings, not app.main's module-level get_settings() --
     # app.main's auth-failure handlers read this back for their log line, since a
     # registered @app.exception_handler is called by Starlette directly and never goes
@@ -726,9 +815,13 @@ async def ingest_email(
     _reject_if_oversized(request, settings)
     if settings.ingest_webhook_provider is None:
         raise WebhookNotConfiguredError()
+    if settings.ingest_webhook_provider == "mailgun":
+        from app.ingest.mailgun import accept
+
+        return await accept(request, conn, settings)
     message = await webhook_providers.verify_and_translate(request, settings)
     store = get_store(settings)
-    return webhook.handle_inbound_email(
+    results = webhook.handle_inbound_email(
         conn,
         store,
         message.to,
@@ -737,6 +830,8 @@ async def ingest_email(
         body_text=message.body_text,
         max_attachments=settings.ingest_max_attachments_per_delivery,
     )
+    conn.commit()
+    return results
 
 
 @router.get(
@@ -837,34 +932,42 @@ def reparse_stage(
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT adapter, investor_id, account_id FROM import_batch WHERE id = %s",
+            "SELECT adapter, investor_id FROM import_batch WHERE id = %s",
             (batch_id,),
         )
         row = cur.fetchone()
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such batch: {batch_id}")
-    adapter_name, batch_investor_id, batch_account_id = row[0], str(row[1]), row[2]
-    # A locked contract note stays locked on re-parse -- resolving the same password the
-    # original upload used is what makes this the retry path it claims to be, rather than
-    # one that silently fails for exactly the documents most likely to need it.
-    password = (
-        _pdf_password_for(conn, batch_investor_id, str(batch_account_id))
-        if batch_account_id is not None
-        else ""
+    adapter_name, batch_investor_id = row[0], str(row[1])
+    # A locked file stays locked on re-parse -- opening the stored original with the
+    # investor's saved passwords is what makes this the retry path it claims to be, rather
+    # than one that silently fails for exactly the documents most likely to need it.
+    store = get_store(settings)
+    unlock = _unlock(
+        _stored_original(conn, store, batch_id), _saved_passwords(conn, batch_investor_id)
     )
+    if unlock.outcome != file_validation.UNLOCK_OPENED:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "This file is locked and none of your saved passwords open it. Upload it again "
+            "and enter its password when asked."
+            if unlock.outcome == file_validation.UNLOCK_WRONG_PASSWORD
+            else "The stored file is damaged or not a complete PDF.",
+        )
     instance = _build_adapter(
         adapter_name,
-        password,
+        unlock.password,
         settings,
         webhook.investor_broker_accounts(conn, batch_investor_id),
     )
 
-    store = get_store(settings)
     try:
         result = imports.reparse_batch(
             conn, store, batch_id, instance, actor_uid=str(current_user["id"])
         )
-    except CasAccountUnresolvedError as exc:
+    except IdentityMismatchError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    except CasStatementError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from None
     _heal_fno_in_background(conn, background_tasks, settings, [result])
     return result

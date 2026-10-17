@@ -327,12 +327,22 @@ def price_dates_settled(conn: Any, start: date, end: date) -> set[date]:
 
     Dates with no answer of any kind are simply absent from the result, so a range that
     was never fetched comes back empty and the whole of it is fetched, as it should be.
+
+    3. **Only exchange-routed securities are wanted** (docs/MF_ETF_PLAN.md section 4). A
+       mutual fund is never in a bhavcopy, and an unresolved fund unit may not be either;
+       neither can ever be answered by one -- no price, and no absence may be recorded for
+       them -- so wanting them would leave every date unsettled and re-fetched forever.
     """
+    from app.db.fund_reference import non_exchange_isins
+
     with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT isin FROM transaction")
+        off_exchange = non_exchange_isins(conn, [row[0] for row in cur.fetchall()])
         cur.execute(
             """
             WITH wanted AS (
-                SELECT isin, min(txn_date) AS first_held FROM transaction GROUP BY isin
+                SELECT isin, min(txn_date) AS first_held FROM transaction
+                WHERE isin <> ALL(%s) GROUP BY isin
             ),
             answered AS (
                 SELECT DISTINCT price_date FROM price WHERE price_date BETWEEN %s AND %s
@@ -355,7 +365,7 @@ def price_dates_settled(conn: Any, start: date, end: date) -> set[date]:
                   )
             )
             """,
-            (start, end, start, end),
+            (off_exchange, start, end, start, end),
         )
         return {row[0] for row in cur.fetchall()}
 
@@ -371,7 +381,14 @@ def absent_on_or_before(conn: Any, isins: Sequence[str], as_of: date) -> set[str
     and only ``price_absent`` can tell them apart. Treating them alike would either
     block every snapshot forever on a dead ISIN, or quietly drop a live holding whose
     price simply had not been fetched.
+
+    EXCHANGE-ROUTED ISINS ONLY (docs/MF_ETF_PLAN.md section 4). A bhavcopy omitting a mutual
+    fund, or a fund unit whose listing is not established, is not evidence it stopped
+    trading; such a unit must never be excluded merely because a bhavcopy omitted it.
     """
+    from app.db.fund_reference import exchange_isins
+
+    isins = exchange_isins(conn, isins)
     if not isins:
         return set()
     with conn.cursor() as cur:
@@ -392,7 +409,13 @@ def record_absent_prices(conn: Any, on_date: date, isins: Sequence[str]) -> int:
 
     Idempotent: re-recording an absence leaves the original ``recorded_at`` alone, so a
     repeated run neither fails nor rewrites history.
+
+    Only exchange-routed ISINs are recorded: a bhavcopy can say nothing about a security
+    it was never going to carry (docs/MF_ETF_PLAN.md section 4).
     """
+    from app.db.fund_reference import exchange_isins
+
+    isins = exchange_isins(conn, isins)
     if not isins:
         return 0
     with conn.cursor() as cur:

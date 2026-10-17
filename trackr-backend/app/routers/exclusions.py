@@ -34,6 +34,7 @@ def describe(connection: Any, skipped: list[SkippedHolding]) -> list[dict[str, A
             "message": s.message,
             "deficit": str(s.deficit) if s.deficit is not None else None,
             "as_of": s.as_of,
+            "reason_code": s.reason_code,
         }
         for s in skipped
     ]
@@ -42,6 +43,46 @@ def describe(connection: Any, skipped: list[SkippedHolding]) -> list[dict[str, A
 def mark(response: Response, skipped: list[SkippedHolding]) -> None:
     if skipped:
         response.headers[EXCLUDED_HEADER] = ",".join(s.isin for s in skipped)
+
+
+#: Reason code on a fund unit left out of a listed-securities figure.
+FUND_SCOPE_REASON = "MUTUAL_FUND_SCOPE"
+
+
+def listed_scope(
+    connection: Any,
+    transactions: list[Transaction],
+    skipped: list[SkippedHolding],
+    on: date,
+) -> tuple[list[Transaction], list[SkippedHolding]]:
+    """Restrict a ledger to the listed-securities scope (stocks and ETFs), naming the
+    mutual-fund units left out.
+
+    docs/MF_ETF_PLAN.md section 8: scope is applied to the LEDGER, before holdings, FIFO
+    and cash flows -- never by filtering a finished percentage. A NAV-valued fund's return
+    is reported in its own series (``/investors/{id}/funds/performance``); blending it
+    into this one would make neither number mean anything. Units whose route is not yet
+    resolved stay in, and are named as unpriced by ``drop_unpriced`` like any other
+    holding without a price.
+    """
+    from app.db.fund_reference import isins_on_route
+    from app.prices.routing import Route
+
+    funds = set(isins_on_route(connection, {t.isin for t in transactions}, Route.AMFI))
+    if not funds:
+        return transactions, skipped
+    skipped = skipped + [
+        SkippedHolding(
+            isin=isin,
+            message=(
+                "Mutual fund units are reported in the fund series, not in listed-security returns"
+            ),
+            as_of=on,
+            reason_code=FUND_SCOPE_REASON,
+        )
+        for isin in sorted(funds)
+    ]
+    return [t for t in transactions if t.isin not in funds], skipped
 
 
 def drop_unpriced(
@@ -73,3 +114,56 @@ def drop_unpriced(
         [isin for isin in isins if isin not in gone],
         skipped,
     )
+
+
+def missing_cas_history(
+    connection: Any,
+    investor_id: str,
+    transactions: list[Transaction],
+    skipped: list[SkippedHolding],
+    on: date,
+    advised_only: bool = False,
+) -> list[SkippedHolding]:
+    """Name CAS holdings that cannot contribute returns because acquisition history
+    is absent. Reading only the ledger concealed these assets entirely. Snapshots remain
+    checking evidence: this function neither adds holdings nor invents cost/cash flows.
+    """
+    from app.db.security_alias import verified_map
+    from app.engine.types import ACQUIRING_TYPES
+
+    with connection.cursor() as cur:
+        cur.execute(
+            """SELECT DISTINCT ON (h.account_id, h.isin)
+                      h.account_id, h.isin, h.quantity, h.snap_date
+               FROM holding_snapshot h JOIN account a ON a.id = h.account_id
+               WHERE a.investor_id = %s AND h.snap_date <= %s
+                 AND (%s = FALSE OR a.is_advised = TRUE)
+               ORDER BY h.account_id, h.isin, h.snap_date DESC""",
+            (investor_id, on, advised_only),
+        )
+        rows = cur.fetchall()
+    aliases = verified_map(connection, on)
+    acquired = {
+        (t.account_id, t.isin)
+        for t in transactions
+        if t.txn_date <= on and t.txn_type in ACQUIRING_TYPES
+    }
+    named = {s.isin for s in skipped}
+    gaps = []
+    for account_id, isin, quantity, snapshot_date in rows:
+        current = aliases.get(isin, isin)
+        if quantity <= 0 or current in named or (str(account_id), current) in acquired:
+            continue
+        named.add(current)
+        gaps.append(
+            SkippedHolding(
+                isin=current,
+                message=(
+                    f"CAS declares {quantity} units on {snapshot_date}; acquisition history "
+                    "is missing in this account. Cost basis and returns are unavailable."
+                ),
+                as_of=snapshot_date,
+                reason_code="CAS_HISTORY_MISSING",
+            )
+        )
+    return skipped + gaps

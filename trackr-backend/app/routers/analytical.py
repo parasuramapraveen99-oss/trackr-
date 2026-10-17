@@ -21,6 +21,7 @@ see ``_benchmark``.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
@@ -37,6 +38,7 @@ from app.auth.ops import require_cron_secret, require_ops_key
 from app.config import Settings, get_settings
 from app.database import get_conn, money, rate
 from app.db import snapshots
+from app.db.fund_reference import exchange_isins, non_exchange_isins
 from app.db.index_levels import get_index_levels
 from app.db.prices import (
     absent_on_or_before,
@@ -427,7 +429,15 @@ def performance(
                                      advised_only=advised_only, date_to=resolved_as_of)
     # Owner amendment 2026-10-08: compute on everything that reconciles and NAME what
     # does not (``excluded`` below), never 409 the whole portfolio over one stock.
+    cas_gaps = exclusions.missing_cas_history(
+        connection, investor_id, transactions, [], resolved_as_of, advised_only
+    )
     transactions, skipped = exclude_unreconciled(transactions, resolved_as_of)
+    skipped.extend(g for g in cas_gaps if g.isin not in {s.isin for s in skipped})
+    # Listed securities only: mutual funds have their own series (docs/MF_ETF_PLAN.md s.8).
+    transactions, skipped = exclusions.listed_scope(
+        connection, transactions, skipped, resolved_as_of
+    )
 
     isins = [h.isin for h in compute_holdings(transactions, resolved_as_of)]
     # Same price selection as /holdings and /summary (audit D1): the XIRR terminal value
@@ -683,6 +693,7 @@ def _live_snapshot_tail(
     transactions = load_transactions(
         connection, investor_id=investor_id, advised_only=advised_only, date_to=today
     )
+    transactions, _scoped_out = exclusions.listed_scope(connection, transactions, [], today)
     if not transactions:
         return None
     try:
@@ -754,6 +765,8 @@ def benchmark_series_endpoint(
     transactions = load_transactions(
         connection, investor_id=investor_id, advised_only=advised_only
     )
+    # The same scope as the portfolio line it is drawn against.
+    transactions, _scoped_out = exclusions.listed_scope(connection, transactions, [], end)
     dates = [row.as_of for row in rows]
     dates_needed = required_series_index_dates(transactions, dates)
     request_id = getattr(getattr(request, "state", None), "request_id", None)
@@ -813,9 +826,21 @@ def contribution(
     if period_start > resolved_as_of:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "period_start must be on or before as_of")
 
-    transactions = load_transactions(connection, investor_id=investor_id, advised_only=advised_only)
+    transactions = load_transactions(
+        connection,
+        investor_id=investor_id,
+        advised_only=advised_only,
+        date_to=resolved_as_of,
+    )
     # Same exclusion as /performance (owner amendment 2026-10-08), named in ``excluded``.
+    cas_gaps = exclusions.missing_cas_history(
+        connection, investor_id, transactions, [], resolved_as_of, advised_only
+    )
     transactions, skipped = exclude_unreconciled(transactions, resolved_as_of)
+    skipped.extend(g for g in cas_gaps if g.isin not in {s.isin for s in skipped})
+    transactions, skipped = exclusions.listed_scope(
+        connection, transactions, skipped, resolved_as_of
+    )
 
     start_isins = [h.isin for h in compute_holdings(transactions, period_start)]
     start_prices = latest_prices(connection, start_isins, period_start)
@@ -926,7 +951,11 @@ def _refresh_prices(connection: Any, settings: Settings) -> dict[str, Any]:
     # Scoped to HELD ISINs, never the ranking universe. This list is read by a human as
     # "your portfolio is unpriced"; padding it with reference securities nobody owns would
     # turn a real alarm into noise.
-    missing = missing_prices(connection, sorted(held_isins(connection)), price_date)
+    # Exchange-priced holdings only: a NAV-valued fund is never in a bhavcopy, and its
+    # freshness is reported by the AMFI refresh (/ops/cron/mf-nav-refresh).
+    missing = missing_prices(
+        connection, exchange_isins(connection, held_isins(connection)), price_date
+    )
     index_stored, index_failures = _refresh_index_levels(connection, price_date)
 
     return {
@@ -973,7 +1002,8 @@ def refresh_live_prices_cron(connection: Any = Depends(get_conn)) -> dict[str, A
     now = ist_now()
     if now.weekday() >= 5 or not (9 <= now.hour < 16):
         return {"skipped": "outside NSE hours", "at": now.isoformat()}
-    isins = held_isins(connection)
+    # Exchange-listed only: there is no intraday quote for a NAV-valued fund.
+    isins = exchange_isins(connection, held_isins(connection))
     quotes = refresh_and_get(connection, isins)
     connection.commit()
     return {"requested": len(isins), "priced": len(quotes), "at": now.isoformat()}
@@ -1096,6 +1126,11 @@ def _run_snapshots(connection: Any, start: date, end: date, notifier: Notifier) 
                 continue
             earliest_txn = min(t.txn_date for t in transactions)
             investor_start = max(start, NSE_BHAVCOPY_EARLIEST, earliest_txn)
+            # This is the LISTED series: units the exchange cannot price (mutual funds,
+            # and fund units whose route is still unresolved) are left out by route,
+            # never through bhavcopy-absence evidence (docs/MF_ETF_PLAN.md s.4). Funds
+            # have their own series (app.funds.series).
+            off_exchange = set(non_exchange_isins(connection, {t.isin for t in transactions}))
             if investor_start > end:
                 continue
 
@@ -1122,10 +1157,15 @@ def _run_snapshots(connection: Any, start: date, end: date, notifier: Notifier) 
                     # price_absent distinguishes the two, and the engine may not read a
                     # database. See app.db.prices.absent_on_or_before.
                     unpriceable = absent_on_or_before(
-                        connection, [i for i in isins if i not in day_prices], on_date
+                        connection,
+                        [i for i in isins if i not in day_prices and i not in off_exchange],
+                        on_date,
                     )
                     snap = compute_snapshot(
-                        day_transactions, day_prices, on_date, exclude_isins=unpriceable
+                        day_transactions,
+                        day_prices,
+                        on_date,
+                        exclude_isins=unpriceable | (off_exchange & set(isins)),
                     )
                 except (MissingPriceError, NegativeHoldingError) as exc:
                     # NO exc_info HERE, deliberately. This is an expected, handled skip on
@@ -1255,7 +1295,8 @@ def catch_up_snapshots(
 
     ``time_budget_seconds`` is for serverless callers, which are killed at a hard limit.
     One unbounded call for a fresh investor downloads every missing bhavcopy back to
-    SNAPSHOT_HISTORY_FLOOR before saving anything, so on Vercel it was killed at 300 s,
+    the ledger's first supported trading date before saving anything, so on Vercel it
+    was killed at 300 s,
     saved nothing, and the next run started over. With a budget the range is worked one
     day at a time, oldest first, each day committed before the next begins; the run stops
     claiming days once the budget is spent and ``complete`` says whether it reached the
@@ -1264,11 +1305,15 @@ def catch_up_snapshots(
     """
     target = last_closed_trading_day(now)
     _catch_up_index_levels(connection, target)
+    # Interior holes are repaired separately, date by date, through the reference queue:
+    # moving ``start`` back to an old hole would make every budgeted run re-walk the
+    # whole range after it and never reach today.
+    holes = enqueue_interior_holes(connection)
     start = _catch_up_start(connection, target)
     if start is None:
         return {
             "snapshots_written": 0, "price_dates_fetched": 0, "skipped_missing_price": [],
-            "complete": True,
+            "complete": True, "holes_queued": holes,
         }
     if time_budget_seconds is None:
         result = _run_snapshots(connection, start, target, notifier)
@@ -1313,9 +1358,66 @@ def _catch_up_index_levels(connection: Any, target: date) -> None:
     connection.commit()
 
 
-#: Earliest day the catch-up rebuilds. Stored bhavcopy prices start here; the older legacy
-#: archive times out day by day, so walking back to it stalls every run for no gain.
-SNAPSHOT_HISTORY_FLOOR = date(2024, 1, 1)
+#: Interior holes queued per catch-up run; the rest wait for the next run.
+HOLE_REPAIR_BATCH = 500
+#: A hole that could not be priced is tried again after this long, not every run.
+HOLE_RETRY_INTERVAL = "7 days"
+
+
+def enqueue_interior_holes(connection: Any, limit: int = HOLE_REPAIR_BATCH) -> int:
+    """Queue a SNAPSHOT rebuild for every weekday missing BETWEEN an investor's first and
+    last stored row (``_catch_up_start`` only sees a short head or tail).
+
+    Each is a ``repair`` task: one that still cannot be priced is recorded on the task
+    (``unrepairable``) and finished, not failed -- and offered again only after
+    ``HOLE_RETRY_INTERVAL``, so a permanently unpriceable day neither loops nor turns every
+    queue run into a failure.
+    """
+    with connection.cursor() as cur:
+        cur.execute(
+            """WITH b AS (
+                   SELECT investor_id, advised_only, min(as_of) lo, max(as_of) hi
+                   FROM portfolio_snapshot GROUP BY 1, 2
+               ), d AS (
+                   SELECT b.investor_id, b.advised_only, g::date AS on_
+                   FROM b, generate_series(greatest(b.lo, %s), b.hi, interval '1 day') g
+                   WHERE extract(isodow FROM g) < 6
+               )
+               SELECT d.investor_id::text, d.on_, d.advised_only FROM d
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM portfolio_snapshot p WHERE p.investor_id = d.investor_id
+                     AND p.advised_only = d.advised_only AND p.as_of = d.on_)
+               ORDER BY d.on_ DESC LIMIT %s""",
+            (SNAPSHOT_HISTORY_FLOOR, limit),
+        )
+        holes = cur.fetchall()
+        queued = 0
+        for investor_id, on, advised in holes:
+            cur.execute(
+                """INSERT INTO reference_sync_task (kind, task_key, payload)
+                   VALUES ('SNAPSHOT', %s, %s::jsonb)
+                   ON CONFLICT (kind, task_key) DO UPDATE SET
+                       payload = EXCLUDED.payload, state = 'pending', available_at = now()
+                   WHERE reference_sync_task.state = 'done'
+                     AND (reference_sync_task.payload->>'unrepairable' IS NULL
+                          OR reference_sync_task.updated_at < now() - %s::interval)""",
+                (
+                    f"{investor_id}:{on}:{advised}",
+                    json.dumps(
+                        {"investor_id": investor_id, "on": on.isoformat(),
+                         "advised_only": advised, "repair": True}
+                    ),
+                    HOLE_RETRY_INTERVAL,
+                ),
+            )
+            queued += cur.rowcount
+    connection.commit()
+    return queued
+
+
+#: Use the same archive boundary as price fetching. An arbitrary recent-year cutoff
+#: discarded investors' older history even when its exchange prices were already stored.
+SNAPSHOT_HISTORY_FLOOR = NSE_BHAVCOPY_EARLIEST
 
 
 def _catch_up_start(connection: Any, target: date) -> date | None:

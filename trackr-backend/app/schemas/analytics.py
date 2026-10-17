@@ -12,7 +12,7 @@ in Decimal and sent as a string.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -24,7 +24,7 @@ class CoverageOut(BaseModel):
     saying "66% of this is an estimate" out loud. A section below 95% gets a badge.
     """
 
-    priced_pct: float
+    priced_pct: float | None
     pe_pct: float
     pb_pct: float
     roe_pct: float
@@ -35,12 +35,18 @@ class CoverageOut(BaseModel):
     #: statements. High is normal for Indian scrips and is the headline caveat on the page.
     roe_derived_weight_pct: float
     price_history_pct: float
+    #: Other percentages describe the priced subset when full-book value is unknown.
+    basis: str = "complete_priced_book"
+    priced_count_pct: float = 0
+    priced_count: int = 0
+    total_count: int = 0
+    known_value_subtotal: str = "0"
 
 
 class KpiOut(BaseModel):
-    invested: str
-    market_value: str
-    unrealised: str
+    invested: str | None
+    market_value: str | None
+    unrealised: str | None
     unrealised_pct: float | None
     realised_to_date: str | None = None
     xirr_all: float | None = None
@@ -72,6 +78,9 @@ class HealthOut(BaseModel):
 
 
 class FactorOut(BaseModel):
+    status: str | None = None
+    reasons: list[str] = []
+    eligible_count: int = 0
     score: float | None
     universe: str
     universe_size: int
@@ -94,6 +103,13 @@ class ReturnHistogramOut(BaseModel):
 
 
 class RiskWindowOut(BaseModel):
+    status: str | None = None
+    reasons: list[str] = []
+    metrics: dict[str, dict] = {}
+    period: dict[str, str | None] = {}
+    basis: str | None = None
+    tracking_error: float | None = None
+    information_ratio: float | None = None
     observations: int
     cum_return: float | None = None
     cagr: float | None = None
@@ -137,7 +153,7 @@ class RiskCoverageOut(BaseModel):
     start: date
     end: date
     observations: int
-    weight_pct: float
+    weight_pct: float | None
     market_value: str
     included_isins: list[str]
     excluded: list[HistoryExclusionOut]
@@ -145,6 +161,8 @@ class RiskCoverageOut(BaseModel):
 
 
 class CorrelationOut(BaseModel):
+    isins: list[str] = []
+    pairs: list[dict] = []
     symbols: list[str]
     matrix: list[list[float | None]]
     average: float | None = None
@@ -208,6 +226,10 @@ class InsightOut(BaseModel):
 class AggregateOut(BaseModel):
     value: float | None
     excluded_weight_pct: float
+    method_version: str | None = None
+    status: str | None = None
+    reasons: list[str] = []
+    excluded_isins: list[str] = []
 
 
 class FundamentalsOut(BaseModel):
@@ -217,6 +239,7 @@ class FundamentalsOut(BaseModel):
     benchmark: dict[str, float | None] = {}
     benchmark_source: str | None = None
     benchmark_as_of: date | None = None
+    benchmark_comparison: str = "unverified"
 
 
 class GrowthSeriesOut(BaseModel):
@@ -262,6 +285,30 @@ class LensDerivedOut(BaseModel):
     #: scatter that silently drops half the book is the coverage failure this names.
     plotted: int
     plottable_pct: float
+    excluded: dict[str, str] = {}
+    method_version: str | None = None
+
+
+class AdvisorMetricOut(BaseModel):
+    value: str | None
+    status: Literal["available", "provisional", "unavailable"]
+    reasons: list[str]
+    unit: str
+    method: str
+    coverage: dict = {}
+    period: dict = {}
+    source_refs: list[str] = []
+
+
+class AdvisorIntegrationOut(BaseModel):
+    active_method: Literal["current", "advisor_v1", "advisor_v2"]
+    method_version: str
+    source_version: str
+    as_of: date
+    metrics: dict[str, AdvisorMetricOut]
+    #: Candidate results are available for independent shadow comparison.
+    lenses: dict[str, dict]
+    differences: list[dict] = []
 
 
 class DerivedOut(BaseModel):
@@ -292,7 +339,7 @@ class DerivedOut(BaseModel):
     effective_holdings: float | None
     #: The effective-holdings count that scores full marks, published so the ratio behind
     #: the concentration component can be checked rather than taken on trust.
-    concentration_target: float
+    concentration_target: float | None
     position_count: int
     #: Portfolio volatility / benchmark volatility over 1Y. None when either is missing --
     #: never 1.0, which would read as "moves exactly with the index".
@@ -303,7 +350,7 @@ class DerivedOut(BaseModel):
     #: Capital-state bucket -> share of portfolio worth. The buckets sum to worth by
     #: construction; this is that reconciliation expressed as percentages.
     capital_state_pct: dict[str, float] = {}
-    capital_state_total: str
+    capital_state_total: str | None
     lenses: dict[str, LensDerivedOut] = {}
 
 
@@ -363,6 +410,34 @@ class PriceEventOut(BaseModel):
     reason: str
 
 
+class MilestoneSectionsOut(BaseModel):
+    overview: dict[str, Any]
+    factor_score: dict[str, Any]
+    risk_return: dict[str, Any]
+    diversification: dict[str, Any]
+    fundamentals: dict[str, Any]
+    performance: dict[str, Any]
+    valuation_map: dict[str, Any]
+
+
+class MilestoneReportOut(BaseModel):
+    schema_version: str
+    method_version: str
+    input_digest: str
+    as_of: date
+    generated_at: datetime
+    sources: list[dict[str, Any]]
+    sections: MilestoneSectionsOut
+    exclusions: dict[str, Any]
+    status: str
+    reasons: list[str]
+    integration: dict[str, Any]
+    compatibility: dict[str, Any]
+    illustrations: dict[str, Any] = {}
+    scope: dict[str, Any] = {}
+    reported_inputs: dict[str, Any] = {}
+
+
 class AnalyticsResponse(BaseModel):
     as_of: date
     generated_at: datetime
@@ -390,6 +465,8 @@ class AnalyticsResponse(BaseModel):
     #: Holdings carried OUT of every denominator because they could not be priced. Never
     #: valued at zero -- CLAUDE.md rule 4.
     unresolved: list[UnresolvedOut] = []
+    integration: AdvisorIntegrationOut | None = None
+    advisor: MilestoneReportOut | None = None
 
 
 class FundamentalsRefreshResponse(BaseModel):

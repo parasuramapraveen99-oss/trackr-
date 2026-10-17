@@ -30,6 +30,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.db.fund_reference import sync_route_observations
 from app.db.prices import held_isins, upsert_prices
 from app.db.quote_mapping import upsert_listings
 from app.db.symbols import SymbolChange, refresh_symbols
@@ -37,6 +38,10 @@ from app.db.universe import current_universe_isins
 from app.prices.pipe import PipeResult
 
 logger = logging.getLogger("prices.store")
+
+
+def _funds(isins: set[str]) -> set[str]:
+    return {isin for isin in isins if isin.startswith("INF")}
 
 
 @dataclass
@@ -63,6 +68,9 @@ def store_day(conn: Any, result: PipeResult) -> StoreResult:
     wanted = held | universe
 
     stored = upsert_prices(conn, [p for p in result.prices if p.isin in wanted])
+    # A ledger fund unit an exchange has now printed has positive listing evidence; if
+    # that changes its valuation route, the series cached under the old route are redone.
+    sync_route_observations(conn, {p.isin for p in result.prices if p.isin in held} & _funds(held))
 
     changes = refresh_symbols(
         conn,

@@ -5,8 +5,6 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { useAIChat } from "@/lib/ai-chat-context";
-import { useFetch } from "@/lib/use-fetch";
-import type { OnboardingStateOut } from "@/lib/api-types";
 import { focusPageHeading, useLauncher } from "@trackr/core";
 import { Icon, IconButton } from "./ds";
 import { PortfolioSwitcher } from "./PortfolioSwitcher";
@@ -14,6 +12,7 @@ import { locate } from "./nav";
 import { SectionMapModal } from "./SectionMapModal";
 import { GmailInstructionsModal } from "./GmailInstructionsModal";
 import { useNoticesNeeded } from "./ReferenceSyncBanner";
+import styles from "./Ribbon.module.css";
 
 /**
  * The top ribbon: identity, the ⌘K section map, sibling tabs for the current group,
@@ -26,15 +25,9 @@ import { useNoticesNeeded } from "./ReferenceSyncBanner";
  */
 export function Ribbon({ pathname }: { pathname: string }) {
   const [gmailOpen, setGmailOpen] = useState(false);
+  const [portfolioOpen, setPortfolioOpen] = useState(false);
   const router = useRouter();
-  const { user, investorId, token } = useAuth();
-  // The envelope only appears when this server receives mail (EMAIL_FORWARDING_ENABLED).
-  const onboarding = useFetch<OnboardingStateOut>(
-    investorId ? `/investors/${investorId}/onboarding` : null,
-    undefined,
-    token
-  );
-  const forwardingOn = onboarding.data?.forwarding_available === true;
+  const { user, investorId } = useAuth();
   const { openChat } = useAIChat();
   const noticesNeeded = useNoticesNeeded();
   const here = locate(pathname);
@@ -51,7 +44,7 @@ export function Ribbon({ pathname }: { pathname: string }) {
    */
   const launcher = useLauncher({
     label: "Go to a section",
-    blocked: gmailOpen,
+    blocked: gmailOpen || portfolioOpen,
     onNavigate: (href) => {
       router.push(href);
       // Selecting advances focus to the destination heading; cancelling restores it to the
@@ -66,6 +59,7 @@ export function Ribbon({ pathname }: { pathname: string }) {
   return (
     <>
       <nav
+        className={styles.ribbon}
         style={{
           position: "sticky",
           top: 0,
@@ -104,6 +98,8 @@ export function Ribbon({ pathname }: { pathname: string }) {
           type="button"
           onClick={launcher.open ? launcher.closeLauncher : launcher.openLauncher}
           aria-expanded={launcher.open}
+          aria-label="All sections"
+          className={styles.sectionsTrigger}
           style={{
             display: "inline-flex",
             alignItems: "center",
@@ -123,8 +119,9 @@ export function Ribbon({ pathname }: { pathname: string }) {
               <i key={i} style={{ display: "block", height: 3, width: 3, borderRadius: 0.5, background: "var(--text-secondary)" }} />
             ))}
           </span>
-          All sections
+          <span className={styles.sectionLabel}>All sections</span>
           <span
+            className={styles.sectionLabel}
             style={{
               font: "var(--type-label)",
               color: "var(--text-tertiary)",
@@ -137,7 +134,7 @@ export function Ribbon({ pathname }: { pathname: string }) {
           </span>
         </button>
 
-        <span style={{ display: "flex", gap: 2, minWidth: 0, overflow: "hidden" }}>
+        <span className={styles.siblings} style={{ display: "flex", gap: 2, minWidth: 0, overflow: "hidden" }}>
           {here.siblings.map((s) => {
             const isActive = s.href === here.item.href;
             return (
@@ -164,11 +161,8 @@ export function Ribbon({ pathname }: { pathname: string }) {
         </span>
 
         <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-          {/* Renders nothing for a login that owns one portfolio, which is most of them.
-              Here rather than only in Settings because which portfolio you are reading is
-              a property of every screen, not a setting you change and leave. */}
-          <PortfolioSwitcher compact />
-          <span style={{ position: "relative", display: "inline-flex" }}>
+          <PortfolioSwitcher open={portfolioOpen} onOpenChange={setPortfolioOpen} blocked={gmailOpen || launcher.open} />
+          <span className={styles.secondaryTool} style={{ position: "relative", display: "inline-flex" }}>
             <IconButton
               name="import"
               label={noticesNeeded ? "Import: answers needed" : "How to import your trades"}
@@ -191,11 +185,13 @@ export function Ribbon({ pathname }: { pathname: string }) {
               />
             )}
           </span>
-          {forwardingOn && (
+          {investorId && (
             <IconButton name="mail" label="Set up Gmail auto-forwarding" onClick={() => setGmailOpen(true)} />
           )}
-          <IconButton name="reconcile" label="Check holdings against a statement" onClick={() => router.push("/reconcile")} />
-          <IconButton name="sparkles" label="Ask about markets" onClick={() => openChat()} />
+          <span className={styles.secondaryTool} style={{ display: "inline-flex", gap: 6 }}>
+            <IconButton name="reconcile" label="Reconcile holdings with a statement" onClick={() => router.push("/reconcile")} />
+            <IconButton name="sparkles" label="Ask about markets" onClick={() => openChat()} />
+          </span>
           <AccountMenu initial={initial} />
         </span>
       </nav>

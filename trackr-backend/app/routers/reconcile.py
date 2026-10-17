@@ -48,7 +48,7 @@ def reconcile_holdings(
     reconciliation is an empty list, never a list of zero-difference rows -- the engine
     already guarantees that; nothing here overrides it.
     """
-    transactions = load_transactions(connection, investor_id=investor_id)
+    transactions = load_transactions(connection, investor_id=investor_id, date_to=body.as_of)
     declared = {h.isin: h.quantity for h in body.holdings}
     discrepancies = reconcile(transactions, declared, as_of=body.as_of)
     return [_discrepancy_row(d) for d in discrepancies]

@@ -40,7 +40,7 @@ export function ReconcileScreen({ chrome }: PortfolioScreenProps) {
   if (!investorId) {
     return (
       <>
-        <PageHeader title="Check holdings" subtitle="Match your holdings in Trackr+ with your broker or CAS statement." />
+        <PageHeader title="Reconcile holdings" subtitle="Match your holdings in Trackr+ with your broker or CAS statement." />
         <PageBody column>
           <NoInvestorState />
         </PageBody>
@@ -124,7 +124,7 @@ export function ReconcileScreen({ chrome }: PortfolioScreenProps) {
   return (
     <>
       <PageHeader
-        title="Check holdings"
+        title="Reconcile holdings"
         subtitle="Match the holdings Trackr+ worked out from your transactions with your broker or depository (CAS) statement."
       />
 
@@ -197,7 +197,7 @@ export function ReconcileScreen({ chrome }: PortfolioScreenProps) {
 
               <div>
                 <Button type="submit" icon="reconcile" disabled={submitting}>
-                  {submitting ? "Checking…" : "Check holdings"}
+                  {submitting ? "Comparing…" : "Compare with statement"}
                 </Button>
               </div>
             </form>

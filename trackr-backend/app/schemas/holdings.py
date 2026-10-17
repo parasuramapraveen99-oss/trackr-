@@ -35,6 +35,10 @@ class HoldingOut(BaseModel):
     #: "settled" (bhavcopy close dated as_of), "live" (intraday quote) or "carried"
     #: (an older stored close). Same vocabulary as app.prices.current.
     price_source: str | None = None
+    #: STOCK, ETF, MUTUAL_FUND or UNRESOLVED (docs/MF_ETF_PLAN.md section 4); with
+    #: price_source "nav" the price is an AMFI NAV dated price_date.
+    instrument_kind: str | None = None
+    fund_category: str | None = None
 
 
 class TotalsOut(BaseModel):
@@ -50,6 +54,9 @@ class UnpricedHoldingOut(BaseModel):
     symbol: str | None
     name: str | None
     invested: str
+    #: Why there is no price when the valuation route explains it (a fund awaiting its
+    #: AMFI NAV, a fund unit not yet identified). None for an ordinary missing close.
+    reason: str | None = None
 
 
 class UnpricedOut(BaseModel):

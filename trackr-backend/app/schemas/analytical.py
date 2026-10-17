@@ -23,6 +23,9 @@ class ExcludedOut(BaseModel):
     symbol: str | None = None
     message: str
     deficit: str | None = None
+    #: Set when the reason is categorical rather than a reconciliation gap, e.g.
+    #: ``MUTUAL_FUND_SCOPE``: a fund unit whose return is reported in the fund series.
+    reason_code: str | None = None
     as_of: date | None = None
 
 

@@ -32,6 +32,8 @@ allowance and many sessions cannot multiply one user's.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 from dataclasses import replace
 from typing import Any
@@ -40,7 +42,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.auth.dependencies import get_current_user
 from app.config import Settings, get_settings
-from app.db.market_assistant_usage import PostgresUsageStore
+from app.db.market_assistant_usage import (
+    MessageUsageUnavailable,
+    PostgresMessageStore,
+    PostgresUsageStore,
+)
 from app.market_assistant.admission import (
     Outcome,
     admit_history,
@@ -58,7 +64,7 @@ from app.market_assistant.answer import (
 )
 from app.market_assistant.embedding import load_embedder
 from app.market_assistant.exa import SearchClient
-from app.market_assistant.limits import DailyBudget, PerKeyRateLimit, TTLCache
+from app.market_assistant.limits import DailyBudget, DailyMessageQuota, PerKeyRateLimit, TTLCache
 from app.market_assistant.model import SelectorClient
 from app.market_assistant.retrieval import RetrievalMode
 from app.rate_limit import limiter
@@ -67,6 +73,7 @@ from app.schemas.market_assistant import (
     AskIn,
     AskOut,
     EvidenceOut,
+    MessageUsageOut,
     SummarySentenceOut,
     TopicOut,
 )
@@ -132,6 +139,32 @@ def require_enabled(settings: Settings = Depends(get_settings)) -> None:
             status.HTTP_503_SERVICE_UNAVAILABLE,
             {"code": "MARKET_ASSISTANT_DISABLED", "message": "Ask about markets is turned off."},
         )
+
+
+def message_quota(
+    user: dict[str, Any] = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> DailyMessageQuota:
+    # Scope the counter to the login without storing its identity or sending it anywhere.
+    subject = hmac.new(settings.jwt_secret.encode(),
+                       f"market-assistant:{user['id']}".encode(), hashlib.sha256).hexdigest()
+    return DailyMessageQuota(PostgresMessageStore(settings.database_url, subject),
+                             settings.market_assistant_message_daily_limit)
+
+
+def usage_out(quota: DailyMessageQuota) -> MessageUsageOut:
+    try:
+        return MessageUsageOut(**quota.status())
+    except MessageUsageUnavailable:
+        raise HTTPException(
+            503, "Couldn't check your message allowance. Please try again."
+        ) from None
+
+
+@router.get("/usage", response_model=MessageUsageOut,
+            dependencies=[Depends(require_enabled)])
+def usage(quota: DailyMessageQuota = Depends(message_quota)) -> MessageUsageOut:
+    return usage_out(quota)
 
 
 def require_small_body(request: Request) -> None:
@@ -204,6 +237,7 @@ def ask(
     body: AskIn,
     user: dict[str, Any] = Depends(get_current_user),
     deps: SearchDeps = Depends(search_deps),
+    quota: DailyMessageQuota = Depends(message_quota),
 ) -> AskOut:
     if not _user_limit.allow(str(user["id"])):
         raise HTTPException(
@@ -223,13 +257,35 @@ def ask(
         admission = admit_text(body.question or "")
         source = "typed"
 
-    if body.allow_external:
-        admission = as_research(admission)
+    admission = as_research(admission)
     if admission.outcome is Outcome.OPEN and body.history:
         # Follow-up context: earlier questions of this conversation, each re-admitted
         # here; one that would be refused as a question is dropped, never forwarded.
         admission = replace(admission, earlier=admit_history(body.history))
-    reply = render(admission, deps, allow_external=body.allow_external)
+    # Private/blocked input never consumes the allowance or reaches either provider.
+    day = quota.day()
+    charged = admission.outcome in (Outcome.ANSWER, Outcome.OPEN)
+    if charged:
+        try:
+            reserved = quota.store.reserve(day, quota.limit)
+        except MessageUsageUnavailable:
+            raise HTTPException(
+                503, "Couldn't check your message allowance. Please try again."
+            ) from None
+        if reserved is None:
+            raise HTTPException(
+                429, "Your daily message limit is used up. Try again after midnight IST."
+            )
+    try:
+        reply = render(admission, deps, allow_external=True)
+    except Exception:
+        if charged:
+            quota.store.release(day)
+        raise
+    if charged and reply.reason_code in {
+        "planner_unavailable", "search_unavailable", "budget", "answer_unavailable"
+    }:
+        quota.store.release(day)
     question_type = admission.question.question_type.value if admission.question else None
     # Reading the shared counter is a database round trip; only a LATEST question can
     # have spent from it, so a definition does not pay for the log line.
@@ -246,4 +302,6 @@ def ask(
         len(reply.evidence),
         searches_today,
     )
-    return _out(reply)
+    response = _out(reply)
+    response.usage = usage_out(quota)
+    return response

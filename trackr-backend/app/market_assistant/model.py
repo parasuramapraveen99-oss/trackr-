@@ -11,8 +11,8 @@ an ID, a URL) can ride along. Provider routing asks for providers that do not co
 prompts and forbids fallbacks; if no free endpoint honours that, the provider refuses and
 the assistant falls back to ranked excerpts. It never retries with a weaker policy.
 
-No retry at all: one completion per question, no repair call. A free model that is busy
-fails closed, quickly.
+Transport failures are never retried. The caller may request one bounded short rewrite
+of an invalid answer, using the same public evidence and outbound checks.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from typing import Any
 
 from app.market_assistant.admission import MAX_HISTORY, Outcome, admit_text, clean_open_text
 from app.market_assistant.evidence import is_safe_passage
-from app.market_assistant.open_research import ANSWER_PROMPT, PLANNER_PROMPT
+from app.market_assistant.open_research import ANSWER_PROMPT, PLANNER_PROMPT, REWRITE_PROMPT
 from app.market_assistant.open_research import REVIEWED_PROMPTS as OPEN_PROMPTS
 from app.market_assistant.selection import SYSTEM_PROMPT
 
@@ -65,7 +65,7 @@ _ALLOWED_HEADERS = frozenset({"authorization", "content-type"})
 
 class ModelUnavailable(Exception):
     """No key, the provider refused (including "no endpoint meets this data policy"), or
-    the reply was unusable. The caller shows ranked excerpts instead."""
+    the reply was unusable. Public research reports a service error, not a substitute answer."""
 
 
 class OutboundPolicyError(Exception):
@@ -130,7 +130,7 @@ def check_outbound(
         {"role": "user", "content": expected_user},
     ]:
         raise OutboundPolicyError("messages are not the reviewed prompt and built content")
-    if expected_system in (PLANNER_PROMPT, ANSWER_PROMPT):
+    if expected_system in (PLANNER_PROMPT, ANSWER_PROMPT, REWRITE_PROMPT):
         _check_public_content(expected_system, expected_user)
     if parsed["max_tokens"] != PROMPT_LIMITS[expected_system] or parsed["temperature"] != 0:
         raise OutboundPolicyError("output bounds changed")
@@ -171,7 +171,7 @@ def _check_public_content(system: str, content: str) -> None:
             date.fromisoformat(payload["today"])
         except (TypeError, ValueError):
             raise OutboundPolicyError("planner date changed") from None
-    if system == ANSWER_PROMPT:
+    if system in (ANSWER_PROMPT, REWRITE_PROMPT):
         passages = payload["passages"]
         if (type(payload["advice"]) is not bool or not isinstance(passages, list)
                 or len(passages) > 8):
