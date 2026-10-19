@@ -8,6 +8,7 @@ follows rather than a shared components/schemas section.
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -34,6 +35,7 @@ class InvestorIn(BaseModel):
     family_group_id: str | None = None
     pan: str | None = None
     onboarding_date: date | None = None
+    relationship: Literal["family", "client"] = "client"
 
 
 class InvestorOut(BaseModel):
@@ -43,6 +45,7 @@ class InvestorOut(BaseModel):
     family_group_id: str | None = None
     onboarding_date: date | None = None
     created_at: datetime
+    relationship: Literal["family", "client"] = "client"
 
 
 class SetPanIn(BaseModel):

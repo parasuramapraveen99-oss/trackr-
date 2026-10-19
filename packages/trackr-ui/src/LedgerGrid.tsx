@@ -47,6 +47,8 @@ interface LedgerGridProps<R extends LedgerRow> {
    * Only meaningful when the container has a definite height and `total` is set.
    */
   fillHeight?: boolean;
+  /** Keep column names visible inside a bounded scrolling ledger. */
+  stickyHeader?: boolean;
 }
 
 /**
@@ -73,6 +75,7 @@ export function LedgerGrid<R extends LedgerRow>({
   numericFloor = 0,
   fillHeight = false,
   emptyMessage,
+  stickyHeader = false,
 }: LedgerGridProps<R>) {
   const template = columns
     .map((c) => c.width || (c.align === "right" ? `minmax(${numericFloor}px, 1fr)` : "minmax(120px, 1.6fr)"))
@@ -113,7 +116,7 @@ export function LedgerGrid<R extends LedgerRow>({
   const isEmpty = rows.length === 0 && Boolean(emptyMessage);
 
   return (
-    <div style={{ marginTop: 2, overflowX: "auto", ...(fill ? { flex: "1 1 auto", minHeight: 0 } : null) }}>
+    <div role={stickyHeader ? "region" : undefined} aria-label={stickyHeader ? "Holdings table" : undefined} tabIndex={stickyHeader ? 0 : undefined} style={{ marginTop: 2, overflowX: "auto", ...(stickyHeader ? { maxHeight: "min(65dvh, 680px)", overflowY: "auto", overscrollBehavior: "contain", isolation: "isolate", paddingInline: 8 } as CSSProperties : null), ...(fill ? { flex: "1 1 auto", minHeight: 0 } : null) }}>
       <div
         style={{
           display: "grid",
@@ -132,7 +135,8 @@ export function LedgerGrid<R extends LedgerRow>({
         {columns.map((c) => (
           <span
             key={`h-${c.key}`}
-            style={{ ...ledgerHead, paddingBottom: 8, textAlign: c.align || "left", alignSelf: "end" }}
+            role={stickyHeader ? "columnheader" : undefined}
+            style={{ ...ledgerHead, paddingBottom: 8, textAlign: c.align || "left", alignSelf: "end", ...(stickyHeader ? { position: "sticky", top: 0, zIndex: 2, background: "var(--surface)", boxShadow: "0 1px 0 var(--border-strong)", paddingBlock: 14, fontSize: 13, fontWeight: 600, letterSpacing: ".04em", color: "var(--text-primary)", alignSelf: "stretch", display: "flex", alignItems: "center", justifyContent: c.align === "right" ? "flex-end" : "flex-start" } : null) }}
           >
             {c.label}
           </span>

@@ -284,6 +284,7 @@ export function ClientsTree({ overview }: { overview: OverviewState }) {
             {node.name}
           </span>
           <span style={small}>
+            {c.relationship === "family" ? "Family" : "Client"} · {" "}
             <span style={{ fontFamily: "var(--font-mono)" }}>{c.code}</span>
             {brokers && ` · ${brokers}`}
           </span>

@@ -7,14 +7,14 @@ export function LandingHeader() {
   return (
     <header className="l-header">
       <div className="l-container l-header-inner">
-        <a href="#top" className="l-brand l-rise">
+        <a href="/#top" className="l-brand l-rise">
           <span className="l-mark"><BrandMark /></span>
           <span className="l-wordmark">Trackr+</span>
         </a>
 
         <nav className="l-nav l-rise" style={{ animationDelay: "60ms" }}>
-          <a href="#security" className="l-navlink">Security</a>
-          <a href="#faq" className="l-navlink">FAQ</a>
+          <a href="/#security" className="l-navlink">Security</a>
+          <a href="/#faq" className="l-navlink">FAQ</a>
           <Link href="/coming-soon?feature=Pricing" className="l-navlink">Pricing</Link>
         </nav>
 

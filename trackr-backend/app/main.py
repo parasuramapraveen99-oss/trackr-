@@ -21,6 +21,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from psycopg import OperationalError
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -741,6 +742,17 @@ async def invalid_pan_handler(request: Request, exc: InvalidPANError) -> JSONRes
 # --------------------------------------------------------------------------------------
 # infrastructure
 # --------------------------------------------------------------------------------------
+
+
+@app.exception_handler(OperationalError)
+async def database_unavailable_handler(request: Request, exc: OperationalError) -> JSONResponse:
+    # Connection errors may contain credentials; log neither the message nor traceback.
+    logger.error("request_id=%s database unavailable", getattr(request.state, "request_id", None))
+    response = _error(
+        request, 503, "The account service is temporarily unavailable. Please try again."
+    )
+    response.headers["Retry-After"] = "30"
+    return response
 
 
 @app.exception_handler(DatabaseNotConfiguredError)

@@ -30,7 +30,7 @@ export function CopyField({ value, label }: { value: string; label?: string }) {
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-      <code title={value} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", border: "1px solid var(--border)", background: "var(--surface-sunken)", padding: "9px 10px", font: "var(--type-label)", fontFamily: "var(--font-mono, monospace)", color: "var(--text-primary)" }}>
+      <code title={value} style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere", whiteSpace: "normal", userSelect: "all", border: "1px solid var(--border)", background: "var(--surface-sunken)", padding: "9px 10px", font: "var(--type-label)", fontSize: 12, lineHeight: 1.6, fontFamily: "var(--font-mono, monospace)", color: "var(--text-primary)" }}>
         {value}
       </code>
       <button

@@ -6,6 +6,7 @@ Money and rates cross as strings (app.database.money / rate), never JSON numbers
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -54,6 +55,7 @@ class OverviewClient(OverviewFigures):
     display_name: str
     family_group_id: str | None = None
     accounts: list[OverviewAccount]
+    relationship: Literal["family", "client"] = "client"
 
 
 class ClientsOverview(BaseModel):

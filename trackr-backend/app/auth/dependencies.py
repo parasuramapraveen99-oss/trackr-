@@ -24,9 +24,20 @@ from app.db.repository import get_investor_owner, investor_exists
 _bearer = HTTPBearer(auto_error=False)
 
 
+def require_authentication(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Reject missing credentials before opening a database connection."""
+    if not credentials and not request.cookies.get(cookie_name(settings)):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in.")
+
+
 def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    authenticated: None = Depends(require_authentication),
     conn: Any = Depends(get_conn),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:

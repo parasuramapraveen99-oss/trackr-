@@ -51,7 +51,6 @@ export function GmailInstructionsModal({ open, onClose }: { open: boolean; onClo
           <span className={styles.icon}><Icon name="mail" size={18} /></span>
           <div className={styles.heading}>
             <h2 id={titleId}>Set up Gmail forwarding</h2>
-            <p>Follow the guide in Gmail. Your forwarding details are beside it.</p>
           </div>
           <button ref={closeButton} className={styles.close} type="button" onClick={onClose} aria-label="Close forwarding setup"><Icon name="close" size={17} /></button>
         </header>

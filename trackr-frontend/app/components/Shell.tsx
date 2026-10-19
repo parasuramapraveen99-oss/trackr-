@@ -8,6 +8,7 @@ import { Ribbon } from "./Ribbon";
 import { OnboardingWizard } from "./onboarding/OnboardingWizard";
 import { MarketAssistantDrawer } from "./MarketAssistantDrawer";
 import { Landing } from "./landing/Landing";
+import { Banner, Button } from "./ds";
 
 /** `/terms` and `/privacy` are public because they are linked from places a signed-out
  *  person reaches them: the registration form (someone deciding whether to accept the
@@ -20,7 +21,7 @@ const PUBLIC_PATHS = ["/login", "/register", "/terms", "/privacy", "/coming-soon
 /** Public paths that are also app screens. Signed out they render bare like any public
  *  page; signed in they get the ribbon, so leaving them works like leaving Settings or
  *  Import instead of needing the browser's back button. */
-const SHELLED_WHEN_SIGNED_IN = ["/privacy"];
+const SHELLED_WHEN_SIGNED_IN = ["/privacy", "/terms"];
 
 /** `/` serves two different pages — the marketing landing to a signed-out visitor, the
  *  dashboard to a signed-in one — so it is the one private route that must not bounce
@@ -36,16 +37,23 @@ const LANDING_PATH = "/";
 export function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() ?? "/";
   const router = useRouter();
-  const { token, ready } = useAuth();
+  const { token, ready, sessionError, retrySession } = useAuth();
   const isPublic =
     PUBLIC_PATHS.includes(pathname) && !(SHELLED_WHEN_SIGNED_IN.includes(pathname) && (!ready || token));
   const isLanding = pathname === LANDING_PATH;
 
   useEffect(() => {
-    if (ready && !token && !isPublic && !isLanding) router.replace("/login");
-  }, [ready, token, isPublic, isLanding, router]);
+    if (ready && !token && !sessionError && !isPublic && !isLanding) router.replace("/login");
+  }, [ready, token, sessionError, isPublic, isLanding, router]);
 
   if (isPublic) return <>{children}</>;
+
+  if (ready && !token && sessionError && !isLanding) {
+    return <PageBody column><Banner tone="warning" title="Your account is temporarily unavailable"
+      action={<Button onClick={() => void retrySession()}>Try again</Button>}>
+      {sessionError}
+    </Banner></PageBody>;
+  }
 
   // Rendered here rather than inside app/page.tsx so the dashboard — which starts
   // fetching holdings and performance the moment it mounts — never mounts at all for a

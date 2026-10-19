@@ -577,9 +577,9 @@ def assert_workspace_ready(conn: Any) -> None:
 def migration_url() -> tuple[str, bool]:
     """The connection migrations should run through, and whether it is the separate one.
 
-    Returns ``(url, is_separate_identity)``. ``MIGRATION_DATABASE_URL`` when set, otherwise
-    ``DATABASE_URL`` with ``False`` -- which every deployment and dev box does today and is
-    why the fallback exists at all.
+    Returns ``(url, is_separate_identity)``. Prefer ``MIGRATION_DATABASE_URL``. Otherwise
+    use Neon's direct ``DATABASE_URL_UNPOOLED``, then ``DATABASE_URL``, with ``False``:
+    an unpooled transport does not establish a separate migration identity.
 
     THE BOOLEAN IS THE POINT. ``start.sh`` and the documented deployment commands print
     which identity was used, so the fallback is visible every time it happens rather than
@@ -594,10 +594,14 @@ def migration_url() -> tuple[str, bool]:
     explicit = (os.environ.get("MIGRATION_DATABASE_URL") or "").strip()
     if explicit:
         return explicit, True
+    direct = (os.environ.get("DATABASE_URL_UNPOOLED") or "").strip()
+    if direct:
+        return direct, False
     shared = (os.environ.get("DATABASE_URL") or "").strip()
     if not shared:
         raise DatabaseNotConfiguredError(
-            "neither MIGRATION_DATABASE_URL nor DATABASE_URL is set; refusing to guess a "
+            "none of MIGRATION_DATABASE_URL, DATABASE_URL_UNPOOLED or DATABASE_URL is set; "
+            "refusing to guess a "
             "connection string for a schema change."
         )
     return shared, False

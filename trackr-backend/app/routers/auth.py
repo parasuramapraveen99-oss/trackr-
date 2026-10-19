@@ -15,7 +15,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.auth import repository, service
 from app.auth.browser import clear_session, cookie_name, require_browser_write, set_session
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, require_authentication
 from app.auth.schemas import (
     BrowserSessionResponse,
     CapabilitiesResponse,
@@ -87,14 +87,15 @@ def browser_login(
 @router.get("/browser/session", response_model=BrowserSessionResponse)
 def browser_session(
     response: Response,
-    conn: Any = Depends(get_conn),
     user: dict[str, Any] = Depends(get_current_user),
+    conn: Any = Depends(get_conn),
 ) -> BrowserSessionResponse:
     response.headers["Cache-Control"] = "no-store"
     return _browser_identity(conn, user)
 
 
-@router.post("/browser/refresh", response_model=BrowserSessionResponse)
+@router.post("/browser/refresh", response_model=BrowserSessionResponse,
+             dependencies=[Depends(require_authentication)])
 @limiter.limit("30/minute")
 def browser_refresh(
     request: Request,

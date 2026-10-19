@@ -240,7 +240,7 @@ export function HoldingsScreen({ chrome }: PortfolioScreenProps) {
                 }
               />
             ) : (
-              <LedgerGrid gap={18} rows={rows} columns={columns} total={totalRow} />
+              <LedgerGrid stickyHeader gap={18} rows={rows} columns={columns} total={totalRow} />
             )}
           </Card>
         </div>

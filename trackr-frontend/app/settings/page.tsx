@@ -15,13 +15,13 @@ import { PageBody } from "../components/Shell";
 import { Banner, Button, Field, Input, Select } from "../components/ds";
 import { EMPTY_VALUE } from "@/lib/format";
 
-const EMPTY_INVESTOR: InvestorIn = { display_name: "", family_group_id: null, onboarding_date: null };
+const EMPTY_INVESTOR: InvestorIn = { display_name: "", relationship: "family", family_group_id: null, onboarding_date: null };
 
 /** The rail, in the order someone actually needs them: who you are, which portfolio,
  *  what we may do with it, where files come from, and the way out. */
 const TABS = [
   { key: "account", label: "Account", blurb: "The login itself." },
-  { key: "portfolios", label: "Portfolios", blurb: "View your clients and add new ones." },
+  { key: "portfolios", label: "Portfolios", blurb: "View your users and add new ones." },
   { key: "permission", label: "Permission", blurb: "What you've allowed us to process." },
   { key: "brokers", label: "Brokers", blurb: "Where this portfolio's documents come from." },
   { key: "passwords", label: "File passwords", blurb: "Passwords that open your locked statements." },
@@ -174,7 +174,7 @@ export default function SettingsPage() {
             {tab === "portfolios" && (
               <>
                 <Section
-                  title="Add a client"
+                  title="Add a User"
                   blurb="Their portfolio opens as soon as you add them."
                 >
                   <form onSubmit={handleCreateInvestor} style={{ display: "grid", gap: 12 }}>
@@ -195,20 +195,17 @@ export default function SettingsPage() {
                           placeholder="Full name"
                         />
                       </Field>
-                      <Field label="Family" hint="Optional." htmlFor="investor-family">
+                      <Field label="Relationship" htmlFor="investor-relationship">
                         <Select
-                          id="investor-family"
-                          value={newInvestor.family_group_id ?? ""}
-                          onChange={(v) => setInvestorField("family_group_id", v || null)}
-                          options={[
-                            { value: "", label: "No family" },
-                            ...(overview.data?.families ?? []).map((f) => ({ value: f.id, label: f.name })),
-                          ]}
+                          id="investor-relationship"
+                          value={newInvestor.relationship ?? "family"}
+                          onChange={(value) => setInvestorField("relationship", value as "family" | "client")}
+                          options={[{ value: "family", label: "Family" }, { value: "client", label: "Client" }]}
                         />
                       </Field>
                       <Field
                         label="Start date"
-                        hint="Optional. When you started advising them."
+                        hint="Optional. When you started tracking this portfolio."
                         htmlFor="investor-date"
                       >
                         <Input
@@ -221,18 +218,18 @@ export default function SettingsPage() {
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                       <Button type="submit" disabled={creatingInvestor}>
-                        {creatingInvestor ? "Adding…" : "Add client"}
+                        {creatingInvestor ? "Adding…" : "Add user"}
                       </Button>
                       {investorCreated && (
                         <span style={{ font: "var(--type-body-sm)", color: "var(--positive)" }}>
-                          Added. You're now viewing this client.
+                          Added. You're now viewing this user's portfolio.
                         </span>
                       )}
                     </div>
                   </form>
                 </Section>
 
-                <Section title="Clients" blurb="Choose a client to view their portfolio.">
+                <Section title="Users" blurb="Choose a user to view their portfolio.">
                   <div style={{ marginTop: 16 }}>
                     <ClientsTree overview={overview} />
                   </div>

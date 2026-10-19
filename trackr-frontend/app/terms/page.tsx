@@ -1,6 +1,12 @@
 "use client";
 
 import Link from "next/link";
+import { useAuth } from "@/lib/auth-context";
+import { PageHeader } from "../components/PageHeader";
+import { PageBody } from "../components/Shell";
+import { LandingHeader } from "../components/landing/LandingHeader";
+import { LandingFooter } from "../components/landing/LandingFooter";
+import "../components/landing/landing.css";
 import type { CSSProperties, ReactNode } from "react";
 import {
   CURRENT_TOS_VERSION,
@@ -40,27 +46,12 @@ import {
  * against. `@/lib/terms` re-exports the value, so existing import paths still work.
  */
 export default function TermsPage() {
+  const { token } = useAuth();
   return (
-    <main
-      style={{
-        maxWidth: 720,
-        margin: "0 auto",
-        padding: "48px 24px 72px",
-        background: "var(--page)",
-        minHeight: "100vh",
-      }}
-    >
-      <p style={eyebrowStyle}>Trackr+ · version {CURRENT_TOS_VERSION}</p>
-      <h1
-        style={{
-          margin: "8px 0 0",
-          font: "var(--type-h1)",
-          color: "var(--text-primary)",
-          letterSpacing: "var(--tracking-tight)",
-        }}
-      >
-        Terms of Service &amp; Privacy Policy
-      </h1>
+    <div className={token ? undefined : "l-root"}>
+      {!token && <LandingHeader />}
+      <PageHeader title="Terms of Service & Privacy Policy" subtitle={`Trackr+ · version ${CURRENT_TOS_VERSION}`} />
+      <PageBody column>
       <p style={{ ...bodyStyle, marginTop: 12, color: "var(--text-secondary)" }}>
         {TERMS_INTRO.map((run, index) => (
           <Run key={index} run={run} />
@@ -76,9 +67,11 @@ export default function TermsPage() {
       ))}
 
       <p style={{ ...bodyStyle, marginTop: 32, color: "var(--text-tertiary)" }}>
-        <Link href="/register">← Back to sign up</Link>
+        <Link href={token ? "/settings#privacy" : "/register"}>{token ? "← Back to Settings" : "← Back to sign up"}</Link>
       </p>
-    </main>
+      </PageBody>
+      {!token && <LandingFooter />}
+    </div>
   );
 }
 

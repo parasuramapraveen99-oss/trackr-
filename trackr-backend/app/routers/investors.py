@@ -138,6 +138,7 @@ def overview(
             "id": investor["id"],
             "code": investor["code"],
             "display_name": investor["display_name"],
+            "relationship": investor["relationship"],
             "family_group_id": (
                 str(investor["family_group_id"]) if investor["family_group_id"] else None
             ),
@@ -185,6 +186,7 @@ def onboard_investor(
             family_group_id=body.family_group_id,
             pan=body.pan,
             onboarding_date=body.onboarding_date,
+            relationship=body.relationship,
         )
     return create_investor(
         connection,
@@ -195,6 +197,7 @@ def onboard_investor(
         onboarding_date=body.onboarding_date,
         owner_user_id=str(current_user["id"]),
         actor_uid=str(current_user["id"]),
+        relationship=body.relationship,
     )
 
 

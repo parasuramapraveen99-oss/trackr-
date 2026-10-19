@@ -272,6 +272,7 @@ def create_investor(
     onboarding_date: date | None = None,
     owner_user_id: str | None = None,
     actor_uid: str | None = None,
+    relationship: str = "client",
 ) -> dict[str, Any]:
     """Onboard a new investor. The only way an investor row is created outside
     ``app.db.load_golden``'s fixture seed -- see docs/FULL_VISION_BACKEND_ROADMAP.md A5.
@@ -299,11 +300,12 @@ def create_investor(
             cur.execute(
                 """
                 INSERT INTO investor (code, display_name, family_group_id,
-                                      onboarding_date, owner_user_id)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING id, code, display_name, family_group_id, onboarding_date, created_at
+                                      onboarding_date, owner_user_id, relationship)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id, code, display_name, family_group_id, onboarding_date, created_at,
+                          relationship
                 """,
-                (code, display_name, family_group_id, onboarding_date, owner_user_id),
+                (code, display_name, family_group_id, onboarding_date, owner_user_id, relationship),
             )
         except psycopg.errors.UniqueViolation as exc:
             raise DuplicateInvestorCodeError(code) from exc
@@ -316,6 +318,7 @@ def create_investor(
         "family_group_id": str(row[3]) if row[3] else None,
         "onboarding_date": row[4],
         "created_at": row[5],
+        "relationship": row[6],
     }
 
     audit.record(
@@ -412,7 +415,8 @@ def list_investors_for_user(conn: Any, user_id: str) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, code, display_name, family_group_id, onboarding_date, created_at
+            SELECT id, code, display_name, family_group_id, onboarding_date, created_at,
+                   relationship
             FROM investor
             WHERE owner_user_id = %s
             ORDER BY created_at, id
@@ -428,6 +432,7 @@ def list_investors_for_user(conn: Any, user_id: str) -> list[dict[str, Any]]:
             "family_group_id": row[3],
             "onboarding_date": row[4],
             "created_at": row[5],
+            "relationship": row[6],
         }
         for row in rows
     ]
@@ -456,6 +461,7 @@ def create_investor_with_generated_code(
     family_group_id: str | None = None,
     pan: str | None = None,
     onboarding_date: date | None = None,
+    relationship: str = "client",
 ) -> dict[str, Any]:
     """``create_investor`` with a code Trackr+ picks. Uniqueness comes from retrying
     against the UNIQUE index, never from a pre-SELECT (the same race discipline as
@@ -473,6 +479,7 @@ def create_investor_with_generated_code(
                     onboarding_date=onboarding_date,
                     owner_user_id=owner_user_id,
                     actor_uid=owner_user_id,
+                    relationship=relationship,
                 )
         except DuplicateInvestorCodeError:
             continue

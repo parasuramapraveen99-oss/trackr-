@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, useAuth } from "@trackr/core";
 import type { AccountOut, ForwardingCodeOut } from "@trackr/core";
 import { Badge } from "@trackr/ui";
@@ -15,9 +15,11 @@ export function EmailForwardingSetup({ account }: {
   brokerHasEmailAdapter?: boolean;
 }) {
   const { investorId: selectedInvestorId } = useAuth();
-  const investorId = account?.investor_id ?? selectedInvestorId;
-  const [inboxAddress, setInboxAddress] = useState<string | null>(null);
-  const addresses = inboxAddress ? [inboxAddress] : account?.forwarding_addresses ?? [];
+  const investorId = selectedInvestorId || account?.investor_id || "";
+  const [inbox, setInbox] = useState<{ investorId: string; address: string | null } | null>(null);
+  const setInboxAddress = useCallback((address: string | null) => setInbox({ investorId, address }), [investorId]);
+  const inboxAddress = inbox?.investorId === investorId ? inbox.address : null;
+  const addresses = inboxAddress ? [inboxAddress] : account?.investor_id === investorId ? account.forwarding_addresses : [];
   const address = addresses[0];
 
   return (
@@ -29,7 +31,7 @@ export function EmailForwardingSetup({ account }: {
             <h3>Your portfolio inbox</h3>
             <p>Copy your address when Gmail asks where to forward your statements.</p>
           </div>
-          {investorId && <EmailAutomation investorId={investorId} onAddress={setInboxAddress} />}
+          {investorId && <EmailAutomation key={investorId} investorId={investorId} onAddress={setInboxAddress} />}
           {addresses.map((value) => <div key={value} className={styles.address}>
             <span className={styles.eyebrow}>Your Trackr forwarding address</span>
             <CopyField value={value} label="statement forwarding address" />
@@ -40,7 +42,7 @@ export function EmailForwardingSetup({ account }: {
           </div>}
           <a className={styles.openGmail} href="https://mail.google.com/mail/u/0/#inbox" target="_blank" rel="noreferrer">Open Gmail ↗</a>
         </aside>
-        <div className={styles.walkthrough}><GmailForwardingGuide address={address} /></div>
+        <div className={styles.walkthrough}><GmailForwardingGuide /></div>
       </div>
     </div>
   );

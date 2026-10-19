@@ -656,7 +656,10 @@ export interface DiscrepancyOut {
 // Onboarding -- app/schemas/investors.py
 // ---------------------------------------------------------------------------
 
+export type InvestorRelationship = "family" | "client";
+
 export interface InvestorIn {
+  relationship?: InvestorRelationship;
   /** Leave out: Trackr+ generates one (e.g. TP-7K3QX9). */
   code?: string | null;
   display_name: string;
@@ -667,6 +670,7 @@ export interface InvestorIn {
 }
 
 export interface InvestorOut {
+  relationship: InvestorRelationship;
   id: string;
   code: string;
   display_name: string;
@@ -705,6 +709,7 @@ export interface OverviewAccount extends OverviewFigures {
 }
 
 export interface OverviewClient extends OverviewFigures {
+  relationship: InvestorRelationship;
   id: string;
   code: string;
   display_name: string;

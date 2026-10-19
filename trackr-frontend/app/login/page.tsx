@@ -9,7 +9,7 @@ import { AuthLayout, AuthError, authFormStyle } from "../components/AuthLayout";
 import { Button, Field, Input, PasswordInput } from "../components/ds";
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { login, sessionError, retrySession, ready } = useAuth();
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -33,6 +33,7 @@ export default function LoginPage() {
   return (
     <AuthLayout title="Trackr+" subtitle="Sign in to your portfolio">
       <form onSubmit={onSubmit} style={authFormStyle}>
+        {sessionError && <div><AuthError message={sessionError} /><Button type="button" variant="ghost" disabled={!ready} onClick={() => void retrySession()}>Try connection again</Button></div>}
         <AuthError message={error} />
         <Field label="Email" htmlFor="email">
           <Input id="email" type="email" required autoComplete="email" value={email} onChange={setEmail} />

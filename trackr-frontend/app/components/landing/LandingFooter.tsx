@@ -16,8 +16,8 @@ const COLUMNS = [
   {
     head: "Product",
     links: [
-      { label: "Overview", href: "#top" },
-      { label: "How your data is handled", href: "#security" },
+      { label: "Overview", href: "/#top" },
+      { label: "How your data is handled", href: "/#security" },
       { label: "Pricing", href: "/coming-soon?feature=Pricing" },
     ],
   },

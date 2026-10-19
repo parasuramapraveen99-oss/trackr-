@@ -22,6 +22,7 @@ export function EmailAutomation({ investorId, onAddress }: {
   const currentInvestor = useRef(investorId);
   currentInvestor.current = investorId;
   const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     if (!token) return;
     let cancelled = false;
@@ -34,15 +35,15 @@ export function EmailAutomation({ investorId, onAddress }: {
         if (!cancelled) setError("Couldn’t load your Gmail forwarding settings.");
       });
     return () => { cancelled = true; };
-  }, [investorId, token, onAddress]);
+  }, [investorId, token, onAddress, attempt]);
 
-  async function toggle() {
+  async function update(enabled: boolean) {
     if (!token || !settings) return;
     const targetInvestor = investorId;
     setBusy(true); setError(null);
     try {
       const value = await api.put<EmailSettings>(`/investors/${investorId}/email/settings`, {
-        token, json: { enabled: !settings.automation_enabled },
+        token, json: { enabled },
       });
       if (currentInvestor.current !== targetInvestor) return;
       setSettings(value); onAddress(value.address);
@@ -53,13 +54,17 @@ export function EmailAutomation({ investorId, onAddress }: {
   }
 
   const statusStyle = { margin: 0, font: "var(--type-label)", lineHeight: 1.6, color: "var(--text-secondary)" };
-  if (!settings) return <p role={error ? "alert" : "status"} style={statusStyle}>{error ?? "Loading your Gmail forwarding address…"}</p>;
-  if (!settings.available) return <p role="status" style={statusStyle}>Gmail forwarding isn’t enabled on this server.</p>;
+  if (!settings) return <div><p role={error ? "alert" : "status"} style={statusStyle}>{error ?? "Loading your Gmail forwarding address…"}</p>{error && <button type="button" onClick={() => setAttempt((value) => value + 1)}>Try again</button>}</div>;
+  if (!settings.available) return <p role="status" style={statusStyle}>Email forwarding is currently unavailable. You can still upload your statements on the Import page.</p>;
 
   return <div style={{ display: "grid", gap: 6 }}>
+    {!settings.address && <button type="button" disabled={busy} onClick={() => void update(false)}
+      style={{ padding: "10px 12px", border: "1px solid var(--border-strong)", background: "var(--surface)", color: "var(--text-primary)", font: "var(--type-body-sm)", cursor: "pointer" }}>
+      {busy ? "Creating…" : "Create forwarding address"}
+    </button>}
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
       <span style={statusStyle}>Automatic trade imports</span>
-      <button type="button" onClick={toggle} disabled={busy} aria-label="Automatic trade imports" aria-pressed={settings.automation_enabled}
+      <button type="button" onClick={() => void update(!settings.automation_enabled)} disabled={busy} aria-label="Automatic trade imports" aria-pressed={settings.automation_enabled}
         style={{ padding: "5px 10px", border: "1px solid var(--border-strong)", background: "var(--surface)", color: "var(--text-secondary)", font: "var(--type-label)", cursor: busy ? "progress" : "pointer" }}>
         {busy ? "Saving…" : settings.automation_enabled ? "On" : "Off"}
       </button>

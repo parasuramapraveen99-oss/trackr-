@@ -47,7 +47,10 @@ const CHAPTERS = [
 ];
 const SCENE_MS = 7500;
 
-export function GmailForwardingGuide({ address }: { address?: string }) {
+const SAMPLE_ADDRESS = "mail-sample@portfolio.example";
+const SAMPLE_CODE = "123456789";
+
+export function GmailForwardingGuide() {
   const [step, setStep] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [zoom, setZoom] = useState(true);
@@ -88,7 +91,7 @@ export function GmailForwardingGuide({ address }: { address?: string }) {
     const observer = new ResizeObserver(measure);
     observer.observe(node); observer.observe(element);
     return () => observer.disconnect();
-  }, [scene, address]);
+  }, [scene]);
 
   function goTo(value: number) { setStep(value); setPlaying(false); }
   const focus = target?.id === scene.id ? target.box : [40, 40, 20, 10];
@@ -118,7 +121,7 @@ export function GmailForwardingGuide({ address }: { address?: string }) {
         <div className={styles.route} aria-label="Current screen location">{scene.route.map((part, i) => <span key={`${i}-${part}`}>{i > 0 && <b aria-hidden="true">›</b>}{part}</span>)}</div>
         <div className={styles.viewport} style={camera}>
           <div ref={cameraRef} key={scene.id} className={`${styles.camera} ${zoom ? styles.zoomAnimation : ""}`}>
-            <GmailScene scene={scene} address={address ?? "Your Trackr forwarding address"} />
+            <GmailScene scene={scene} address={SAMPLE_ADDRESS} />
             <div key={scene.id} className={styles.spotlight} style={{ left: `${focus[0]}%`, top: `${focus[1]}%`, width: `${focus[2]}%`, height: `${focus[3]}%` }}>
               <span className={styles.cursor} style={{ animationPlayState: playing ? "running" : "paused" }}><svg width="22" height="28" viewBox="0 0 22 28"><path d="M2 2v21l5-6 4 9 4-2-4-9 8-1Z" fill="#173f36" stroke="white" strokeWidth="1.5" /></svg></span>
             </div>
@@ -126,7 +129,7 @@ export function GmailForwardingGuide({ address }: { address?: string }) {
         </div>
       </div>
       <nav className={styles.chapters} aria-label="Tutorial chapters">{CHAPTERS.map((chapter, i) => <button key={chapter.start} type="button" aria-current={step >= chapter.start && step < (CHAPTERS[i + 1]?.start ?? SCENES.length) ? "step" : undefined} onClick={() => goTo(chapter.start)}><span>{i + 1}</span>{chapter.label}</button>)}</nav>
-      <p className={styles.demoNote}>Animated guide. Follow the clicks in your own Gmail tab. <a href="https://support.google.com/mail/answer/10957?hl=en" target="_blank" rel="noreferrer">Gmail help ↗</a></p>
+      <p className={styles.demoNote}>Sample address and code shown for illustration. Use your own address and verification code from the setup panel. <a href="https://support.google.com/mail/answer/10957?hl=en" target="_blank" rel="noreferrer">Gmail help ↗</a></p>
     </section>
   );
 }
@@ -147,7 +150,7 @@ function GmailScene({ scene, address }: { scene: Scene; address: string }) {
 
   if (screen === "trackr") return <div className={`${styles.gmail} ${styles.trackrDemo}`} aria-hidden="true">
     <header>Trackr+ <span>Gmail forwarding</span></header>
-    <div className={styles.trackrCodeCard}><h3>Gmail verification</h3><p>Gmail’s code appears in this Trackr panel.</p><div><span>Your Gmail confirmation code</span><FakeButton tour="copy-code">Copy</FakeButton></div><p>Copy the real code, then switch back to your Gmail tab.</p></div>
+    <div className={styles.trackrCodeCard}><h3>Gmail verification</h3><p>Gmail’s code appears in this Trackr panel.</p><div><code>{SAMPLE_CODE}</code><FakeButton tour="copy-code">Copy</FakeButton></div><p>Copy the real code, then switch back to your Gmail tab.</p></div>
   </div>;
 
   return <div className={styles.gmail} aria-hidden="true">
@@ -169,7 +172,7 @@ function GmailScene({ scene, address }: { scene: Scene; address: string }) {
           <div className={styles.settingRow}><b>Forwarding:</b><div>
             {verified && <><p data-tour="global-off"><span className={styles.radio}>◉</span> Disable forwarding</p><p>○ Forward a copy of incoming mail to <span className={styles.fakeInput}>{address}</span></p></>}
             <FakeButton tour="add-address">Add a forwarding address</FakeButton>
-            {screen === "verify" && <div className={styles.verify}><span>Verify {address}</span><div className={styles.codeEntry}><span data-tour="verify-code" className={styles.fakeInput}>Your code from Trackr</span><FakeButton tour="verify-button">Verify</FakeButton></div></div>}
+            {screen === "verify" && <div className={styles.verify}><span>Verify {address}</span><div className={styles.codeEntry}><span data-tour="verify-code" className={styles.fakeInput}>{SAMPLE_CODE}</span><FakeButton tour="verify-button">Verify</FakeButton></div></div>}
             {verified && <p className={styles.verifiedAddress}>✓ {address} · Verified for filters</p>}
             <p className={styles.tip}>Tip: You can forward only some of your mail by creating a filter.</p>
           </div></div>

@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     # Exact existing name: db/connection.py's DATABASE_URL_ENV. No default -- a silent
     # fallback to localhost is how a test run ends up writing to something real.
     database_url: str
+    # Neon supplies this alongside its pooled DATABASE_URL. Use it for migrations and
+    # backups; it is the same login, not a separate Workspace migration identity.
+    database_url_unpooled: str | None = Field(default=None, repr=False)
 
     # --- migration identity ---------------------------------------------------------
     # The connection migrations are applied through, which is NOT the connection requests

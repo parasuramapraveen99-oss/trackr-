@@ -38,6 +38,8 @@ interface AuthState {
   user: UserResponse | null;
   investorId: string;
   ready: boolean;
+  sessionError: string | null;
+  retrySession: () => Promise<void>;
   login: (body: LoginRequest) => Promise<void>;
   register: (body: RegisterRequest) => Promise<void>;
   logout: () => void | Promise<void>;
@@ -225,6 +227,8 @@ function LegacyAuthProvider({ children }: { children: React.ReactNode }) {
       user,
       investorId,
       ready,
+      sessionError: null,
+      retrySession: async () => {},
       login,
       register,
       logout,
@@ -284,6 +288,7 @@ function BrowserAuthProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   const refreshInFlight = useRef<Promise<string | null> | null>(null);
+  const sessionCheck = useRef(0);
 
   const applyIdentity = useCallback((identity: BrowserIdentity | null) => {
     setUser(identity?.user ?? null);
@@ -299,11 +304,17 @@ function BrowserAuthProvider({ children }: { children: React.ReactNode }) {
         .then((identity) => {
           if (mine !== generation.current) return null;
           applyIdentity(identity);
+          setError(null);
           return BROWSER_SESSION;
         })
         .catch((err: unknown) => {
-          if (mine === generation.current && err instanceof ApiError && err.status === 401) {
-            applyIdentity(null);
+          if (mine === generation.current) {
+            if (err instanceof ApiError && err.status === 401) {
+              applyIdentity(null);
+              setError(null);
+            } else {
+              setError("We couldn’t connect to your account. Please try again.");
+            }
           }
           return null;
         })
@@ -312,9 +323,27 @@ function BrowserAuthProvider({ children }: { children: React.ReactNode }) {
     return refreshInFlight.current;
   }, [applyIdentity]);
 
-  useEffect(() => {
-    let cancelled = false;
+  const retrySession = useCallback(async () => {
+    const check = ++sessionCheck.current;
     const mine = generation.current;
+    setReady(false);
+    setError(null);
+    try {
+      const identity = await api.get<BrowserIdentity>("/auth/browser/session");
+      if (check === sessionCheck.current && mine === generation.current) applyIdentity(identity);
+    } catch (err: unknown) {
+      if (check !== sessionCheck.current || mine !== generation.current) return;
+      if (err instanceof ApiError && err.status === 401) {
+        await refresh();
+      } else {
+        setError("We couldn’t connect to your account. Please try again.");
+      }
+    } finally {
+      if (check === sessionCheck.current) setReady(true);
+    }
+  }, [applyIdentity, refresh]);
+
+  useEffect(() => {
     try {
       // Retire credentials from older Plus versions; never read or transmit them.
       localStorage.removeItem(TOKEN_KEY);
@@ -323,18 +352,9 @@ function BrowserAuthProvider({ children }: { children: React.ReactNode }) {
       setAdvisedOnlyState(localStorage.getItem(ADVISED_ONLY_KEY) === "true");
     } catch { /* Optional display preferences never gate cookie sign-in. */ }
     setUnauthorizedHandler(refresh);
-    api.get<BrowserIdentity>("/auth/browser/session")
-      .then((identity) => {
-        if (!cancelled && mine === generation.current) applyIdentity(identity);
-      })
-      .catch(async (err: unknown) => {
-        if (cancelled || mine !== generation.current) return;
-        if (err instanceof ApiError && err.status === 401) await refresh();
-        else setError("Could not check your session. Please reload and try again.");
-      })
-      .finally(() => { if (!cancelled) setReady(true); });
-    return () => { cancelled = true; setUnauthorizedHandler(null); };
-  }, [applyIdentity, refresh]);
+    void retrySession();
+    return () => { sessionCheck.current += 1; setUnauthorizedHandler(null); };
+  }, [refresh, retrySession]);
 
   const login = useCallback(async (body: LoginRequest) => {
     generation.current += 1;
@@ -366,13 +386,10 @@ function BrowserAuthProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo(() => ({
     // Compatibility flag for existing Plus screens. This is not an access credential.
     token: user ? `${BROWSER_SESSION}:${user.id}:${generation.current}` : null,
-    user, investorId, ready, login, register, logout,
+    user, investorId, ready, sessionError: error, retrySession, login, register, logout,
     setInvestorId: setInvestorIdState, asOf, setAsOf: setAsOfState, advisedOnly, setAdvisedOnly,
-  }), [user, investorId, ready, login, register, logout, asOf, advisedOnly, setAdvisedOnly]);
-  return <AuthContext.Provider value={value}>
-    {error && <div role="alert">{error}</div>}
-    {children}
-  </AuthContext.Provider>;
+  }), [user, investorId, ready, error, retrySession, login, register, logout, asOf, advisedOnly, setAdvisedOnly]);
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth(): AuthState {

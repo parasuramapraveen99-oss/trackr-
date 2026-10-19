@@ -10,6 +10,7 @@
 .viewport { position: relative; overflow: hidden; aspect-ratio: 16 / 9; background: #f5f7fb; container-type: inline-size; }
 .camera { width: 100%; height: 100%; transform: scale(calc(var(--camera-zoom) * var(--zoom-factor, 1))); transform-origin: var(--camera-origin); transition: transform 1.4s cubic-bezier(.22,1,.36,1), transform-origin 1.4s ease; }
 .gmail { width: 100%; height: 100%; overflow: hidden; color: #323639; background: #f6f8fc; font: 1.45cqw Arial,sans-serif; position: relative; }
+.gmail h3 { color: #323639; }
 .gmailTop { display: flex; align-items: center; gap: 2%; padding: 2% 2%; height: 19%; box-sizing: border-box; }
 .gmailBrand { width: 15%; font-size: 2.6cqw; white-space: nowrap; }.gmailBrand b { color: #df5144; font-size: 3.8cqw; margin-right: 4px; }
 .search { display: flex; align-items: center; justify-content: space-between; width: 61%; padding: 2%; box-sizing: border-box; background: #eaf1fb; border-radius: 7px; font-size: 1.7cqw; margin-right: auto; }.search svg { width: 2cqw; height: 2cqw; }

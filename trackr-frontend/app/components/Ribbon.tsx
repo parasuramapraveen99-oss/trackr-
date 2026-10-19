@@ -189,7 +189,7 @@ export function Ribbon({ pathname }: { pathname: string }) {
             <IconButton name="mail" label="Set up Gmail auto-forwarding" onClick={() => setGmailOpen(true)} />
           )}
           <span className={styles.secondaryTool} style={{ display: "inline-flex", gap: 6 }}>
-            <IconButton name="reconcile" label="Reconcile holdings with a statement" onClick={() => router.push("/reconcile")} />
+            <IconButton name="settings" label="Settings" onClick={() => router.push("/settings")} />
             <IconButton name="sparkles" label="Ask about markets" onClick={() => openChat()} />
           </span>
           <AccountMenu initial={initial} />

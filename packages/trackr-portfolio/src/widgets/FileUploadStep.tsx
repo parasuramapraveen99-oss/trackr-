@@ -5,6 +5,7 @@ import { api, ApiError, broadcastPortfolioRefresh, useAuth } from "@trackr/core"
 import type { AccountOut, BrokerOut, FileOutcomeOut, FilePasswordOut, FilesUploadOut } from "@trackr/core";
 import { Banner, Icon, Input, Select } from "@trackr/ui";
 import { ImportIllustration, UploadIllustration } from "./ImportIllustration";
+import { TradebookGuide } from "./TradebookGuide";
 import visual from "./ImportExperience.module.css";
 
 /**
@@ -416,6 +417,7 @@ export function FileUploadStep({
       )}
 
 
+      <TradebookGuide accounts={accounts} brokers={brokers} />
       {!compact && <WhereToFindFiles accounts={accounts} brokers={brokers} />}
     </div>
   );
