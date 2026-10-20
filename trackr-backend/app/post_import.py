@@ -18,8 +18,9 @@ implementation of either:
   3. ``app.reference_worker.run_once`` -- NSDL identity, NSE notices month by month
      (corporate actions AND dividends), price-verified BONUS/SPLIT, alias promotion,
      replay, gap resolution.
-  4. ``app.routers.analytical.catch_up_snapshots`` -- daily value history, one day at a
-     time, oldest first, each day committed.
+  4. ``app.routers.analytical.catch_up_snapshots`` -- daily value history, oldest first,
+     with shared inputs and bulk writes for cached dates. An unsettled source date is
+     fetched and committed separately. Optional sector work is queued separately.
 
 EVERY STEP GETS A SLICE OF ONE BUDGET, in that order. Before 12 Oct 2026 the snapshot
 catch-up ran unbounded between steps 2 and 3: on a fresh account it downloaded ~450 days
@@ -73,6 +74,13 @@ def run_cycle(
     """One bounded catch-up cycle. ``more_work`` says whether anything is still pending
     after it; ``progress`` whether it moved anything forward -- together they decide
     whether ``app.continuation`` starts the next cycle."""
+    from app.db.connection import session_connection
+
+    with session_connection(conn, settings) as direct:
+        return _run_cycle(direct, settings, budget_seconds, clock, include_sectors)
+
+
+def _run_cycle(conn, settings, budget_seconds, clock, include_sectors):
     with conn.cursor() as cur:
         cur.execute("SELECT pg_try_advisory_lock(%s)", (CYCLE_LOCK_KEY,))
         acquired = cur.fetchone()[0]
@@ -110,8 +118,19 @@ def _run_cycle_locked(
         return budget_seconds - (clock() - began)
 
     out: dict[str, Any] = {}
+    timings: dict[str, float] = {}
+
+    def phase(name, function, *args, **kwargs):
+        started = clock()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            timings[name] = round((clock() - started) * 1000, 3)
+
     try:
-        out["prices"] = backfill_price_history(
+        out["prices"] = phase(
+            "prices",
+            backfill_price_history,
             conn,
             notifier=get_notifier(settings),
             time_budget_seconds=min(PRICE_SHARE_SECONDS, left()),
@@ -123,24 +142,18 @@ def _run_cycle_locked(
         out["prices"] = {"error": type(exc).__name__}
 
     if include_sectors:
-        # Sectors otherwise arrive only with the next daily fundamentals cron, so a fresh
-        # import showed "Unclassified" for up to a day. Once per import (hop 0), not per
-        # follow-up cycle: a security with no published sector (an ETF, a retired ISIN)
-        # would be refetched every few minutes for nothing.
         try:
-            from app.db.sectors import refresh_sectors
-
-            missing = _isins_missing_sector(conn)
-            if missing:
-                out["sectors"] = refresh_sectors(conn, missing)
-                conn.commit()
-        except Exception as exc:  # the allocation chart can wait; the steps below cannot
+            out["sectors"] = phase("sector_enqueue", _enqueue_sectors, conn)
+            conn.commit()
+        except Exception as exc:
             conn.rollback()
             logger.warning("post_import_sectors_failed", exc_info=True)
             out["sectors"] = {"error": type(exc).__name__}
 
     try:
-        out["fno"] = heal_fno_awaiting_master(
+        out["fno"] = phase(
+            "fno",
+            heal_fno_awaiting_master,
             conn,
             notifier=get_notifier(settings),
             time_budget_seconds=min(FNO_SHARE_SECONDS, max(left() - MIN_STEP_SECONDS, 0)),
@@ -155,7 +168,9 @@ def _run_cycle_locked(
 
         # Expired contracts still need their expiry-day settlement price, which neither
         # the heal (trade days) nor the daily cron (7-day lookback) ever fetches.
-        out["fno_expiry"] = backfill_expiry_settlements(
+        out["fno_expiry"] = phase(
+            "fno_expiry",
+            backfill_expiry_settlements,
             conn,
             notifier=get_notifier(settings),
             time_budget_seconds=min(FNO_EXPIRY_SHARE_SECONDS, max(left() - MIN_STEP_SECONDS, 0)),
@@ -169,8 +184,12 @@ def _run_cycle_locked(
         out["reference"] = {"deferred": True}
     else:
         try:
-            out["reference"] = run_once(
-                conn, settings, limit=500,
+            out["reference"] = phase(
+                "reference",
+                run_once,
+                conn,
+                settings,
+                limit=500,
                 time_budget_seconds=min(REFERENCE_SHARE_SECONDS, left() - MIN_STEP_SECONDS),
             )
         except Exception as exc:  # failed tasks stay queued with backoff; report, don't raise
@@ -182,8 +201,12 @@ def _run_cycle_locked(
         out["snapshots"] = {"deferred": True, "complete": False}
     else:
         try:
-            out["snapshots"] = catch_up_snapshots(
-                conn, get_notifier(settings), time_budget_seconds=left() - MIN_STEP_SECONDS
+            out["snapshots"] = phase(
+                "snapshots",
+                catch_up_snapshots,
+                conn,
+                get_notifier(settings),
+                time_budget_seconds=left() - MIN_STEP_SECONDS,
             )
         except Exception as exc:  # a snapshot failure must not hide the steps above
             conn.rollback()
@@ -192,14 +215,25 @@ def _run_cycle_locked(
 
     out["more_work"] = _more_work(conn, out, settings)
     out["progress"] = _progress(out)
+    out["timings_ms"] = timings
+    out["elapsed_ms"] = round((clock() - began) * 1000, 3)
     return out
+
+
+def _enqueue_sectors(conn):
+    """Keep enrichment durable without making valuation wait on an exchange website."""
+    from app.jobs.queue import enqueue
+
+    if not _isins_missing_sector(conn):
+        return {"queued": False}
+    enqueue(conn, "security_sectors", {}, work_key="security-sectors-missing")
+    return {"queued": True}
 
 
 def _more_work(conn: Any, out: dict, settings: Settings | None = None) -> bool:
     prices = out.get("prices", {})
     prices_left = "error" in prices or (
-        prices.get("pending", 0)
-        > prices.get("fetched_days", 0) + prices.get("closed_days", 0)
+        prices.get("pending", 0) > prices.get("fetched_days", 0) + prices.get("closed_days", 0)
     )
     fno_left = bool(out.get("fno", {}).get("deferred")) or bool(
         out.get("fno_expiry", {}).get("deferred")
@@ -240,9 +274,7 @@ def _isins_missing_sector(conn: Any) -> list[str]:
     if not held:
         return []
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT isin FROM security WHERE isin = ANY(%s) AND sector IS NULL", (held,)
-        )
+        cur.execute("SELECT isin FROM security WHERE isin = ANY(%s) AND sector IS NULL", (held,))
         missing = [r[0] for r in cur.fetchall()]
     conn.commit()
     return missing
@@ -279,7 +311,7 @@ def run_cycle_in_own_connection(settings: Settings, hop: int = 0) -> None:
     try:
         with connect(settings.database_url) as conn:
             result = run_cycle(conn, settings, include_sectors=hop == 0)
-        logger.info("post_import_cycle hop=%s result=%s", hop, str(result)[:500])
+        logger.info("post_import_cycle hop=%s result=%s", hop, result)
     except Exception:
         logger.warning("post_import_cycle_failed", exc_info=True)
         return

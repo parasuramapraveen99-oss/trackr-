@@ -186,8 +186,10 @@ def load_transactions(
     if date_to:
         # A revision may move an identified effect into this historical window.
         # Load its immutable anchor and filter on the replayed effective date below.
-        clauses.append("(t.txn_date <= %s OR (t.source='CORP_ACTION' "
-                       "AND t.raw_payload ? 'auto_corporate_action_id'))")
+        clauses.append(
+            "(t.txn_date <= %s OR (t.source='CORP_ACTION' "
+            "AND t.raw_payload ? 'auto_corporate_action_id'))"
+        )
         params.append(date_to)
     if advised_only:
         clauses.append("a.is_advised = true")
@@ -213,42 +215,93 @@ def load_transactions(
     # collapsed to its terminal ISIN, so this is a single dict lookup below and can never
     # hand the engine a half-resolved identity.
     aliases = _alias_map(conn, date_to) if apply_aliases else {}
-    transactions = [
-            Transaction(
-                id=str(row[0]),
-                account_id=str(row[1]),
-                isin=aliases.get(row[2], row[2]),
-                txn_date=row[3],
-                txn_type=TxnType(row[4]),
-                quantity=row[5],
-                price=row[6],
-                charges=row[7],
-                stt=row[8],
-                dividend_amount=row[9],
-                tds_amount=row[10],
-                cost_transfer=row[11],
-                source=Source(row[12]),
-                source_ref=row[13],
-                dedupe_key=row[14],
-                raw_payload=row[15],
-                created_at=row[16],
-            )
-            for row in rows
-        ]
+    transactions = [_transaction_from_row(row) for row in rows]
+    actions = None
     if apply_aliases and any(
         (t.raw_payload or {}).get("auto_corporate_action_id") for t in transactions
     ):
         from app.db.corporate_actions import list_corporate_actions
+
+        actions = list_corporate_actions(conn)
+    transactions = normalise_transactions(transactions, aliases, actions, date_to)
+    selected_isin = aliases.get(isin, isin)
+    return [
+        t
+        for t in transactions
+        if (not isin or t.isin == selected_isin)
+        and (date_from is None or t.txn_date >= date_from)
+        and (date_to is None or t.txn_date <= date_to)
+    ]
+
+
+def _transaction_from_row(row) -> Transaction:
+    return Transaction(
+        id=str(row[0]),
+        account_id=str(row[1]),
+        isin=row[2],
+        txn_date=row[3],
+        txn_type=TxnType(row[4]),
+        quantity=row[5],
+        price=row[6],
+        charges=row[7],
+        stt=row[8],
+        dividend_amount=row[9],
+        tds_amount=row[10],
+        cost_transfer=row[11],
+        source=Source(row[12]),
+        source_ref=row[13],
+        dedupe_key=row[14],
+        raw_payload=row[15],
+        created_at=row[16],
+    )
+
+
+def load_snapshot_ledgers(conn: Any, scopes: set[tuple[str, bool]]) -> dict:
+    """Read several raw scopes in one scan, sharing rows between all/advised views.
+
+    Same reversal exclusions and (date, sequence) order as ``load_transactions``.
+    Aliases and revised actions are applied later for each historical date.
+    """
+    result = {scope: [] for scope in scopes}
+    if not scopes:
+        return result
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT t.id,t.account_id,t.isin,t.txn_date,t.txn_type,t.quantity,
+                      t.price,t.charges,t.stt,t.dividend_amount,t.tds_amount,
+                      t.cost_transfer,t.source,t.source_ref,t.dedupe_key,t.raw_payload,
+                      t.created_at,a.investor_id::text,a.is_advised
+               FROM transaction t JOIN account a ON a.id=t.account_id
+               WHERE a.investor_id=ANY(%s::uuid[]) AND t.reverses_id IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM transaction r WHERE r.reverses_id=t.id)
+               ORDER BY t.txn_date,t.seq""",
+            (sorted({investor for investor, _ in scopes}),),
+        )
+        for row in cur.fetchall():
+            transaction = _transaction_from_row(row)
+            for advised in (False, True):
+                key = (row[17], advised)
+                if key in result and (not advised or row[18]):
+                    result[key].append(transaction)
+    return result
+
+
+def normalise_transactions(transactions, aliases, actions=None, as_of=None):
+    """Apply the read boundary to prefetched rows without issuing SQL per date."""
+    rows = [replace(t, isin=aliases.get(t.isin, t.isin)) for t in transactions]
+    if actions is not None:
         from app.engine.action_replay import replay_derived_actions
 
-        actions = [replace(a, isin=aliases.get(a.isin, a.isin),
-                           resulting_isin=aliases.get(a.resulting_isin, a.resulting_isin))
-                   for a in list_corporate_actions(conn)]
-        transactions = replay_derived_actions(transactions, actions, as_of=date_to)
-    selected_isin = aliases.get(isin, isin)
-    return [t for t in transactions if (not isin or t.isin == selected_isin)
-            and (date_from is None or t.txn_date >= date_from)
-            and (date_to is None or t.txn_date <= date_to)]
+        mapped = [
+            replace(
+                a,
+                isin=aliases.get(a.isin, a.isin),
+                resulting_isin=aliases.get(a.resulting_isin, a.resulting_isin),
+            )
+            for a in actions
+        ]
+        rows = replay_derived_actions(rows, mapped, as_of=as_of)
+    return [t for t in rows if as_of is None or t.txn_date <= as_of]
 
 
 def _alias_map(conn: Any, as_of: date | None = None) -> dict[str, str]:

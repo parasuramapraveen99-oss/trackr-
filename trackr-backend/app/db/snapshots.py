@@ -9,10 +9,43 @@ source of truth, so nothing in this module ever mutates a stored total in place.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Any
 
 from app.engine.types import Snapshot
+
+
+def upsert_snapshots(conn: Any, rows: list[tuple[str, bool, Snapshot]]) -> None:
+    """One statement per completed batch, with the same NUMERIC precision as a point write."""
+    if not rows:
+        return
+    payload = [
+        {
+            "investor_id": investor,
+            "advised_only": advised,
+            "as_of": point.as_of.isoformat(),
+            "invested": str(point.invested),
+            "market_value": str(point.market_value),
+            "unrealised": str(point.unrealised),
+            "realised_to_date": str(point.realised_to_date),
+            "excluded_isins": list(point.excluded_isins),
+        }
+        for investor, advised, point in rows
+    ]
+    conn.execute(
+        """INSERT INTO portfolio_snapshot
+           (investor_id,advised_only,as_of,invested,market_value,unrealised,
+            realised_to_date,excluded_isins)
+           SELECT * FROM jsonb_to_recordset(%s::jsonb) AS p
+           (investor_id uuid,advised_only boolean,as_of date,invested numeric,
+            market_value numeric,unrealised numeric,realised_to_date numeric,excluded_isins text[])
+           ON CONFLICT (investor_id,as_of,advised_only) DO UPDATE SET
+             invested=EXCLUDED.invested,market_value=EXCLUDED.market_value,
+             unrealised=EXCLUDED.unrealised,realised_to_date=EXCLUDED.realised_to_date,
+             excluded_isins=EXCLUDED.excluded_isins,computed_at=clock_timestamp()""",
+        (json.dumps(payload),),
+    )
 
 
 def upsert_snapshot(conn: Any, investor_id: str, advised_only: bool, snapshot: Snapshot) -> None:

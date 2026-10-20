@@ -22,8 +22,9 @@ def enqueue(conn, kind: str, key: str, payload: dict, *, refresh: bool = False) 
                                   ELSE reference_sync_task.payload END,
                    state = CASE WHEN %s THEN 'pending' ELSE reference_sync_task.state END,
                    available_at = CASE WHEN %s THEN now()
-                                       ELSE reference_sync_task.available_at END""",
-            (kind, key, json.dumps(payload), refresh, refresh, refresh),
+                                       ELSE reference_sync_task.available_at END
+               WHERE %s""",
+            (kind, key, json.dumps(payload), refresh, refresh, refresh, refresh),
         )
 
 
@@ -36,7 +37,11 @@ def schedule(conn, today: date | None = None) -> None:
                       array_agg(DISTINCT t.isin), r.requested_at, r.scheduled_at
                FROM reference_sync_import r JOIN transaction t ON t.account_id = r.account_id
                WHERE t.source != 'CORP_ACTION'
-               GROUP BY r.account_id, r.requested_at, r.scheduled_at"""
+                 AND (r.scheduled_at IS NULL OR r.requested_at > r.scheduled_at
+                      OR r.scheduled_at::date < %s)
+               GROUP BY r.account_id, r.requested_at, r.scheduled_at
+               ORDER BY r.account_id""",
+            (today,),
         )
         accounts = cur.fetchall()
     for account_id, start, isins, requested, scheduled in accounts:
@@ -66,8 +71,9 @@ def schedule(conn, today: date | None = None) -> None:
                 dependencies,
             )
             cur.execute(
-                "UPDATE reference_sync_import SET scheduled_at = %s WHERE account_id = %s",
-                (requested, account_id),
+                "UPDATE reference_sync_import SET scheduled_at = clock_timestamp() "
+                "WHERE account_id = %s AND requested_at = %s",
+                (account_id, requested),
             )
     conn.commit()
 

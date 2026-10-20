@@ -118,6 +118,29 @@ def database_url() -> str:
 
 
 @contextmanager
+def session_connection(conn: Any, settings: Any) -> Iterator[Any]:
+    """Keep session locks on one physical connection, never on a transaction pooler."""
+    host = getattr(getattr(conn, "info", None), "host", "") or ""
+    if "-pooler." not in host:
+        yield conn
+        return
+    from urllib.parse import urlsplit, urlunsplit
+
+    configured = getattr(settings, "database_url_unpooled", None)
+    url = configured or getattr(settings, "database_url", None)
+    if not url:
+        raise DatabaseNotConfiguredError("Session worker needs a direct database connection")
+    parsed = urlsplit(url)
+    if configured and "-pooler." in (parsed.hostname or ""):
+        raise DatabaseNotConfiguredError("DATABASE_URL_UNPOOLED must use a direct endpoint")
+    if not configured:
+        # Neon publishes both endpoints for the same database and login.
+        url = urlunsplit(parsed._replace(netloc=parsed.netloc.replace("-pooler.", ".")))
+    with connect(url) as direct:
+        yield direct
+
+
+@contextmanager
 def connect(url: str | None = None) -> Iterator[Any]:
     """Yield a connection, committing on success and rolling back on any exception.
 

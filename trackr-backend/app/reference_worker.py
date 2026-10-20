@@ -377,11 +377,25 @@ def process(conn, kind: str, key: str, payload: dict, settings: Settings) -> dic
         # Source observations can requeue REPLAY without changing this ledger.
         # Invalidate only when the normalized financial inputs changed, so repeated
         # checks do not erase a chart that the previous cycle just rebuilt.
-        fingerprint = _ledger_fingerprint(conn, payload["account_id"])
+        fingerprint, inputs, scope = _ledger_state(conn, payload["account_id"])
         changed = payload.get("snapshot_fingerprint") != fingerprint
         if changed:
-            _invalidate_snapshots(conn, payload["account_id"])
+            previous = payload.get("snapshot_inputs")
+            dirty_from = None
+            if previous is not None and payload.get("snapshot_scope") == scope:
+                affected = [
+                    value[0]
+                    for key in previous.keys() | inputs.keys()
+                    if previous.get(key) != inputs.get(key)
+                    for value in (previous.get(key), inputs.get(key))
+                    if value
+                ]
+                if affected:
+                    dirty_from = date.fromisoformat(min(affected))
+            _invalidate_snapshots(conn, payload["account_id"], dirty_from)
         payload["snapshot_fingerprint"] = fingerprint
+        payload["snapshot_inputs"] = inputs
+        payload["snapshot_scope"] = scope
         # Rule 20 (owner amendment 2026-10-08): whatever still does not reconcile after
         # the known actions are applied is a gap for public records to close.
         gap_payload = {"account_id": payload["account_id"]}
@@ -407,7 +421,9 @@ def process(conn, kind: str, key: str, payload: dict, settings: Settings) -> dic
         remaining = payload.get("research_isins")
         researching = remaining is not None
         result = resolve_account_gaps(
-            conn, payload["account_id"], researcher=_researcher(settings),
+            conn,
+            payload["account_id"],
+            researcher=_researcher(settings),
             defer_research=not researching,
             research_isins=remaining[:1] if researching else None,
         )
@@ -498,27 +514,46 @@ def _researcher(settings: Settings):
 
 
 def _ledger_fingerprint(conn, account_id):
+    return _ledger_state(conn, account_id)[0]
+
+
+def _ledger_state(conn, account_id):
     from app.db.repository import load_transactions
 
     rows = load_transactions(conn, account_id=account_id)
     digest = hashlib.sha256()
     with conn.cursor() as cur:
         cur.execute("SELECT investor_id::text, is_advised FROM account WHERE id=%s", (account_id,))
-        digest.update(json.dumps(cur.fetchone()).encode())
+        scope = list(cur.fetchone())
+        digest.update(json.dumps(scope).encode())
+    inputs = {}
     for row in rows:
         values = {
             name: getattr(row, name)
             for name in (
-                "id", "isin", "account_id", "txn_date", "txn_type", "quantity", "price",
-                "charges", "stt", "dividend_amount", "tds_amount", "cost_transfer", "raw_payload",
+                "id",
+                "isin",
+                "account_id",
+                "txn_date",
+                "txn_type",
+                "quantity",
+                "price",
+                "charges",
+                "stt",
+                "dividend_amount",
+                "tds_amount",
+                "cost_transfer",
+                "raw_payload",
             )
         }
-        digest.update(json.dumps(values, sort_keys=True, default=str).encode())
+        encoded = json.dumps(values, sort_keys=True, default=str).encode()
+        digest.update(encoded)
         digest.update(b"\n")
-    return digest.hexdigest()
+        inputs[row.id] = [row.txn_date.isoformat(), hashlib.sha256(encoded).hexdigest()]
+    return digest.hexdigest(), inputs, scope
 
 
-def _invalidate_snapshots(conn, account_id):
+def _invalidate_snapshots(conn, account_id, dirty_from=None):
     """Invalidate derived caches atomically with durable rebuild requests."""
     with conn.cursor() as cur:
         cur.execute("SELECT investor_id::text FROM account WHERE id=%s", (account_id,))
@@ -527,65 +562,125 @@ def _invalidate_snapshots(conn, account_id):
             return
         investor_id = owner[0]
         cur.execute(
-            "SELECT as_of,advised_only FROM portfolio_snapshot WHERE investor_id=%s", (investor_id,)
+            "SELECT as_of,advised_only FROM portfolio_snapshot WHERE investor_id=%s "
+            "AND (%s::date IS NULL OR as_of >= %s)",
+            (investor_id, dirty_from, dirty_from),
         )
         dates = cur.fetchall()
-        for on, advised in dates:
-            key = f"{investor_id}:{on}:{advised}"
-            queue.enqueue(
-                conn,
-                "SNAPSHOT",
-                key,
-                {
+        tasks = [
+            {
+                "key": f"{investor_id}:{on}:{advised}",
+                "payload": {
                     "investor_id": investor_id,
                     "on": on.isoformat(),
                     "advised_only": advised,
                 },
-                refresh=True,
+            }
+            for on, advised in dates
+        ]
+        if tasks:
+            cur.execute(
+                """INSERT INTO reference_sync_task(kind,task_key,payload)
+                   SELECT 'SNAPSHOT',item->>'key',item->'payload'
+                   FROM jsonb_array_elements(%s::jsonb) item
+                   ON CONFLICT(kind,task_key) DO UPDATE SET payload=EXCLUDED.payload,
+                     state='pending',available_at=now()""",
+                (json.dumps(tasks),),
             )
             cur.execute(
-                "INSERT INTO reference_sync_dependency VALUES (%s,'SNAPSHOT',%s) "
-                "ON CONFLICT DO NOTHING",
-                (account_id, key),
+                "INSERT INTO reference_sync_dependency(account_id,kind,task_key) "
+                "SELECT %s,'SNAPSHOT',unnest(%s::text[]) ON CONFLICT DO NOTHING",
+                (account_id, [task["key"] for task in tasks]),
             )
-        cur.execute("DELETE FROM portfolio_snapshot WHERE investor_id=%s", (investor_id,))
+        cur.execute(
+            "DELETE FROM portfolio_snapshot WHERE investor_id=%s "
+            "AND (%s::date IS NULL OR as_of >= %s)",
+            (investor_id, dirty_from, dirty_from),
+        )
 
 
 def _rebuild_snapshot(conn, payload):
     """Replay using date-effective identities and observed prices; never retain stale totals."""
-    from app.db.fund_reference import non_exchange_isins
-    from app.db.prices import absent_on_or_before, latest_prices
-    from app.db.repository import load_transactions
+    from app.db.snapshot_batch import snapshot_batch
     from app.db.snapshots import upsert_snapshot
-    from app.engine.holdings import compute_holdings_partitioned
-    from app.engine.snapshot import compute_snapshot
 
+    if not conn.execute("SELECT 1 FROM investor WHERE id=%s", (payload["investor_id"],)).fetchone():
+        return
     on = date.fromisoformat(payload["on"])
-    investor_id, advised = payload["investor_id"], payload["advised_only"]
-    with conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM investor WHERE id=%s", (investor_id,))
-        if cur.fetchone() is None:
-            return  # erasure must not leave a job recreating deleted portfolio caches
-    transactions = load_transactions(
-        conn, investor_id=investor_id, advised_only=advised, date_to=on
-    )
-    holdings, _ = compute_holdings_partitioned(transactions, on)
-    isins = [h.isin for h in holdings]
-    prices = latest_prices(conn, isins, on)
-    # A CONFIRMED absence (a retired ISIN, e.g. GUJTHEM's after its 2023 change) is
-    # excluded and named, exactly as the nightly app.routers.analytical._run_snapshots
-    # does. Without this every rebuild touching such a date raised forever: 1,556 tasks
-    # seen 2026-10-07, retrying with backoff and crowding out the identity and
-    # corporate-action tasks that would actually fix the gap. A price merely not FETCHED
-    # yet is not in price_absent, so it still raises and retries, as it should.
-    # LISTED series, same scope as app.routers.analytical._run_snapshots: units the
-    # exchange cannot price are left out by route, never by bhavcopy absence.
-    off_exchange = set(non_exchange_isins(conn, isins))
-    unpriceable = absent_on_or_before(
-        conn, [i for i in isins if i not in prices and i not in off_exchange], on
-    )
-    snapshot = compute_snapshot(transactions, prices, on, exclude_isins=unpriceable | off_exchange)
-    upsert_snapshot(conn, investor_id, advised, snapshot)
+    with snapshot_batch(conn, on, on) as batch:
+        snapshot = batch.build(payload["investor_id"], payload["advised_only"], on)
+        upsert_snapshot(conn, payload["investor_id"], payload["advised_only"], snapshot)
+
+
+def _process_snapshot_claim(conn, rows):
+    """Share reads across portfolios and atomically publish a bounded claim."""
+    from uuid import UUID
+
+    from app.db.snapshot_batch import snapshot_batch
+    from app.db.snapshots import upsert_snapshots
+    from app.engine.errors import MissingPriceError, NegativeHoldingError
+
+    done, failed, points = [], [], []
+    candidates = []
+    for key, payload, attempts in rows:
+        try:
+            investor = str(UUID(payload["investor_id"]))
+        except Exception as exc:
+            failed.append((key, attempts, exc))
+            continue
+        candidates.append((key, payload, attempts, investor))
+    existing = {
+        row[0]
+        for row in conn.execute(
+            "SELECT id::text FROM investor WHERE id=ANY(%s::uuid[])",
+            (sorted({row[3] for row in candidates}),),
+        ).fetchall()
+    }
+    live = []
+    for key, payload, attempts, investor in candidates:
+        if investor not in existing:
+            payload.pop("unrepairable", None)
+            done.append({"key": key, "payload": payload})
+            continue
+        try:
+            on = date.fromisoformat(payload["on"])
+            advised = payload["advised_only"]
+            live.append((key, payload, attempts, investor, advised, on))
+        except Exception as exc:
+            failed.append((key, attempts, exc))
+    if live:
+        dates = [row[5] for row in live]
+        with snapshot_batch(conn, min(dates), max(dates)) as batch:
+            batch.prefetch({(row[3], row[4]) for row in live})
+            for key, payload, attempts, investor, advised, on in live:
+                try:
+                    point = batch.build(investor, advised, on)
+                    points.append((investor, advised, point))
+                    payload.pop("unrepairable", None)
+                except (MissingPriceError, NegativeHoldingError) as exc:
+                    if not payload.get("repair"):
+                        failed.append((key, attempts, exc))
+                        continue
+                    payload["unrepairable"] = str(exc)[:300]
+                except Exception as exc:
+                    failed.append((key, attempts, exc))
+                    continue
+                done.append({"key": key, "payload": payload})
+    with conn.pipeline():
+        upsert_snapshots(conn, points)
+        if done:
+            conn.execute(
+                """UPDATE reference_sync_task t SET state='done',payload=item->'payload',
+                   last_error=NULL,updated_at=clock_timestamp(),attempts=0,
+                   last_success_at=clock_timestamp(),available_at=now()+interval '1 second'
+                   FROM jsonb_array_elements(%s::jsonb) item
+                   WHERE t.kind='SNAPSHOT' AND t.task_key=item->>'key'""",
+                (json.dumps(done),),
+            )
+        conn.commit()
+    for key, attempts, exc in failed:
+        _requeue(conn, "SNAPSHOT", key, attempts, exc)
+    return len(done), len(failed)
 
 
 #: Task kinds that call nseindia.com/api. Left pending on a deployment with
@@ -599,6 +694,13 @@ def run_once(
     limit: int | None = None,
     time_budget_seconds: float | None = None,
 ) -> dict:
+    from app.db.connection import session_connection
+
+    with session_connection(conn, settings) as direct:
+        return _run_once(direct, settings, limit, time_budget_seconds)
+
+
+def _run_once(conn, settings, limit=None, time_budget_seconds=None):
     if not settings.reference_sync_enabled:
         return {"enabled": False, "processed": 0, "failed": 0}
     with conn.cursor() as cur:
@@ -606,7 +708,18 @@ def run_once(
         acquired = cur.fetchone()[0]
     if not acquired:
         return {"enabled": True, "busy": True, "processed": 0, "failed": 0}
+    from contextlib import ExitStack
+
+    from app.db.snapshot_batch import snapshot_batch
+    from app.prices.pipe import NSE_BHAVCOPY_EARLIEST
+
+    batch_scope = ExitStack()
+    batch_scope.enter_context(
+        snapshot_batch(conn, NSE_BHAVCOPY_EARLIEST, date.today(), queued=True)
+    )
     processed = waiting = failed = 0
+    began = time.monotonic()
+    timings = {"scheduling": 0.0, "preparation": 0.0, "snapshot_batches": 0.0}
     try:
         # We hold the sole worker lock: 'running' now means an earlier process died.
         with conn.cursor() as cur:
@@ -615,6 +728,8 @@ def run_once(
         identity.schedule_identity(conn)
         _schedule_actions(conn)
         conn.commit()
+        timings["scheduling"] = (time.monotonic() - began) * 1000
+        preparing = time.monotonic()
         try:
             # Demerger price factors for analytics series. Best-effort and self-retrying:
             # a notice whose exchange files are not reachable simply waits for next run.
@@ -625,7 +740,7 @@ def run_once(
             conn.rollback()
             logger.warning("demerger_price_factors_failed", exc_info=True)
         _maybe_verify_quote_mappings(conn)
-        began = time.monotonic()
+        timings["preparation"] = (time.monotonic() - preparing) * 1000
         # AMFI tasks run only on a host that can reach AMFI, with the feature on -- the
         # same capability split as NSE -- and at most AMFI_TASKS_PER_BATCH of every five
         # claims while other kinds are due (docs/MF_ETF_PLAN.md section 7.2).
@@ -638,6 +753,12 @@ def run_once(
             # budget is spent. Unclaimed work stays pending for the next run.
             if time_budget_seconds is not None and (time.monotonic() - began > time_budget_seconds):
                 break
+            remaining = (
+                (limit or settings.reference_worker_batch_size) - processed - waiting - failed
+            )
+            if remaining <= 0:
+                break
+            snapshot_rows = None
             with conn.cursor() as cur:
                 over_quota = amfi_claims >= AMFI_TASKS_PER_BATCH * (claims // 5 + 1)
                 row = None
@@ -680,13 +801,53 @@ def run_once(
                 kind, key, payload, attempts = row
                 claims += 1
                 amfi_claims += kind in AMFI_TASK_KINDS
-                cur.execute(
-                    "UPDATE reference_sync_task SET state='running',updated_at=now() "
-                    "WHERE kind=%s AND task_key=%s",
-                    (kind, key),
-                )
-            conn.commit()
+                if kind == "SNAPSHOT" and payload.get("investor_id") and remaining > 1:
+                    with conn.pipeline():
+                        claimed = conn.execute(
+                            """WITH picked AS (
+                                 SELECT kind,task_key FROM reference_sync_task
+                                 WHERE kind='SNAPSHOT' AND state IN ('pending','retry')
+                                   AND available_at<=now()
+                                 ORDER BY (task_key=%s) DESC,payload->>'on' DESC,task_key
+                                 LIMIT %s FOR UPDATE SKIP LOCKED
+                               )
+                               UPDATE reference_sync_task t
+                               SET state='running',updated_at=now()
+                               FROM picked p WHERE t.kind=p.kind AND t.task_key=p.task_key
+                               RETURNING t.task_key,t.payload,t.attempts""",
+                            (key, min(64, remaining)),
+                        )
+                        conn.commit()
+                    snapshot_rows = claimed.fetchall()
+                else:
+                    cur.execute(
+                        "UPDATE reference_sync_task SET state='running',updated_at=now() "
+                        "WHERE kind=%s AND task_key=%s",
+                        (kind, key),
+                    )
+            if snapshot_rows is None:
+                conn.commit()
             try:
+                if snapshot_rows:
+                    started = time.monotonic()
+                    try:
+                        complete, errors = _process_snapshot_claim(conn, snapshot_rows)
+                    except Exception as exc:
+                        conn.rollback()
+                        for task_key, _payload, task_attempts in snapshot_rows:
+                            _requeue(conn, "SNAPSHOT", task_key, task_attempts, exc)
+                        failed += len(snapshot_rows)
+                        continue
+                    processed += complete
+                    failed += errors
+                    timings["snapshot_batches"] += (time.monotonic() - started) * 1000
+                    logger.info(
+                        "snapshot_batch completed=%s failed=%s elapsed_ms=%.1f",
+                        complete,
+                        errors,
+                        (time.monotonic() - started) * 1000,
+                    )
+                    continue
                 checkpoint = process(conn, kind, key, payload, settings)
                 with conn.cursor() as cur:
                     cur.execute(
@@ -709,6 +870,10 @@ def run_once(
                             "WHERE kind='REPLAY'"
                         )
                 conn.commit()
+                if kind in ("REPLAY", "GAP", "ACTION", "IDENTITY", "NSE"):
+                    from app.db.snapshot_batch import invalidate_batch
+
+                    invalidate_batch()
                 processed += 1
             except ResearchDeferred as exc:
                 # Not a failure: the structured fixes are committed and research resumes
@@ -751,8 +916,16 @@ def run_once(
             raise ActionSourceError(
                 f"{failed} reference task(s) failed and remain queued; inspect operator status"
             )
-        return {"enabled": True, "processed": processed, "waiting": waiting, "failed": failed}
+        return {
+            "enabled": True,
+            "processed": processed,
+            "waiting": waiting,
+            "failed": failed,
+            "timings_ms": {name: round(value, 3) for name, value in timings.items()},
+            "elapsed_ms": round((time.monotonic() - began) * 1000, 3),
+        }
     finally:
+        batch_scope.close()
         conn.rollback()
         with conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_unlock(%s)", (_WORKER_LOCK,))

@@ -2,13 +2,57 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
 from app.engine.holdings import compute_holdings_partitioned
 from app.engine.realised import compute_realised
-from app.engine.types import ZERO, Snapshot, Transaction
+from app.engine.types import ZERO, Holding, Snapshot, Transaction
 from app.engine.valuation import value_holdings
+
+
+@dataclass(frozen=True)
+class PreparedSnapshot:
+    """Price-independent replay, reusable until the next ledger/reference event.
+
+    Kept in memory by a rebuild, never used as a stored holdings ledger. Realised
+    gains stay partitioned by ISIN so changing price exclusions apply to both totals.
+    """
+
+    holdings: tuple[Holding, ...]
+    excluded_isins: frozenset[str]
+    realised: tuple[tuple[str, Decimal], ...]
+
+
+def prepare_snapshot(transactions: list[Transaction], on_date: date) -> PreparedSnapshot:
+    holdings, skipped = compute_holdings_partitioned(transactions, on_date)
+    excluded = frozenset(s.isin for s in skipped)
+    usable = [t for t in transactions if t.isin not in excluded]
+    realised = tuple((row.isin, row.gain) for row in compute_realised(usable, on_date))
+    return PreparedSnapshot(tuple(holdings), excluded, realised)
+
+
+def value_prepared_snapshot(
+    prepared: PreparedSnapshot,
+    prices: dict[str, Decimal],
+    on_date: date,
+    exclude_isins: set[str] | None = None,
+) -> Snapshot:
+    excluded = set(prepared.excluded_isins) | set(exclude_isins or ())
+    holdings = value_holdings([h for h in prepared.holdings if h.isin not in excluded], prices)
+    invested = sum((h.invested for h in holdings), ZERO)
+    market_value = sum((h.market_value for h in holdings), ZERO)
+    return Snapshot(
+        as_of=on_date,
+        invested=invested,
+        market_value=market_value,
+        unrealised=market_value - invested,
+        realised_to_date=sum(
+            (gain for isin, gain in prepared.realised if isin not in excluded), ZERO
+        ),
+        excluded_isins=tuple(sorted(excluded)),
+    )
 
 
 def compute_snapshot(

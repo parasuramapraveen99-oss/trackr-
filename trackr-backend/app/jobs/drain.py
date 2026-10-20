@@ -175,11 +175,24 @@ def _monitor_tick(conn: Any, store: Any, payload: dict[str, Any]) -> dict[str, A
     return handle_job(conn, store, payload)
 
 
-_HANDLERS = {KIND_PARSE_DOCUMENT: _parse_document, "butler_tick": _butler_tick,
-             "hosted_job_tick": _hosted_tick, "monitor_tick": _monitor_tick,
-             "email_delivery": email_jobs.extract_delivery,
-             "email_document": email_jobs.parse_document,
-             "email_portfolio_refresh": email_jobs.refresh_portfolio}
+def _security_sectors(conn, store, payload):
+    from app.db.sectors import refresh_sectors
+    from app.post_import import _isins_missing_sector
+
+    missing = _isins_missing_sector(conn)
+    return refresh_sectors(conn, missing) if missing else {"unclassified": []}
+
+
+_HANDLERS = {
+    KIND_PARSE_DOCUMENT: _parse_document,
+    "butler_tick": _butler_tick,
+    "security_sectors": _security_sectors,
+    "hosted_job_tick": _hosted_tick,
+    "monitor_tick": _monitor_tick,
+    "email_delivery": email_jobs.extract_delivery,
+    "email_document": email_jobs.parse_document,
+    "email_portfolio_refresh": email_jobs.refresh_portfolio,
+}
 
 
 def drain_once(
@@ -243,8 +256,9 @@ def drain_once(
                 # refuses the queue.fail as well -- leaving a RUNNING job with no reason,
                 # re-tried once per lease expiry. A try/except cannot rescue that, because
                 # the transaction is already poisoned by the time it is caught.
-                changed = queue.fail(conn, job.id, str(exc), permanent=True,
-                                     claim_token=job.claim_token)
+                changed = queue.fail(
+                    conn, job.id, str(exc), permanent=True, claim_token=job.claim_token
+                )
                 if changed:
                     email_jobs.record_failure(conn, job.kind, job.payload, str(exc))
                 conn.commit()
@@ -254,11 +268,20 @@ def drain_once(
                 logger.warning("job %s permanently failed: %s", job.id, exc)
             except Exception as exc:  # noqa: BLE001 - one bad document must not stop the loop
                 conn.rollback()
-                changed = queue.fail(conn, job.id, f"{type(exc).__name__}: {exc}", permanent=False,
-                                     claim_token=job.claim_token)
+                changed = queue.fail(
+                    conn,
+                    job.id,
+                    f"{type(exc).__name__}: {exc}",
+                    permanent=False,
+                    claim_token=job.claim_token,
+                )
                 if changed and job.attempts >= job.max_attempts:
-                    email_jobs.record_failure(conn, job.kind, job.payload,
-                                              "Processing failed after retries; original retained")
+                    email_jobs.record_failure(
+                        conn,
+                        job.kind,
+                        job.payload,
+                        "Processing failed after retries; original retained",
+                    )
                 conn.commit()
                 failed += 1
                 logger.warning("job %s failed (retryable): %s", job.id, exc, exc_info=True)
@@ -353,12 +376,17 @@ def main(argv: list[str] | None = None) -> int:
     while True:
         with connect(settings.database_url) as conn:
             summary = drain_once(
-                conn, store, limit=args.limit, budget_seconds=args.budget_seconds,
-                claim_batch=args.claim_batch, investor_id=args.investor_id,
+                conn,
+                store,
+                limit=args.limit,
+                budget_seconds=args.budget_seconds,
+                claim_batch=args.claim_batch,
+                investor_id=args.investor_id,
             )
         logger.info(
             "drained: %(done)s done, %(failed)s failed (%(permanent)s permanent), "
-            "%(pending)s still pending, %(elapsed_seconds)ss", summary,
+            "%(pending)s still pending, %(elapsed_seconds)ss",
+            summary,
         )
         if not args.watch:
             break

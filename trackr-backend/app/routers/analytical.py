@@ -38,18 +38,15 @@ from app.auth.ops import require_cron_secret, require_ops_key
 from app.config import Settings, get_settings
 from app.database import get_conn, money, rate
 from app.db import snapshots
-from app.db.fund_reference import exchange_isins, non_exchange_isins
+from app.db.fund_reference import exchange_isins
 from app.db.index_levels import get_index_levels
 from app.db.prices import (
-    absent_on_or_before,
     held_isins,
     latest_prices,
     missing_prices,
-    price_dates_settled,
 )
 from app.db.repository import (
     get_investor_onboarding_date,
-    list_investor_ids,
     load_transactions,
 )
 from app.engine.benchmark import (
@@ -425,8 +422,9 @@ def performance(
     ``_benchmark`` for the cash-flow replication and why ``SENSEX_TRI`` 400s.
     """
     resolved_as_of = as_of or date.today()
-    transactions = load_transactions(connection, investor_id=investor_id,
-                                     advised_only=advised_only, date_to=resolved_as_of)
+    transactions = load_transactions(
+        connection, investor_id=investor_id, advised_only=advised_only, date_to=resolved_as_of
+    )
     # Owner amendment 2026-10-08: compute on everything that reconciles and NAME what
     # does not (``excluded`` below), never 409 the whole portfolio over one stock.
     cas_gaps = exclusions.missing_cas_history(
@@ -801,9 +799,7 @@ def benchmark_series_endpoint(
     if not rows:
         return {"name": name, "points": []}
 
-    transactions = load_transactions(
-        connection, investor_id=investor_id, advised_only=advised_only
-    )
+    transactions = load_transactions(connection, investor_id=investor_id, advised_only=advised_only)
     # The same scope as the portfolio line it is drawn against.
     transactions, _scoped_out = exclusions.listed_scope(connection, transactions, [], end)
     dates = [row.as_of for row in rows]
@@ -817,8 +813,7 @@ def benchmark_series_endpoint(
         series = benchmark_series(transactions, levels, dates, name)
     except MissingIndexLevelError as exc:
         logger.warning(
-            "benchmark series omitted: no usable %s level for %s "
-            "(investor_id=%s request_id=%s)",
+            "benchmark series omitted: no usable %s level for %s (investor_id=%s request_id=%s)",
             name,
             exc.dates,
             investor_id,
@@ -1127,99 +1122,28 @@ def backfill_prices_cron(
 
 
 def _run_snapshots(connection: Any, start: date, end: date, notifier: Notifier) -> dict[str, Any]:
-    """The rebuild job. The ONLY code path allowed to write ``portfolio_snapshot``
-    (docs/ENGINE_SPEC.md section 8) -- everywhere else, including ``_window_xirr``'s
-    live fallback, only ever reads it.
+    """Value missing points from one prefetched, date-effective range of inputs."""
+    from app.db.snapshot_batch import snapshot_batch
 
-    Two steps, both resumable so a timeout mid-backfill does not mean starting over:
-
-    1. Price step -- mirrors ``refresh_prices``'s body, looped over ``[start, end]``
-       via ``backfill_days`` (which itself clamps to ``NSE_BHAVCOPY_EARLIEST``, the
-       archive's real floor) rather than the ledger's. ``price_dates_settled`` skips
-       dates every wanted security already has an answer for -- a price OR a recorded
-       absence, scoped to dates on/after each security's first transaction. Skipping on
-       "this date has some price row" instead, as it once did, meant a newly-bought
-       security never got any history at all.
-    2. Snapshot step -- for every investor, for BOTH ``advised_only`` values (docs/
-       ENGINE_SPEC.md section 8 / this table's own comment: the two are genuinely
-       different ledgers, not a display filter), compute and upsert one snapshot per
-       trading day the investor could have held something on. Per-investor start is
-       clamped again to that investor's own earliest transaction -- a client onboarded
-       in 2025 gets no rows manufactured for 2024. ``MissingPriceError`` is caught PER
-       DATE, exactly like ``_window_xirr`` does today: logged, skipped, never aborts the
-       rest of the run.
-    """
-    settled = price_dates_settled(connection, start, end)
-    price_results = backfill_days(start, end, already_present=settled, notifier=notifier)
-    # Upsert + absence rules live in one place, shared with the automatic backfill.
-    price_dates_fetched = store_backfilled_days(connection, price_results)
-
-    snapshots_written = 0
-    skipped: list[dict[str, Any]] = []
-    for investor_id in list_investor_ids(connection):
-        for advised_only in (False, True):
-            transactions = load_transactions(
-                connection, investor_id=investor_id, advised_only=advised_only
-            )
-            if not transactions:
-                continue
-            earliest_txn = min(t.txn_date for t in transactions)
-            investor_start = max(start, NSE_BHAVCOPY_EARLIEST, earliest_txn)
-            # This is the LISTED series: units the exchange cannot price (mutual funds,
-            # and fund units whose route is still unresolved) are left out by route,
-            # never through bhavcopy-absence evidence (docs/MF_ETF_PLAN.md s.4). Funds
-            # have their own series (app.funds.series).
-            off_exchange = set(non_exchange_isins(connection, {t.isin for t in transactions}))
-            if investor_start > end:
-                continue
-
-            already_snapped = snapshots.snapshot_dates_present(
-                connection, investor_id, advised_only, investor_start, end
-            )
-            for on_date in trading_days(investor_start, end):
-                if on_date in already_snapped:
-                    continue
+    written = fetched = 0
+    skipped = []
+    points = []
+    with snapshot_batch(connection, start, end) as batch:
+        results = backfill_days(start, end, already_present=batch.settled, notifier=notifier)
+        fetched = store_backfilled_days(connection, results)
+        if fetched:
+            batch.prices_changed()
+        days = trading_days(start, end)
+        batch.prefetch({scope for on in days for scope in batch.missing_scopes(on)})
+        for on in days:
+            for investor_id, advised_only in batch.missing_scopes(on):
                 try:
-                    day_transactions = load_transactions(
-                        connection, investor_id=investor_id, advised_only=advised_only,
-                        date_to=on_date,
-                    )
-                    reconciled, _skipped = compute_holdings_partitioned(day_transactions, on_date)
-                    isins = [h.isin for h in reconciled]
-                    day_prices = latest_prices(connection, isins, on_date)
-                    # A holding the ARCHIVE has already answered about without carrying it
-                    # will never be priced by any future fetch -- a retired ISIN after a
-                    # reorganisation. Excluding those is what lets the rest of the
-                    # portfolio be snapshotted at all; an ISIN merely awaiting a fetch is
-                    # NOT in here, so it still raises below and the date is retried next
-                    # run. compute_snapshot cannot make this call itself: only
-                    # price_absent distinguishes the two, and the engine may not read a
-                    # database. See app.db.prices.absent_on_or_before.
-                    unpriceable = absent_on_or_before(
-                        connection,
-                        [i for i in isins if i not in day_prices and i not in off_exchange],
-                        on_date,
-                    )
-                    snap = compute_snapshot(
-                        day_transactions,
-                        day_prices,
-                        on_date,
-                        exclude_isins=unpriceable | (off_exchange & set(isins)),
-                    )
+                    snap = batch.build(investor_id, advised_only, on)
                 except (MissingPriceError, NegativeHoldingError) as exc:
-                    # NO exc_info HERE, deliberately. This is an expected, handled skip on
-                    # a loop that runs once per trading day per investor per advised_only
-                    # flag -- a single unpriceable security used to emit a full traceback
-                    # for every one of those, burying a multi-year backfill under hundreds
-                    # of identical stack dumps that named no cause the message did not
-                    # already carry. The message names the ISINs, the date and the
-                    # investor, which is everything actionable; the traceback only ever
-                    # said "raised by value_holdings", which is where it always comes from.
-                    # The full list also comes back in the response as skipped_missing_price.
                     logger.warning(
                         "snapshot omitted: %s on/before %s (investor_id=%s advised_only=%s)",
                         exc,
-                        on_date,
+                        on,
                         investor_id,
                         advised_only,
                     )
@@ -1227,17 +1151,18 @@ def _run_snapshots(connection: Any, start: date, end: date, notifier: Notifier) 
                         {
                             "investor_id": investor_id,
                             "advised_only": advised_only,
-                            "as_of": on_date,
+                            "as_of": on,
                             "isins": getattr(exc, "isins", None) or [getattr(exc, "isin", None)],
                         }
                     )
                     continue
-                snapshots.upsert_snapshot(connection, investor_id, advised_only, snap)
-                snapshots_written += 1
-
+                points.append((investor_id, advised_only, snap))
+                batch.saved(investor_id, advised_only, on)
+                written += 1
+        snapshots.upsert_snapshots(connection, points)
     return {
-        "snapshots_written": snapshots_written,
-        "price_dates_fetched": price_dates_fetched,
+        "snapshots_written": written,
+        "price_dates_fetched": fetched,
         "skipped_missing_price": skipped,
     }
 
@@ -1316,6 +1241,9 @@ def last_closed_trading_day(now: datetime | None = None) -> date:
     return local.date() if local.time() >= _BHAVCOPY_READY else local.date() - timedelta(days=1)
 
 
+SNAPSHOT_BATCH_DAYS = 32
+
+
 def catch_up_snapshots(
     connection: Any,
     notifier: Notifier,
@@ -1336,10 +1264,11 @@ def catch_up_snapshots(
     One unbounded call for a fresh investor downloads every missing bhavcopy back to
     the ledger's first supported trading date before saving anything, so on Vercel it
     was killed at 300 s,
-    saved nothing, and the next run started over. With a budget the range is worked one
-    day at a time, oldest first, each day committed before the next begins; the run stops
-    claiming days once the budget is spent and ``complete`` says whether it reached the
-    target. The next run resumes after the newest stored row. Each day is computed by the
+    saved nothing, and the next run started over. With a budget the range is worked
+    oldest first. Cached dates share inputs and are committed in bounded chunks;
+    unsettled source dates are fetched and committed individually. The run stops
+    claiming chunks once the budget is spent and ``complete`` says whether it reached
+    the target. The next run resumes after the newest stored row. Each day is computed by the
     same ``_run_snapshots`` either way, so the stored values do not depend on the budget.
     """
     target = last_closed_trading_day(now)
@@ -1351,28 +1280,48 @@ def catch_up_snapshots(
     start = _catch_up_start(connection, target)
     if start is None:
         return {
-            "snapshots_written": 0, "price_dates_fetched": 0, "skipped_missing_price": [],
-            "complete": True, "holes_queued": holes,
+            "snapshots_written": 0,
+            "price_dates_fetched": 0,
+            "skipped_missing_price": [],
+            "complete": True,
+            "holes_queued": holes,
         }
     if time_budget_seconds is None:
         result = _run_snapshots(connection, start, target, notifier)
         connection.commit()
         return {**result, "complete": True}
 
+    from app.db.snapshot_batch import snapshot_batch
+
     began = clock()
-    totals: dict[str, Any] = {
-        "snapshots_written": 0, "price_dates_fetched": 0, "skipped_missing_price": [],
+
+    totals = {
+        "snapshots_written": 0,
+        "price_dates_fetched": 0,
+        "skipped_missing_price": [],
         "complete": True,
     }
-    for day in trading_days(start, target):
-        if clock() - began > time_budget_seconds:
-            totals["complete"] = False
-            break
-        result = _run_snapshots(connection, day, day, notifier)
-        connection.commit()
-        totals["snapshots_written"] += result["snapshots_written"]
-        totals["price_dates_fetched"] += result["price_dates_fetched"]
-        totals["skipped_missing_price"].extend(result["skipped_missing_price"])
+    days = trading_days(start, target)
+    with snapshot_batch(connection, start, target) as batch:
+        offset = 0
+        while offset < len(days):
+            if clock() - began > time_budget_seconds:
+                totals["complete"] = False
+                break
+            # Never start a multi-day download before saving a checkpoint. Cached
+            # history is valued/written in ranges; an unsettled archive date is one
+            # bounded source item and is committed before attempting the next.
+            stop = offset + 1
+            while stop < min(len(days), offset + SNAPSHOT_BATCH_DAYS) and all(
+                day in batch.settled for day in days[offset : stop + 1]
+            ):
+                stop += 1
+            result = _run_snapshots(connection, days[offset], days[stop - 1], notifier)
+            connection.commit()
+            for field in ("snapshots_written", "price_dates_fetched"):
+                totals[field] += result[field]
+            totals["skipped_missing_price"].extend(result["skipped_missing_price"])
+            offset = stop
     return totals
 
 
@@ -1443,8 +1392,12 @@ def enqueue_interior_holes(connection: Any, limit: int = HOLE_REPAIR_BATCH) -> i
                 (
                     f"{investor_id}:{on}:{advised}",
                     json.dumps(
-                        {"investor_id": investor_id, "on": on.isoformat(),
-                         "advised_only": advised, "repair": True}
+                        {
+                            "investor_id": investor_id,
+                            "on": on.isoformat(),
+                            "advised_only": advised,
+                            "repair": True,
+                        }
                     ),
                     HOLE_RETRY_INTERVAL,
                 ),

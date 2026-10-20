@@ -39,8 +39,7 @@ logger = logging.getLogger("security_alias")
 _IDENTITY_PREFIX = 7
 
 _SELECT_COLUMNS = (
-    "old_isin, current_isin, effective_date, source, source_url, "
-    "verification::text, notes"
+    "old_isin, current_isin, effective_date, source, source_url, verification::text, notes"
 )
 
 
@@ -192,10 +191,15 @@ def verified_map(conn: Any, as_of: date | None = None) -> dict[str, str]:
     lookup per row and can never see a half-resolved identity. DRAFT and DISPUTED rows
     are absent entirely -- that is what "inert" means.
     """
+    return resolve_alias_map(list_aliases(conn, verification=Verification.VERIFIED), as_of)
+
+
+def resolve_alias_map(aliases: list[SecurityAlias], as_of: date | None = None) -> dict[str, str]:
+    """The same date-effective identity map for a prefetched rebuild batch."""
     direct = {
         a.old_isin: a.current_isin
-        for a in list_aliases(conn, verification=Verification.VERIFIED)
-        if a.effective_date <= (as_of or date.today())
+        for a in aliases
+        if a.verification == Verification.VERIFIED and a.effective_date <= (as_of or date.today())
     }
     resolved: dict[str, str] = {}
     for old in direct:
@@ -290,18 +294,14 @@ def reconcile_after_alias(
     from app.engine.types import ACQUIRING_TYPES, DISPOSING_TYPES, FREE_SHARE_TYPES, ZERO
 
     raw = load_transactions(conn, account_id=account_id, apply_aliases=False)
-    before_lots = {
-        (lot.isin, lot.open_date) for lot in _safe_lots(compute_lots, raw, as_of)
-    }
+    before_lots = {(lot.isin, lot.open_date) for lot in _safe_lots(compute_lots, raw, as_of)}
     before_holdings, before_skipped = compute_holdings_partitioned(raw, as_of)
     before_pool = sum(
         (h.invested for h in before_holdings if h.isin in (old_isin, current_isin)), ZERO
     )
     before_broken = {s.isin for s in before_skipped}
 
-    aliased = [
-        t if t.isin != old_isin else _with_isin(t, current_isin) for t in raw
-    ]
+    aliased = [t if t.isin != old_isin else _with_isin(t, current_isin) for t in raw]
     after_holdings, after_skipped = compute_holdings_partitioned(aliased, as_of)
     after_pool = sum((h.invested for h in after_holdings if h.isin == current_isin), ZERO)
     after_broken = {s.isin for s in after_skipped}
@@ -325,13 +325,17 @@ def reconcile_after_alias(
         )
 
     after_dates = {
-        lot.open_date for lot in _safe_lots(compute_lots, aliased, as_of)
+        lot.open_date
+        for lot in _safe_lots(compute_lots, aliased, as_of)
         if lot.isin == current_isin
     }
     known_dates = {d for (isin, d) in before_lots if isin in (old_isin, current_isin)}
     known_dates.update(
-        t.txn_date for t in raw if t.isin in (old_isin, current_isin)
-        and t.txn_type in ACQUIRING_TYPES | FREE_SHARE_TYPES and t.txn_date <= as_of
+        t.txn_date
+        for t in raw
+        if t.isin in (old_isin, current_isin)
+        and t.txn_type in ACQUIRING_TYPES | FREE_SHARE_TYPES
+        and t.txn_date <= as_of
     )
     invented = after_dates - known_dates
     if invented:
@@ -345,12 +349,12 @@ def reconcile_after_alias(
     # arithmetic, not a cost change -- demanding exact equality would fail every real
     # alias. Anything LARGER than Rule B's own precision allows is a genuine move and
     # still fails.
-    merged_quantity = sum(
-        (h.quantity for h in after_holdings if h.isin == current_isin), ZERO
-    )
+    merged_quantity = sum((h.quantity for h in after_holdings if h.isin == current_isin), ZERO)
     tolerance = AVG_COST_PLACES * merged_quantity
-    disposals = any(t.isin in (old_isin, current_isin) and t.txn_type in DISPOSING_TYPES
-                    and t.txn_date <= as_of for t in raw)
+    disposals = any(
+        t.isin in (old_isin, current_isin) and t.txn_type in DISPOSING_TYPES and t.txn_date <= as_of
+        for t in raw
+    )
     # Joining identifier histories can legitimately repair a previously unmatched sale
     # or change the average cost assigned to it. Compare open pools only without sales.
     # Likewise when either side was broken BEFORE the merge: a broken holding is
@@ -360,8 +364,11 @@ def reconcile_after_alias(
     # checks that matter here still ran above: reconciles after, breaks nothing else,
     # invents no acquisition date.
     repaired = bool({old_isin, current_isin} & before_broken)
-    if not failures and not disposals and not repaired and (
-        abs(before_pool - after_pool) > tolerance
+    if (
+        not failures
+        and not disposals
+        and not repaired
+        and (abs(before_pool - after_pool) > tolerance)
     ):
         failures.append(f"cost pool moved: {before_pool} -> {after_pool}")
 
@@ -448,16 +455,18 @@ def promote_draft_aliases(
                 logger.warning(
                     "reconcile_after_alias raised for %s -> %s, account %s (%s) -- "
                     "leaving DRAFT rather than quarantining on an unrelated failure",
-                    alias.old_isin, alias.current_isin, account_id, label, exc_info=True,
+                    alias.old_isin,
+                    alias.current_isin,
+                    account_id,
+                    label,
+                    exc_info=True,
                 )
                 raised = True
                 continue
             if not result.ok:
                 # Both the human-readable label and the exact UUID: label alone is not
                 # guaranteed unique (an investor can hold two accounts at one broker).
-                failures.append(
-                    f"{label} (account {account_id}): {'; '.join(result.failures)}"
-                )
+                failures.append(f"{label} (account {account_id}): {'; '.join(result.failures)}")
 
         if raised:
             # An exception on ANY account makes the round's picture incomplete -- even
@@ -486,7 +495,9 @@ def promote_draft_aliases(
             )
 
     return PromotionSummary(
-        verified=verified, quarantined=quarantined, inconclusive=inconclusive,
+        verified=verified,
+        quarantined=quarantined,
+        inconclusive=inconclusive,
         details=tuple(details),
     )
 
@@ -584,13 +595,19 @@ def detect_candidates(conn: Any, investor_id: str | None = None) -> list[AliasCa
                 if dangling <= ZERO:
                     continue
                 disposed = sum(
-                    (t.quantity for t in transactions
-                     if t.isin == current_isin and t.txn_type in DISPOSING_TYPES),
+                    (
+                        t.quantity
+                        for t in transactions
+                        if t.isin == current_isin and t.txn_type in DISPOSING_TYPES
+                    ),
                     ZERO,
                 )
                 acquired = sum(
-                    (t.quantity for t in transactions
-                     if t.isin == current_isin and t.txn_type not in DISPOSING_TYPES),
+                    (
+                        t.quantity
+                        for t in transactions
+                        if t.isin == current_isin and t.txn_type not in DISPOSING_TYPES
+                    ),
                     ZERO,
                 )
                 unexplained = disposed - acquired
@@ -603,9 +620,10 @@ def detect_candidates(conn: Any, investor_id: str | None = None) -> list[AliasCa
                         f"disposes {unexplained} it never acquired; same issuer. "
                         "SUSPECTED identifier change -- unverified"
                     )
-                elif held.get(current_isin, ZERO) > ZERO and last_traded[old_isin] < last_traded[
-                    current_isin
-                ]:
+                elif (
+                    held.get(current_isin, ZERO) > ZERO
+                    and last_traded[old_isin] < last_traded[current_isin]
+                ):
                     # Direction matters and the quiet shape is symmetric, so it would
                     # otherwise report A->B and B->A and leave a reviewer guessing. The
                     # retired identifier is the one that stopped trading first.
