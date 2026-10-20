@@ -48,6 +48,7 @@ from app.market_assistant.model import ModelUnavailable, SelectorClient
 from app.market_assistant.open_research import (
     ANSWER_PROMPT,
     MAX_DISPLAY_WORDS,
+    PLAN_REPAIR_PROMPT,
     PLANNER_PROMPT,
     REWRITE_PROMPT,
     ModelOutputRejected,
@@ -315,16 +316,25 @@ def _excerpt(candidate: Candidate) -> Excerpt:
 def _open(admission: Admission, deps: SearchDeps) -> Reply:
     """Plan, search approved sources, rank, answer with checked citations."""
     question = admission.open_text or ""
-    if deps.model_budget is None or not deps.model_budget.reserve():
-        return _open_reply(Outcome.CLARIFY, MSG_OPEN_BUDGET, admission, reason_code="budget")
-    try:
-        plan = parse_plan(
-            deps.selector.complete(
-                PLANNER_PROMPT, planner_content(question, deps.today(), admission.earlier)
+    plan = None
+    repaired_plan = False
+    for prompt in (PLANNER_PROMPT, PLAN_REPAIR_PROMPT):
+        if deps.model_budget is None or not deps.model_budget.reserve():
+            return _open_reply(Outcome.CLARIFY, MSG_OPEN_BUDGET, admission, reason_code="budget")
+        try:
+            plan = parse_plan(
+                deps.selector.complete(
+                    prompt, planner_content(question, deps.today(), admission.earlier)
+                ), question=question, earlier=admission.earlier,
             )
-        )
-    except (ModelUnavailable, ModelOutputRejected) as exc:
-        logger.info("market_assistant planner failed: %s", getattr(exc, "reason", exc))
+            repaired_plan = prompt == PLAN_REPAIR_PROMPT
+            break
+        except ModelUnavailable as exc:
+            logger.info("market_assistant planner unavailable: %s", exc)
+            break  # provider errors are never retried
+        except ModelOutputRejected as exc:
+            logger.info("market_assistant planner rejected: %s", exc.reason)
+    if plan is None:
         return _open_reply(Outcome.CLARIFY, MSG_PLANNER_UNAVAILABLE, admission,
                            reason_code="planner_unavailable")
     if not plan.in_scope:
@@ -400,7 +410,7 @@ def _open(admission: Admission, deps: SearchDeps) -> Reply:
     # article facts. Ranking itself still receives only the planner's public queries.
     candidates = answer_candidates(
         [Candidate(f"c{n}", p.doc, p.start, p.end) for n, p in enumerate(order)],
-        spec.query, limit=32,
+        question + " " + spec.query, limit=32,
     )
     if market_overview and re.search(r"\b(?:today|now|right now)\b", folded):
         candidates = [c for c in candidates if not re.search(
@@ -425,7 +435,8 @@ def _open(admission: Admission, deps: SearchDeps) -> Reply:
     cited: list[Candidate] = []
     # One short rewrite is allowed for an invalid draft, within the same hard budget.
     # A provider error is never retried, and the rewrite has the same evidence checks.
-    for prompt in (ANSWER_PROMPT, REWRITE_PROMPT):
+    answer_prompts = (ANSWER_PROMPT,) if repaired_plan else (ANSWER_PROMPT, REWRITE_PROMPT)
+    for prompt in answer_prompts:
         if not deps.model_budget.reserve():
             logger.info("market_assistant answer skipped: daily model limit reached")
             break

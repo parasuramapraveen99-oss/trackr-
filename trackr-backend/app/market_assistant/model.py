@@ -27,7 +27,7 @@ from typing import Any
 
 from app.market_assistant.admission import MAX_HISTORY, Outcome, admit_text, clean_open_text
 from app.market_assistant.evidence import is_safe_passage
-from app.market_assistant.open_research import ANSWER_PROMPT, PLANNER_PROMPT, REWRITE_PROMPT
+from app.market_assistant.open_research import ANSWER_PROMPT, PLANNER_PROMPTS, REWRITE_PROMPT
 from app.market_assistant.open_research import REVIEWED_PROMPTS as OPEN_PROMPTS
 from app.market_assistant.selection import SYSTEM_PROMPT
 
@@ -130,7 +130,7 @@ def check_outbound(
         {"role": "user", "content": expected_user},
     ]:
         raise OutboundPolicyError("messages are not the reviewed prompt and built content")
-    if expected_system in (PLANNER_PROMPT, ANSWER_PROMPT, REWRITE_PROMPT):
+    if expected_system in OPEN_PROMPTS:
         _check_public_content(expected_system, expected_user)
     if parsed["max_tokens"] != PROMPT_LIMITS[expected_system] or parsed["temperature"] != 0:
         raise OutboundPolicyError("output bounds changed")
@@ -154,7 +154,7 @@ def _check_public_content(system: str, content: str) -> None:
         raise OutboundPolicyError("public content is not JSON") from None
     keys = (
         {"question", "earlier", "today"}
-        if system == PLANNER_PROMPT
+        if system in PLANNER_PROMPTS
         else {"question", "earlier", "advice", "passages"}
     )
     if not isinstance(payload, dict) or set(payload) != keys:
@@ -166,7 +166,7 @@ def _check_public_content(system: str, content: str) -> None:
     if (not isinstance(earlier, list) or len(earlier) > MAX_HISTORY
             or not all(_admitted(text) for text in earlier)):
         raise OutboundPolicyError("earlier question failed final privacy admission")
-    if system == PLANNER_PROMPT:
+    if system in PLANNER_PROMPTS:
         try:
             date.fromisoformat(payload["today"])
         except (TypeError, ValueError):

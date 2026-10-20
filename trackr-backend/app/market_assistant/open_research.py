@@ -177,7 +177,19 @@ Do not add examples, comparisons or numbers that the passage does not state.
 The passages have already been shortened. Copy the chosen passage's whole text into
 support, then explain that one fact in simpler words. Prefer fewer than 12 words."""
 
-REVIEWED_PROMPTS = {PLANNER_PROMPT: PLAN_MAX_TOKENS, ANSWER_PROMPT: ANSWER_MAX_TOKENS,
+PLAN_REPAIR_PROMPT = PLANNER_PROMPT + """
+
+CHECKED PLAN: Your previous plan did not pass validation. Return one corrected JSON
+object using the same schema. Do not answer the question or state financial facts.
+If market activity is ambiguous between volume, price changes and opening hours,
+return clarify=true, queries=[], and one short question asking which meaning is intended.
+Do not turn an ambiguous activity question into general market news.
+For a clarification, use fewer than 20 words and end with a question mark.
+Do not ask for personal information. Use searches for answerable financial questions."""
+
+PLANNER_PROMPTS = frozenset({PLANNER_PROMPT, PLAN_REPAIR_PROMPT})
+REVIEWED_PROMPTS = {PLANNER_PROMPT: PLAN_MAX_TOKENS, PLAN_REPAIR_PROMPT: PLAN_MAX_TOKENS,
+                    ANSWER_PROMPT: ANSWER_MAX_TOKENS,
                     REWRITE_PROMPT: ANSWER_MAX_TOKENS}
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.I)
@@ -192,6 +204,12 @@ _ADVICE_OUT = re.compile(
     re.I,
 )
 _UNSAFE = re.compile(r"https?://|www\.|<[a-z/!]|\]\(|javascript:", re.I)
+_AMBIGUOUS_ACTIVITY = re.compile(
+    r"^(?:(?:why|how)\s+)?(?:(?:is|are|was|were)\s+)?"
+    r"(?:the\s+)?(?:(?:indian|stock)\s+)*(?:markets?|trading)\s+"
+    r"(?:(?:so|very)\s+)?(?:busy|active|quiet)"
+    r"(?:\s+(?:today|now|right\s+now|this\s+week))?\s*[?!.]*$", re.I,
+)
 
 
 class ModelOutputRejected(Exception):
@@ -236,7 +254,7 @@ def planner_content(question: str, today: date, earlier: tuple[str, ...] = ()) -
     )
 
 
-def parse_plan(content: str) -> Plan:
+def parse_plan(content: str, *, question: str = "", earlier: tuple[str, ...] = ()) -> Plan:
     parsed = _json(content)
     in_scope = parsed.get("in_scope")
     queries = parsed.get("queries")
@@ -249,10 +267,13 @@ def parse_plan(content: str) -> Plan:
         if not isinstance(reply, str):
             raise ModelOutputRejected("missing_planner_reply")
         reply = re.sub(r"\s+", " ", reply).strip()
+        # Public index identifiers are names, not unsupported numerical claims.
+        # Every remaining digit and all the existing privacy/advice checks still apply.
+        numbered_reply = re.sub(r"\bNifty\s+(?:50|100|200|500)\b", "Nifty", reply, flags=re.I)
         if (not reply or len(reply.split()) > 35 or not is_plain_answer(reply)
                 or _UNSAFE.search(reply) or _ADVICE_OUT.search(reply)
                 or not is_safe_passage(reply)
-                or re.search(r"\[\s*\d|\d", reply)
+                or re.search(r"\[\s*\d|\d", numbered_reply)
                 or not is_clean_query(reply)
                 or (in_scope and not reply.endswith('?'))):
             raise ModelOutputRejected("unsafe_planner_reply")
@@ -269,6 +290,8 @@ def parse_plan(content: str) -> Plan:
                 kept.append(q)
     if not kept:
         raise ModelOutputRejected("no_clean_query")
+    if not earlier and _AMBIGUOUS_ACTIVITY.fullmatch(question.strip()):
+        raise ModelOutputRejected("ambiguous_market_activity")
     return Plan(True, tuple(kept), max_age_days=age)
 
 
@@ -330,6 +353,10 @@ def answer_candidates(
                 score = len(overlap) * 10
                 if definition and re.search(r"\b(?:is|are|means|refers)\b", text, re.I):
                     score += 5
+                    if re.search(
+                        r"\b(?:is|are)\s+(?:a|an)\b|\b(?:means|refers\s+to)\b", text, re.I
+                    ):
+                        score += 30
                 scored.append((score, span))
     scored.sort(key=lambda item: -item[0])
     return [candidate for _, candidate in scored[:limit]]
