@@ -95,15 +95,49 @@ class ZerodhaTradebookAdapter:
                 notes=notes,
             )
 
-        reader = csv.DictReader(
-            io.StringIO("\n".join(lines[header_idx:]) + "\n"), delimiter=delimiter
+        reader = csv.reader(
+            io.StringIO("\n".join(lines[header_idx:]) + "\n"),
+            delimiter=delimiter,
+            strict=True,
         )
+        try:
+            headers = [_norm_key(cell) for cell in next(reader)]
+        except csv.Error as exc:
+            return ParseResult(
+                rejections=[Rejection(header_idx + 1, f"invalid CSV header: {exc}")],
+                notes=notes,
+            )
+        named_headers = [key for key in headers if key]
+        if len(named_headers) != len(set(named_headers)):
+            return ParseResult(
+                rejections=[
+                    Rejection(header_idx + 1, "duplicate column names in tradebook header")
+                ],
+                notes=notes,
+            )
 
-        # The header sits on physical line ``header_idx + 1``, so data starts at
-        # ``header_idx + 2`` -- which is what a person sees when they open the file to
-        # find the row a rejection names.
-        for row_number, raw in enumerate(reader, start=header_idx + 2):
-            norm_raw = {_norm_key(k): v for k, v in raw.items() if k is not None}
+        while True:
+            # csv.reader counts physical lines, including blanks and quoted newlines.
+            # enumerate(DictReader) counts records and points users to the wrong line.
+            row_number = header_idx + reader.line_num + 1
+            try:
+                cells = next(reader)
+            except StopIteration:
+                break
+            except csv.Error as exc:
+                rejections.append(Rejection(row_number, f"invalid CSV row: {exc}"))
+                continue
+            if not any(cell.strip() for cell in cells):
+                continue
+            if len(cells) != len(headers):
+                rejections.append(Rejection(
+                    row_number,
+                    f"expected {len(headers)} columns, got {len(cells)}",
+                    {"cells": cells},
+                ))
+                continue
+            # Unnamed padding columns are common after a spreadsheet round-trip.
+            norm_raw = {key: value for key, value in zip(headers, cells, strict=True) if key}
             parsed = self._parse_row(norm_raw, account_id, row_number)
             if isinstance(parsed, Rejection):
                 rejections.append(parsed)
@@ -147,6 +181,8 @@ class ZerodhaTradebookAdapter:
                 f"unparseable quantity/price: {raw.get('quantity')!r}/{raw.get('price')!r}"
             )
 
+        if not quantity.is_finite() or not price.is_finite():
+            return reject(f"quantity/price must be finite, got {quantity}/{price}")
         if quantity <= 0:
             return reject(f"quantity must be positive, got {quantity}")
         if price < 0:
