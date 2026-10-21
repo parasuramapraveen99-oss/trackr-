@@ -23,6 +23,8 @@ const ALLOWED = ["pdf", "csv", "xlsx"] as const;
  * sit in a browser for a minute before the server got a chance to say no. */
 const MAX_BYTES = 25 * 1024 * 1024;
 
+const CAS_TEMPLATE = "CAS Holdings\nStatement Date,YYYY-MM-DD\nBroker,\nTotal Securities,\nPortfolio Value,\nPAN,\nISIN,Quantity,Market Price,Market Value\n";
+
 interface Rejected {
   filename: string;
   reason: string;
@@ -350,7 +352,14 @@ export function FileUploadStep({
               <p>or drag and drop files here</p>
               <input ref={inputRef} type="file" disabled={uploading} aria-label="Upload statements" multiple accept=".pdf,.csv,.xlsx" onChange={(e) => void upload(Array.from(e.target.files ?? []))} style={{ display: "none" }} />
             </div>
-            <span className={visual.formatHint}>PDF, CSV or XLSX · Up to 25 MB per file<br />Select several files in one go. We identify each one.</span>
+            <span className={visual.formatHint}>Tradebooks: CSV or XLSX · Contract notes: PDF, CSV or XLSX<br />CAS: PDF or a holdings CSV/XLSX · Up to 25 MB per file<br />Select several files in one go. We identify each one.</span>
+            <details style={{ font: "var(--type-body-sm)", color: "var(--text-secondary)", marginTop: 10 }}>
+              <summary style={{ cursor: "pointer" }}>CAS spreadsheet format</summary>
+              <p>Use one broker and one holdings table per file. Include the statement date, security count and portfolio total, followed by ISIN, quantity, market price and market value for every holding. These balances are checked against your trade history.</p>
+              <p>For mutual fund folios and transaction details, upload the original CAS PDF. Contract-note CSVs must include their charges and totals.</p>
+              <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(CAS_TEMPLATE)}`} download="cas-holdings-template.csv">Download the holdings template</a>
+              <p>Fill in the template, using YYYY-MM-DD for the statement date. PAN is optional. Save as CSV or XLSX.</p>
+            </details>
           </div>
         </div>
         {!compact && <div className={visual.journey}><span><b>1</b> Choose files</span><span>→</span><span><b>2</b> We read them</span><span>→</span><span><b>3</b> Review your imports</span></div>}
@@ -392,7 +401,7 @@ export function FileUploadStep({
               filename={outcome.filename}
               headline={describe(outcome)}
               detail={outcome.notes.join(" ") || null}
-              collapsibleDetail={outcome.document === "cas_pdf" && outcome.rejected === 0}
+              collapsibleDetail={outcome.document.startsWith("cas_") && outcome.rejected === 0}
             />
           ))}
           {rejected.map((outcome) => (
@@ -573,11 +582,11 @@ function guessSource(filename: string, broker: string, sources: FilePasswordOut[
 /** What an accepted file turned out to be, said in the person's words rather than the
  * adapter's. `document` is the server's classification, so this never guesses. */
 function describe(outcome: FileOutcomeOut): string {
-  if (outcome.document === "cas_pdf" && outcome.rejected === 0) return "Processed successfully";
+  if (outcome.document.startsWith("cas_") && outcome.rejected === 0) return "Processed successfully";
   const kind =
-    outcome.document === "tradebook_csv"
+    outcome.document === "tradebook_csv" || outcome.document === "tradebook_xlsx"
       ? "Tradebook"
-      : outcome.document === "contract_note_pdf" || outcome.document === "contract_note_xlsx"
+      : outcome.document.startsWith("contract_note_")
         ? "Contract note"
         : "File";
   if (outcome.rejected > 0) return `${kind}: ${outcome.parsed.toLocaleString("en-IN")} trade${outcome.parsed === 1 ? "" : "s"} found · ${outcome.rejected.toLocaleString("en-IN")} row${outcome.rejected === 1 ? " needs" : "s need"} review`;

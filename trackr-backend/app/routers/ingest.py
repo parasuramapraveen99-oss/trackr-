@@ -40,13 +40,16 @@ from app.db.identity import IdentityMismatchError
 from app.db.imports import DuplicateUploadError
 from app.ingest import file_validation, webhook, webhook_providers
 from app.ingest.cas_pdf import CasPdfAdapter, CasStatementError
+from app.ingest.cas_table import CAS_ADAPTER_NAMES, CAS_TABLE_ADAPTERS
 from app.ingest.file_validation import FileVerdict
 from app.ingest.llm_adapter import LlmDocumentAdapter
 from app.ingest.webhook_providers import WebhookNotConfiguredError
 from app.ingest.zerodha_contract_note import ZerodhaContractNoteAdapter
+from app.ingest.zerodha_contract_note_csv import ZerodhaContractNoteCsvAdapter
 from app.ingest.zerodha_contract_note_xlsx import ZerodhaContractNoteXlsxAdapter
 from app.ingest.zerodha_funds_statement import ZerodhaFundsStatementAdapter
 from app.ingest.zerodha_tradebook import ZerodhaTradebookAdapter
+from app.ingest.zerodha_tradebook_xlsx import ZerodhaTradebookXlsxAdapter
 from app.schemas.ingest import (
     BatchSummaryOut,
     DiscardRequest,
@@ -63,10 +66,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
 
-#: adapter query param -> factory. Only "zerodha_tradebook" has a real parser; the
-#: openapi.yaml contract also lists "generic_csv", which does not exist yet -- CLAUDE.md:
-#: never invent a parser to fill a contract slot.
-_CSV_ADAPTERS = {"zerodha_tradebook": ZerodhaTradebookAdapter}
+#: Structured CSV adapters. Contract notes must include their charges and note totals.
+_CSV_ADAPTERS = {
+    "zerodha_tradebook": ZerodhaTradebookAdapter,
+    "zerodha_contract_note_csv": ZerodhaContractNoteCsvAdapter,
+}
 
 #: adapter query param -> factory for the XLSX upload path. Contract notes exported
 #: from Console as a spreadsheet -- see app.ingest.zerodha_contract_note_xlsx's module
@@ -74,6 +78,7 @@ _CSV_ADAPTERS = {"zerodha_tradebook": ZerodhaTradebookAdapter}
 #: something Console does when the file is downloaded, not a control in this app.
 _XLSX_ADAPTERS = {
     "zerodha_contract_note_xlsx": ZerodhaContractNoteXlsxAdapter,
+    "zerodha_tradebook_xlsx": ZerodhaTradebookXlsxAdapter,
     # The Console P&L export's "Other Debits and Credits" tab -- the only
     # routinely available document carrying EVIDENCE OF PAYMENT for a dividend
     # rather than a declaration. Both NSE and yfinance stop at "declared per
@@ -125,6 +130,8 @@ def _build_adapter(
         return _XLSX_ADAPTERS[name]()
     if name in _PDF_ADAPTERS:
         return _PDF_ADAPTERS[name](password=pdf_password)
+    if name in CAS_TABLE_ADAPTERS:
+        return CAS_TABLE_ADAPTERS[name](broker_accounts=broker_accounts)
     if name == CasPdfAdapter.name:
         # HOLDINGS AND DISCOVERY ONLY. A CAS carries no price -- a depository records
         # securities movement, not trades -- so it can never produce a Transaction, and
@@ -145,12 +152,18 @@ def _build_adapter(
 #: stage_batch's own docstring documents.
 _DOCTYPES: dict[str, tuple[str, str]] = {
     "zerodha_tradebook": ("TRADEBOOK", "text/csv"),
+    "zerodha_tradebook_xlsx": (
+        "TRADEBOOK", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ),
+    "zerodha_contract_note_csv": ("CONTRACT_NOTE", "text/csv"),
     "zerodha_contract_note_xlsx": (
         "CONTRACT_NOTE",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ),
     "zerodha_contract_note": ("CONTRACT_NOTE", "application/pdf"),
     CasPdfAdapter.name: ("CAS", "application/pdf"),
+    "cas_csv": ("CAS", "text/csv"),
+    "cas_xlsx": ("CAS", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     # Documents no deterministic parser claimed. The doctype is deliberately generic:
     # what this file IS was never established -- only that it carried a trade table.
     LlmDocumentAdapter.name: ("DOCUMENT", "application/pdf"),
@@ -338,6 +351,7 @@ async def ingest_csv(
 
     store = get_store(settings)
     results = []
+    doctype, content_type = _DOCTYPES[adapter]
     for filename, content in uploads:
         try:
             results.append(
@@ -351,6 +365,8 @@ async def ingest_csv(
                     store=store,
                     investor_code=investor_code,
                     actor_uid=str(current_user["id"]),
+                    doctype=doctype,
+                    content_type=content_type,
                 )
             )
         except DuplicateUploadError as exc:
@@ -660,7 +676,7 @@ async def ingest_files(
             # "already imported" about trades that are not in the ledger.
             existing = imports.batch_summary(conn, exc.batch_id)
             # CAS balances were recorded during staging; they never need trade promotion.
-            is_cas = verdict.adapter == CasPdfAdapter.name
+            is_cas = verdict.adapter in CAS_ADAPTER_NAMES
             pending = (
                 not is_cas
                 and existing is not None
@@ -726,7 +742,7 @@ async def ingest_files(
                 f"{awaiting} F&O trade(s) are waiting for the exchange's F&O contract list "
                 "for their day; it is being fetched and they will resolve automatically."
             )
-        elif result["parsed"] == 0 and verdict.adapter != CasPdfAdapter.name:
+        elif result["parsed"] == 0 and verdict.adapter not in CAS_ADAPTER_NAMES:
             # The file was the right kind and still yielded nothing. That is a real
             # answer -- an empty date range, or a note whose every row was rejected --
             # and it must not read as success on the screen. Not for a CAS: it never

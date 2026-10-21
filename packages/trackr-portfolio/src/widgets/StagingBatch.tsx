@@ -47,7 +47,7 @@ export function StagingBatch({ stageResult, onResolved }: { stageResult: StageRe
   }
 
   const b = review.data;
-  const isCas = b?.adapter === "cas_pdf";
+  const isCas = b?.adapter.startsWith("cas_") ?? false;
   const alreadyInLedger = !!b && b.staged > 0 && b.will_skip_as_duplicate === b.staged;
   const status = b?.status === "PROMOTED" ? "In ledger"
     : b?.status === "DISCARDED" ? "Discarded"

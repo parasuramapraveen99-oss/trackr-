@@ -30,12 +30,15 @@ person who picked the wrong file deserves a sentence, not a traceback.
 
 from __future__ import annotations
 
+import csv
 import io
 import re
 import zipfile
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.ingest.cas_table import holdings_header
+from app.ingest.tabular import csv_rows, workbook_sheets
 from app.ingest.zerodha_contract_note import CONTRACT_NOTE_MARKER
 from app.ingest.zerodha_contract_note_xlsx import CLEAN_SHEET_NAMES
 from app.ingest.zerodha_tradebook import (
@@ -65,6 +68,8 @@ DOC_CONTRACT_NOTE_XLSX = "contract_note_xlsx"
 DOC_CONTRACT_NOTE_PDF = "contract_note_pdf"
 DOC_TRADEBOOK_XLSX = "tradebook_xlsx"
 DOC_CAS_PDF = "cas_pdf"
+DOC_CAS_CSV = "cas_csv"
+DOC_CAS_XLSX = "cas_xlsx"
 DOC_UNKNOWN = "unknown"
 
 #: document kind -> (adapter name, the upload route that owns it). The single source of
@@ -73,6 +78,8 @@ DOC_UNKNOWN = "unknown"
 #: slot a document belongs in.
 ROUTING: dict[str, tuple[str, str]] = {
     DOC_TRADEBOOK_CSV: ("zerodha_tradebook", "/ingest/csv"),
+    DOC_TRADEBOOK_XLSX: ("zerodha_tradebook_xlsx", "/ingest/xlsx"),
+    DOC_CONTRACT_NOTE_CSV: ("zerodha_contract_note_csv", "/ingest/csv"),
     DOC_CONTRACT_NOTE_XLSX: ("zerodha_contract_note_xlsx", "/ingest/xlsx"),
     DOC_CONTRACT_NOTE_PDF: ("zerodha_contract_note", "/ingest/files"),
     # A CAS is recognised from its own markers (see _CAS_MARKERS) and routed to the
@@ -81,6 +88,8 @@ ROUTING: dict[str, tuple[str, str]] = {
     # does -- and because a CAS misfiled as a contract note would otherwise be refused with
     # a puzzling message rather than simply working.
     DOC_CAS_PDF: ("cas_pdf", "/ingest/files"),
+    DOC_CAS_CSV: ("cas_csv", "/ingest/files"),
+    DOC_CAS_XLSX: ("cas_xlsx", "/ingest/files"),
 }
 
 #: A human name per document kind, for the one place these are read aloud: the error a
@@ -90,8 +99,10 @@ LABELS: dict[str, str] = {
     DOC_CONTRACT_NOTE_CSV: "a contract note saved as CSV",
     DOC_CONTRACT_NOTE_XLSX: "a Zerodha contract note (XLSX)",
     DOC_CONTRACT_NOTE_PDF: "a Zerodha contract note (PDF)",
-    DOC_TRADEBOOK_XLSX: "a tradebook saved as a spreadsheet",
+    DOC_TRADEBOOK_XLSX: "a Zerodha tradebook (XLSX)",
     DOC_CAS_PDF: "a CAS / holding statement",
+    DOC_CAS_CSV: "a CAS holdings table (CSV)",
+    DOC_CAS_XLSX: "a CAS holdings table (XLSX)",
     DOC_UNKNOWN: "a file we don't recognise",
 }
 
@@ -100,11 +111,8 @@ LABELS: dict[str, str] = {
 #: the tail is enough and costs nothing on a 40-page note.
 _PDF_TRAILER_SCAN = 4096
 
-#: Phrases that identify a depository/registrar holding statement. Checked BEFORE the
-#: contract-note marker: a CAS covering a demat account can quote the words "contract
-#: note" in its transaction narration, and reading it as a note we can parse would be a
-#: confident wrong answer. CAS parsing is explicitly out of Phase 1 (CLAUDE.md), so the
-#: only job here is to recognise one well enough to say so.
+#: A CAS can quote "contract note" in its narration, so its markers take precedence.
+#: Original PDFs and structured holdings tables route to separate CAS readers.
 _CAS_MARKERS = (
     "CONSOLIDATED ACCOUNT STATEMENT",
     "STATEMENT OF ACCOUNT",
@@ -118,12 +126,6 @@ _CAS_MARKERS = (
 #: A bulk contract-note workbook names each sheet for its trading day. Anchored, because
 #: a sheet legitimately called "Trades 01-04-2024" is not a date sheet.
 _DATE_SHEET = re.compile(r"^\d{2}[-/]\d{2}[-/]\d{4}$")
-
-#: Column names that mark a spreadsheet as a tradebook rather than a contract note. The
-#: overlap with app.ingest.zerodha_tradebook.REQUIRED_COLUMNS is deliberate -- this is the
-#: same document in a container we have no adapter for.
-_TRADEBOOK_HEADER_HINTS = frozenset({"trade_id", "trade_date", "trade_type"})
-
 
 @dataclass(frozen=True, slots=True)
 class FileVerdict:
@@ -225,6 +227,11 @@ def _classify_text(content: bytes) -> tuple[str, list[str]]:
     """Which document a decodable text file is. Returns (document kind, notes)."""
     text = decode_text(content)
     lines = text.splitlines()
+    try:
+        if holdings_header(csv_rows(content, max_rows=MAX_HEADER_SCAN_LINES)) is not None:
+            return DOC_CAS_CSV, []
+    except (ValueError, csv.Error):
+        pass
 
     # The tradebook test is the adapter's own header scan, not a re-implementation of it:
     # if this says yes, ZerodhaTradebookAdapter will find the same header on the same line.
@@ -238,7 +245,8 @@ def _classify_text(content: bytes) -> tuple[str, list[str]]:
 
     upper = text[:20000].upper()
     if any(marker in upper for marker in _CAS_MARKERS):
-        return DOC_CAS_PDF, []
+        return DOC_UNKNOWN, ["CAS spreadsheets need a structured holdings table; "
+                             "otherwise upload the original CAS PDF."]
     if CONTRACT_NOTE_MARKER in upper:
         return DOC_CONTRACT_NOTE_CSV, []
 
@@ -268,36 +276,28 @@ def _classify_xlsx(content: bytes) -> tuple[str, list[str]]:
     is one that adapter will actually accept.
     """
     try:
-        import openpyxl
-    except ImportError:  # pragma: no cover - dependency guard
-        # Without openpyxl we cannot inspect, and guessing is worse than admitting it:
-        # let the extension stand and let the adapter produce the real error.
-        return DOC_CONTRACT_NOTE_XLSX, ["workbook not inspected: openpyxl unavailable"]
-
-    try:
-        workbook = openpyxl.load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+        sheets = workbook_sheets(content, max_rows=MAX_HEADER_SCAN_LINES)
     except Exception as exc:  # noqa: BLE001 - openpyxl raises assorted types
         return DOC_UNKNOWN, [f"could not open workbook: {exc}"]
 
-    try:
-        sheetnames = list(workbook.sheetnames)
+    if sheets:
+        sheetnames = [sheet.name for sheet in sheets]
+        for sheet in sheets:
+            if holdings_header(sheet.rows) is not None:
+                return DOC_CAS_XLSX, []
+            for row in sheet.rows:
+                keys = {_norm_key(str(c)) for c in row if c is not None}
+                if REQUIRED_COLUMNS <= keys:
+                    return DOC_TRADEBOOK_XLSX, []
         if frozenset(sheetnames) == CLEAN_SHEET_NAMES:
             return DOC_CONTRACT_NOTE_XLSX, []
         if any(_DATE_SHEET.match(name.strip()) for name in sheetnames):
             return DOC_CONTRACT_NOTE_XLSX, []
-
-        first = workbook[sheetnames[0]] if sheetnames else None
-        if first is not None:
-            for row in first.iter_rows(min_row=1, max_row=MAX_HEADER_SCAN_LINES, values_only=True):
-                keys = {_norm_key(str(c)) for c in row if c is not None}
-                if REQUIRED_COLUMNS <= keys or _TRADEBOOK_HEADER_HINTS <= keys:
-                    return DOC_TRADEBOOK_XLSX, []
+        for sheet in sheets:
+            for row in sheet.rows:
                 joined = " ".join(str(c) for c in row if c is not None).upper()
                 if CONTRACT_NOTE_MARKER in joined:
                     return DOC_CONTRACT_NOTE_XLSX, []
-    finally:
-        workbook.close()
-
     return DOC_UNKNOWN, []
 
 
@@ -554,7 +554,10 @@ def _unsupported_reason(document: str) -> str:
         return "This looks like a tradebook saved as a spreadsheet."
     if document == DOC_CONTRACT_NOTE_CSV:
         return "This looks like a contract note saved as CSV."
-    return "We opened this file but couldn't recognise it as a tradebook or a contract note."
+    return (
+        "We opened this file but couldn't recognise it as a tradebook, contract note "
+        "or CAS holdings table."
+    )
 
 
 def _unsupported_hint(document: str) -> str:

@@ -11,7 +11,7 @@ const ZERODHA_STEPS = [
   { title: "Open Reports → Tradebook", text: "Choose Reports in the top navigation, then open Tradebook.", focus: "Tradebook" },
   { title: "Choose a segment and date range", text: "Choose Equity for your stock trades. Select the dates you want to import. Each export can cover at most 365 days.", focus: "Date range" },
   { title: "Download the CSV", text: "Run the report, then download the CSV. Repeat for each year, starting with your earliest trades.", focus: "Download CSV" },
-  { title: "Upload your downloaded files", text: "Return to Trackr+ and upload all your tradebook files together. Contract notes can be uploaded too, to include brokerage and taxes.", focus: "Upload to Trackr+" },
+  { title: "Upload your downloaded files", text: "Return to Trackr+ and upload your CSV or XLSX tradebooks together. Upload contract notes too, to include brokerage and taxes.", focus: "Upload to Trackr+" },
 ];
 
 /** Illustrative broker screens, with instructions supplied by the broker registry. */
@@ -65,7 +65,7 @@ export function TradebookGuide({ accounts, brokers }: { accounts: AccountOut[]; 
               <div className={styles.visual} role="img" aria-label={`Illustration of ${current.title}: ${current.text}`}>
                 <div className={styles.browser}><i /><i /><i /><span>{step === steps.length - 1 ? "Trackr+ · Import" : `${broker?.name} · Reports`}</span><small>ILLUSTRATION</small></div>
                 <div className={styles.screen} aria-hidden="true"><div className={styles.mockNav}><b>{step === steps.length - 1 ? "Trackr+" : broker?.name}</b><span>Dashboard</span><span className={step === 1 ? styles.highlight : ""}>Reports</span></div>
-                  {step === steps.length - 1 ? <div className={styles.upload}><Icon name="upload" size={28} /><strong>Upload your tradebook</strong><span>CSV · XLSX · PDF</span></div> : <div className={styles.mockReport}>
+                  {step === steps.length - 1 ? <div className={styles.upload}><Icon name="upload" size={28} /><strong>Upload your tradebook</strong><span>{broker?.code === "ZERODHA" ? "CSV · XLSX" : "Broker statements"}</span></div> : <div className={styles.mockReport}>
                     <h3>{step === 0 ? "Your account" : "Tradebook"}</h3>
                     {step === 0 ? <div className={styles.login}>Sign in to your broker account<div className={styles.highlight}>Continue to {broker?.name}</div></div> : <><div className={styles.filters}><span>Segment<strong>Equity ▾</strong></span><span className={step === 2 ? styles.highlight : ""}>Date range<strong>01 Apr 2025 → 31 Mar 2026</strong></span></div><div className={styles.mockTable}><div>Trade date　　Security　　Quantity　　Price</div>{[1, 2, 3].map((row) => <div key={row}><span /><span /><span /><span /></div>)}</div><div className={styles.download}><span className={step === 3 ? styles.highlight : ""}>↓ Download CSV</span></div></>}
                   </div>}

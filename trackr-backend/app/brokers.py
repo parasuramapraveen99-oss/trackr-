@@ -68,7 +68,10 @@ BROKERS: tuple[Broker, ...] = (
     Broker(
         code="ZERODHA",
         name="Zerodha",
-        adapters=("zerodha_tradebook", "zerodha_contract_note_xlsx", "zerodha_contract_note"),
+        adapters=(
+            "zerodha_tradebook", "zerodha_tradebook_xlsx", "zerodha_contract_note_csv",
+            "zerodha_contract_note_xlsx", "zerodha_contract_note",
+        ),
         console_steps=(
             "Sign in to Zerodha Console (console.zerodha.com).",
             "For trades: Reports → Tradebook, pick a year, download the CSV. Console caps "

@@ -40,6 +40,12 @@ SUPPORTED_SEGMENT = "EQ"
 #: scan costs nothing there and keeps a wrong file from being read to the bottom.
 MAX_HEADER_SCAN_LINES = 50
 
+TRADEBOOK_NOTES = (
+    "Tradebook exports carry no charges; brokerage, STT, GST and stamp duty live "
+    "on the contract note. charges is 0 on every row here - that is absence of "
+    "data, not evidence the trades were free.",
+)
+
 
 def _norm_key(k: str | None) -> str:
     return (k or "").strip().lower().replace(" ", "_").replace("-", "_")
@@ -72,11 +78,7 @@ class ZerodhaTradebookAdapter:
     def parse(self, content: bytes, account_id: str, filename: str = "") -> ParseResult:
         rows: list[StagedRow] = []
         rejections: list[Rejection] = []
-        notes: list[str] = [
-            "Tradebook exports carry no charges; brokerage, STT, GST and stamp duty live "
-            "on the contract note. charges is 0 on every row here - that is absence of "
-            "data, not evidence the trades were free."
-        ]
+        notes = list(TRADEBOOK_NOTES)
 
         text = content.decode("utf-8-sig", errors="replace")
         lines = text.splitlines()

@@ -197,7 +197,7 @@ function ImportPanel({ onGrantConsent }: { onGrantConsent: ImportScreenProps["on
 
 function ImportHistoryFile({ batch, onResolved }: { batch: BatchSummaryOut; onResolved: () => void }) {
   const [open, setOpen] = useState(false);
-  const isCas = batch.adapter === "cas_pdf";
+  const isCas = batch.adapter.startsWith("cas_");
   const complete = batch.status === "PROMOTED" || (isCas && batch.status === "STAGED");
   const status = batch.status === "DISCARDED" ? "Discarded"
     : isCas ? (batch.rejected_count > 0 ? "Processed with issues" : "Processed")
