@@ -48,6 +48,11 @@ def continue_if_needed(settings: Any, *, more_work: bool, progress: bool, hop: i
     url = f"{base}/ops/cycle/continue?hop={hop + 1}"
     try:
         _send(url, secret)
+    except TimeoutError:
+        # Vercel can hold the 202 until the background cycle finishes, just as for
+        # start_cycle_elsewhere. A read timeout is an accepted, still-running cycle.
+        logger.info("cycle_chain_running hop=%s", hop + 1)
+        return True
     except Exception:
         logger.warning("cycle_chain_send_failed hop=%s", hop + 1, exc_info=True)
         return False

@@ -74,9 +74,14 @@ def sync(
     (owner decision 2026-10-08; see app.post_import). Work is shared public data, not
     per-investor, and the worker's advisory lock turns a concurrent call into ``busy``.
     Returns this investor's status after the cycle, which is what the screen polls on."""
+    from app.continuation import continue_if_needed
     from app.post_import import run_cycle
 
     cycle = run_cycle(conn, settings)
+    if not cycle.get("busy"):
+        continue_if_needed(
+            settings, more_work=cycle["more_work"], progress=cycle["progress"], hop=0
+        )
     return {"cycle": cycle, **status(conn, investor_id), "enabled": settings.reference_sync_enabled}
 
 

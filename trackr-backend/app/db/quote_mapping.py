@@ -24,11 +24,9 @@ def upsert_listings(conn: Any, listings: dict[str, tuple[str, str]], seen_on: da
     proved again before it is trusted. ISINs with no ``security`` row are skipped."""
     if not listings:
         return 0
-    written = 0
     with conn.cursor() as cur:
-        for isin, (exchange, symbol) in listings.items():
-            cur.execute(
-                """
+        cur.executemany(
+            """
                 INSERT INTO quote_mapping (isin, exchange, symbol, ticker, seen_on)
                 SELECT %s, %s, %s, %s, %s WHERE EXISTS (SELECT 1 FROM security WHERE isin = %s)
                 ON CONFLICT (isin) DO UPDATE SET
@@ -42,10 +40,12 @@ def upsert_listings(conn: Any, listings: dict[str, tuple[str, str]], seen_on: da
                                       THEN quote_mapping.checked_on END
                 WHERE quote_mapping.seen_on <= EXCLUDED.seen_on
                 """,
-                (isin, exchange, symbol, resolve_ticker(symbol, exchange), seen_on, isin),
-            )
-            written += cur.rowcount
-    return written
+            [
+                (isin, exchange, symbol, resolve_ticker(symbol, exchange), seen_on, isin)
+                for isin, (exchange, symbol) in listings.items()
+            ],
+        )
+        return cur.rowcount
 
 
 def usable_tickers(conn: Any, isins: list[str]) -> tuple[dict[str, str], set[str]]:

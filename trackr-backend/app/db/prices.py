@@ -111,21 +111,21 @@ def upsert_prices(conn: Any, prices: list[Any]) -> int:
 
     ``ON CONFLICT DO UPDATE`` rather than ``DO NOTHING`` because a re-run should carry a
     correction through -- exchanges do republish a bhavcopy after a data error, and the
-    later file is the better one.
+    later file is the better one. Psycopg pipelines executemany, so a fetched archive
+    day does not require one network round trip per security.
     """
     if not prices:
         return 0
     with conn.cursor() as cur:
-        for price in prices:
-            cur.execute(
-                """
+        cur.executemany(
+            """
                 INSERT INTO price (isin, price_date, close, source)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (isin, price_date) DO UPDATE
                 SET close = EXCLUDED.close, source = EXCLUDED.source
                 """,
-                (price.isin, price.price_date, price.close, price.source),
-            )
+            [(p.isin, p.price_date, p.close, p.source) for p in prices],
+        )
     return len(prices)
 
 

@@ -45,6 +45,17 @@ CIRCULAR_PARSER_VERSION = "nse-isin-circular-listing-v1"
 _PARSED_CLASSES = ("BONUS", "SPLIT", "DIVIDEND")
 
 
+class ReferenceBatchFailed(ActionSourceError):
+    """Keep committed progress available when unrelated source tasks fail."""
+
+    def __init__(self, result: dict):
+        self.result = result
+        super().__init__(
+            f"{result['failed']} reference task(s) failed and remain queued; "
+            "inspect operator status"
+        )
+
+
 class RecordingActionSource:
     """Wraps the NSE notice feed. Every row of a fetch is recorded as a classified
     observation before any parser reads the payload, and one fetch serves both the
@@ -912,11 +923,7 @@ def _run_once(conn, settings, limit=None, time_budget_seconds=None):
                 )
         promote_draft_aliases(conn)
         conn.commit()
-        if failed:
-            raise ActionSourceError(
-                f"{failed} reference task(s) failed and remain queued; inspect operator status"
-            )
-        return {
+        result = {
             "enabled": True,
             "processed": processed,
             "waiting": waiting,
@@ -924,6 +931,9 @@ def _run_once(conn, settings, limit=None, time_budget_seconds=None):
             "timings_ms": {name: round(value, 3) for name, value in timings.items()},
             "elapsed_ms": round((time.monotonic() - began) * 1000, 3),
         }
+        if failed:
+            raise ReferenceBatchFailed(result)
+        return result
     finally:
         batch_scope.close()
         conn.rollback()

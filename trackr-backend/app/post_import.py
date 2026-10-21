@@ -109,7 +109,7 @@ def _run_cycle_locked(
     from app.db.imports import heal_fno_awaiting_master
     from app.prices.alerts import get_notifier
     from app.prices.history import backfill_price_history
-    from app.reference_worker import run_once
+    from app.reference_worker import ReferenceBatchFailed, run_once
     from app.routers.analytical import catch_up_snapshots
 
     began = clock()
@@ -195,7 +195,12 @@ def _run_cycle_locked(
         except Exception as exc:  # failed tasks stay queued with backoff; report, don't raise
             conn.rollback()
             logger.warning("post_import_reference_failed", exc_info=True)
-            out["reference"] = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+            # The worker commits successful claims before reporting source failures.
+            # Losing that count stops the continuation even while it built history.
+            out["reference"] = {
+                **(exc.result if isinstance(exc, ReferenceBatchFailed) else {}),
+                "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+            }
 
     if left() < MIN_STEP_SECONDS:
         out["snapshots"] = {"deferred": True, "complete": False}
