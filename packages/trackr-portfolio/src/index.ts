@@ -92,6 +92,8 @@ export { TransactionsScreen } from "./screens/Transactions";
 export { MarketAssistantDrawer } from "./widgets/MarketAssistantDrawer";
 export { AccountOnboarding } from "./widgets/AccountOnboarding";
 export { ConsentCapture } from "./widgets/ConsentCapture";
+export { ConsentNotice } from "./widgets/ConsentNotice";
+export { GrievanceForm } from "./widgets/GrievanceForm";
 export { EmailForwardingSetup, ForwardingCode } from "./widgets/EmailForwardingSetup";
 export { FileUploadStep } from "./widgets/FileUploadStep";
 export { TransactionForm } from "./widgets/TransactionForm";

@@ -27,7 +27,7 @@ import {
   Tile, TipProvider, ValuationBubbles, WindowsDumbbell, compactInr, moneyGap,
 } from "../analytics/visual";
 import { BOARD_CSS, RiskTiles } from "../analytics/RiskBoard";
-import { AdvisorControls, AdvisorGrowth, AdvisorMethodCoverage, AdvisorReturnBars, AdvisorRiskExtras, AdvisorScope, AdvisorWindowMatrix, MissingVisual, metricTip, riskBoardData, selectedRisk, selectedWindow, type AdvisorBasis, type AdvisorPeriod } from "../analytics/AdvisorVisuals";
+import { AdvisorControls, AdvisorGrowth, AdvisorHealthFigure, AdvisorHealthNote, AdvisorMethodCoverage, AdvisorReturnBars, AdvisorRiskExtras, AdvisorScope, AdvisorWindowMatrix, MissingVisual, metricTip, riskBoardData, selectedRisk, selectedWindow, type AdvisorBasis, type AdvisorPeriod } from "../analytics/AdvisorVisuals";
 import { FundsCard } from "../widgets/FundsCard";
 
 const IDX = "var(--ink-400)", YOU = "var(--chart-1)";
@@ -209,9 +209,15 @@ export function AnalyticsScreen({ chrome }: PortfolioScreenProps) {
                 figure={!data?.advisor && gainTotal ? <span style={tone(gainTotal.startsWith("-"))}>{compactInr(gainTotal, masked)}</span> : undefined}>
                 {data?.advisor ? <AdvisorReturnBars data={data} period={period} basis={performanceBasis} /> : contribution.data ? <GainBars contribution={contribution.data} /> : <Loading />}
               </Tile>
-              <Tile span={8} label={data?.advisor ? "Inputs supported" : "Health"} figure={data?.advisor ? undefined : data ? (data.health.grade ?? <span style={{ color: "var(--text-tertiary)" }}>—<Small>{4 - missingHealth}/4 inputs</Small></span>) : undefined}>
-                {data?.advisor ? <AdvisorMethodCoverage data={data} /> : data ? <HealthSegments data={data} /> : <Loading h={70} />}
-              </Tile>
+              {data?.advisor ? <>
+                <Tile span={4} label="Health" figure={<AdvisorHealthFigure data={data} />}>
+                  <HealthSegments data={data} />
+                  <AdvisorHealthNote data={data} />
+                </Tile>
+                <Tile span={4} label="Inputs supported"><AdvisorMethodCoverage data={data} /></Tile>
+              </> : <Tile span={8} label="Health" figure={data ? (data.health.grade ?? <span style={{ color: "var(--text-tertiary)" }}>—<Small>{4 - missingHealth}/4 inputs</Small></span>) : undefined}>
+                {data ? <HealthSegments data={data} /> : <Loading h={70} />}
+              </Tile>}
             </Band>}
 
             {view === "exposure" && <Band title="Exposure">

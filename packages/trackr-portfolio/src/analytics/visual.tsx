@@ -281,7 +281,11 @@ export function HealthSegments({ data }: { data: AnalyticsResponse }) {
   const hover = useTip();
   const comps = data.health.components;
   const gap = 6, total = Math.max(1, w - gap * (comps.length - 1));
-  const short: Record<string, string> = { factor_composite: "Factors", concentration: "Spread", balance_sheet: "Balance sheet", benchmark_relative: "Vs index" };
+  const short: Record<string, string> = {
+    factor_composite: "Factors", concentration: "Spread", balance_sheet: "Balance sheet", benchmark_relative: "Vs index",
+    // portfolio-health-v1 (advisor)
+    diversification: "Co-movement", risk: "Risk", quality: "Quality", valuation: "Valuation",
+  };
   let x0 = 0;
   return (
     <div ref={ref}>{w > 0 && (
@@ -290,8 +294,9 @@ export function HealthSegments({ data }: { data: AnalyticsResponse }) {
         {comps.map((c) => {
           const bw = total * c.weight, x = x0; x0 += bw + gap;
           const col = c.score == null ? "" : c.score >= 65 ? "var(--positive)" : c.score >= 35 ? "var(--warning)" : "var(--negative)";
+          const why = c.score == null && c.reasons?.length ? c.reasons.map((r) => r.toLowerCase().replaceAll("_", " ")).join(" · ") : "no reliable input";
           return (
-            <g key={c.key} transform={`translate(${x},0)`} {...{ onMouseMove: (e: React.MouseEvent) => hover.show(e, `${c.label}: ${c.score == null ? "no reliable input" : `${Math.round(c.score)}/100`} · weight ${Math.round(c.weight * 100)}%`), onMouseLeave: hover.hide }}>
+            <g key={c.key} transform={`translate(${x},0)`} {...{ onMouseMove: (e: React.MouseEvent) => hover.show(e, `${c.label}: ${c.score == null ? why : `${Math.round(c.score)}/100`} · weight ${Math.round(c.weight * 100)}%`), onMouseLeave: hover.hide }}>
               <text y={11} style={AXIS}>{short[c.key] ?? c.label}</text>
               <rect y={18} width={bw} height={20} rx={4} style={{ fill: c.score == null ? "url(#tp-hatch-health)" : "var(--surface-sunken)" }} />
               {c.score != null && <rect y={18} width={(bw * c.score) / 100} height={20} rx={4} style={{ fill: col }} />}

@@ -6,12 +6,13 @@ from decimal import Decimal as D
 from .core import decimal, encode, Metric, ZERO, ONE, precision
 from .cross_section import overview, allocation, aggregate, factor, ranks, lenses
 from .stats import risk, correlation, variance, interval_returns
-from .periods import windows
+from .periods import windows, subtract_months
 from .hypothetical import buy_and_hold
 from .upstream import kpis
 from .benchmarks import fundamentals as benchmark_fundamentals
+from .health import concentration, diversification as health_diversification, observed_risk, business_quality, valuation, assemble, capital_states
 
-METHOD_VERSION='trackr-analytics-0.2'
+METHOD_VERSION='trackr-analytics-0.4'
 
 
 def timestamp(value):
@@ -120,7 +121,7 @@ def _analyse(data):
     if not isinstance(data,dict):
         raise ValueError('INPUT_OBJECT_REQUIRED')
     for key in ('sources','holdings','returns','fundamentals','classifications','risk_free_returns',
-                'target_returns','benchmark_returns','asset_histories','upstream_kpis','benchmark_fundamentals'):
+                'target_returns','benchmark_returns','asset_histories','upstream_kpis','benchmark_fundamentals','health_profiles'):
         records=data.get(key,[])
         if not isinstance(records,list) or any(not isinstance(r,dict) for r in records):
             raise ValueError('INVALID_RECORD_ARRAY:'+key)
@@ -226,7 +227,7 @@ def _analyse(data):
             timestamp(f['retrieved_at'])
             if date.fromisoformat(f['fiscal_end'])>date.fromisoformat(data['as_of']):
                 raise ValueError('FUTURE_FISCAL_PERIOD')
-            if f['field'] not in ('pe','pb','roe','net_margin','debt_to_equity','interest_cover','dividend_yield','sales_growth_1y','profit_growth_1y'):
+            if f['field'] not in ('pe','pb','roe','net_margin','debt_to_equity','interest_cover','dividend_yield','sales_growth_1y','profit_growth_1y','capital_adequacy_ratio','gross_npa_ratio'):
                 raise ValueError('UNKNOWN_FUNDAMENTAL')
             expected='ratio' if f['field'] in ('pe','pb','debt_to_equity','interest_cover') else 'fraction'
             if f['unit']!=expected:
@@ -238,7 +239,8 @@ def _analyse(data):
                 raise ValueError('CONFLICTING_FUNDAMENTALS')
             seen.add(pair)
             basis=(f['basis'],f['consolidation'])
-            if f['basis'] not in ('TTM','annual') or f['consolidation'] not in ('consolidated','standalone'):
+            allowed_fundamental_bases=('point_in_time',) if f['field'] in ('capital_adequacy_ratio','gross_npa_ratio') else ('TTM','annual')
+            if f['basis'] not in allowed_fundamental_bases or f['consolidation'] not in ('consolidated','standalone'):
                 raise ValueError('INVALID_FUNDAMENTAL_BASIS')
             if f['field'] in basis_by_field and basis_by_field[f['field']]!=basis:
                 raise ValueError('FUNDAMENTAL_BASIS_MISMATCH')
@@ -512,6 +514,69 @@ def _analyse(data):
         if universe.get('quality')=='provisional':
             hcaveats=hcaveats+universe.get('reasons',[])
         decorate(factors[key],refs+fund_refs+[ref for h in histories.values() for ref in h['source_refs']]+universe.get('source_refs',[]),caveats+hcaveats)
+    profiles={}
+    profile_errors=[]
+    profile_refs=[]
+    profile_reasons=[]
+    for profile in data.get('health_profiles',[]):
+        try:
+            record_quality(profile,sources)
+            if profile['isin'] in profiles:
+                raise ValueError('CONFLICTING_HEALTH_PROFILE')
+            if profile['as_of']!=data['as_of']:
+                raise ValueError('HEALTH_PROFILE_DATE_MISMATCH')
+            if profile['profile'] not in ('non_financial','bank'):
+                raise ValueError('UNSUPPORTED_HEALTH_PROFILE')
+            profiles[profile['isin']]=profile['profile']
+            profile_refs+=profile['source_refs']
+            if profile.get('quality')=='provisional':profile_reasons+=profile['reasons']
+        except (ValueError,KeyError,TypeError) as exc:
+            profile_errors.append(str(exc))
+    quality_freshness_errors=[]
+    for observation in data.get('fundamentals',[]):
+        profile=profiles.get(observation.get('isin'))
+        used_fields=('roe','net_margin','debt_to_equity','interest_cover') if profile=='non_financial' else ('roe','capital_adequacy_ratio','gross_npa_ratio') if profile=='bank' else ()
+        if observation.get('field') in used_fields:
+            try:
+                months=6 if observation['field'] in ('capital_adequacy_ratio','gross_npa_ratio') else 18
+                if date.fromisoformat(observation['fiscal_end'])<subtract_months(date.fromisoformat(data['as_of']),months):
+                    quality_freshness_errors.append('STALE_HEALTH_FUNDAMENTALS:'+observation['isin']+':'+observation['field'])
+            except (ValueError,KeyError,TypeError):
+                quality_freshness_errors.append('INVALID_HEALTH_FUNDAMENTAL_DATE')
+    health_sessions=sessions[-253:]
+    health_window=None
+    if len(health_sessions)==253 and calendar and calendar['start']<=health_sessions[0] and calendar['end']>=data['as_of']:
+        selected_health_returns=[r for r in portfolio if health_sessions[0]<=r['start'] and r['end']<=health_sessions[-1]]
+        health_window=windows(selected_health_returns,health_sessions,data['as_of'],calendar=calendar)['All']
+    if health_window is None:
+        health_window=Metric.unavailable('MISSING_COMPLETE_252_INTERVAL_WINDOW',unit='window')
+    health_period=health_window.period if health_window.value else None
+    components={
+        'concentration':concentration(weights,diversification['sector']),
+        'diversification':health_diversification(weights,histories,sessions,health_period),
+        'risk':observed_risk(health_window),
+        'quality':business_quality(weights,all_fund,profiles,errors=hard_fund_errors+profile_errors+quality_freshness_errors,
+                                   refs=fund_refs+profile_refs,reasons=fund_errors+profile_reasons),
+        'valuation':valuation(factors['value'])}
+    ov['health']=assemble(components,as_of=data['as_of'],refs=refs,reasons=caveats)
+    from .health_evidence import score_sensitivity, history_evidence, grade_boundary_sensitivity, drawdown_recovery
+    from .health import WEIGHTS
+    ov['health_weight_sensitivity']=score_sensitivity({k:v['score'].value for k,v in components.items()},WEIGHTS)
+    ov['health_grade_sensitivity']=grade_boundary_sensitivity(ov['health']['score'].value)
+    recovery_complete=(health_period is not None and health_window.coverage.get('eligible_count')==252
+                       and health_period.get('start')==health_sessions[0]
+                       and health_period.get('end')==data['as_of']
+                       and 'UPSTREAM_EXCLUDED_HOLDINGS' not in health_window.reasons)
+    ov['health_recovery']=(Metric(drawdown_recovery([r['return'] for r in selected_health_returns]),
+                                  method='underwater_sessions_v1',period=health_period,
+                                  source_refs=list(health_window.source_refs),coverage=dict(health_window.coverage))
+                           .caveat('WINDOW_CENSORED_RECOVERY') if recovery_complete
+                           else Metric.unavailable('INCOMPLETE_HEALTH_RECOVERY_WINDOW'))
+    for reason in health_window.reasons:
+        ov['health_recovery'].caveat(reason)
+    ov['health_covariance_evidence']=history_evidence(weights,histories,sessions,health_period)
+    ov['health_validation']={'grade_calibration':'pending','indian_equity_mf_validation':'pending','independent_human_review':'pending','model':'portfolio-health-v1','evidence_extension':'v2'}
+    ov['capital_state']=capital_states(rows,histories,sessions,data['as_of'])
     result={'schema_version':'0.1','method_version':METHOD_VERSION,
             'input_digest':hashlib.sha256(json.dumps(data,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest(),
             'as_of':data['as_of'],'generated_at':data['generated_at'],'sources':data['sources'],

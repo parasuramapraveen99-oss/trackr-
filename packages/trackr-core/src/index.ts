@@ -55,6 +55,11 @@ export type { LauncherOptions, LauncherState } from "./launcher";
 
 export {
   CURRENT_TOS_VERSION,
+  GRIEVANCE_OFFICER,
+  LEGAL_EFFECTIVE_DATE,
+  LEGAL_OPERATOR,
+  PRIVACY_INTRO,
+  PRIVACY_SECTIONS,
   TERMS_INTRO,
   TERMS_SECTIONS,
 } from "./legal";
@@ -93,4 +98,5 @@ export { TXN_TYPES } from "./api-types";
 
 // The DPDP processing notice: one version string and one wording for both applications,
 // because a consent row that names a notice nobody was shown is invalid, not merely stale.
-export { CONSENT_NOTICE_TEXT, CONSENT_NOTICE_VERSION } from "./consent";
+export { CONSENT_NOTICE_DETAILS, CONSENT_NOTICE_TEXT, CONSENT_NOTICE_VERSION } from "./consent";
+export type { ConsentNoticeSection } from "./consent";

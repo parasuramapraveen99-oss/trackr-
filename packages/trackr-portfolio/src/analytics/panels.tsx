@@ -89,6 +89,45 @@ function CashFlowDisclosure({ data }: { data: AnalyticsResponse }) {
   </div>;
 }
 
+const readableReason = (reason: string) => reason.toLowerCase().replaceAll("_", " ");
+const score = (value: number | null | undefined) => (value == null ? EMPTY : value.toFixed(1));
+
+/** portfolio-health-v1: every part, its weight and points, and why a part is missing. */
+function AdvisorHealthCard({ data }: { data: AnalyticsResponse }) {
+  const h = data.health;
+  const ev = h.evidence ?? {};
+  const symbol = (isin: string) => data.positions.find((p) => p.isin === isin)?.symbol ?? isin;
+  const unprofiled = Object.entries(h.profile_status ?? {}).filter(([, s]) => s !== "bank" && s !== "non_financial");
+  const cov = ev.covariance?.value;
+  const recovery = ev.recovery?.value;
+  const weights = ev.weight_sensitivity?.value;
+  const cutoffs = ev.grade_cutoff_sensitivity?.value;
+  return <Card title="Portfolio health · house rubric v1" subtitle="Concentration, co-movement, past risk, business quality and relative valuation. Provisional and uncalibrated; not advice.">
+    <Reading label="Grade" value={h.grade ?? EMPTY}
+      detail={h.grade != null
+        ? <>Score {h.score_exact ? Number(h.score_exact).toFixed(2) : h.score}/100, rounded half-up to {h.score}. Bands {h.bands.map(([g, t]) => `${g} ≥ ${t}`).join(" · ")}.</>
+        : h.score_bounds
+          ? <>Withheld. With the parts measured so far the score can only fall between {score(h.score_bounds.lower)} and {score(h.score_bounds.upper)}; this is a missing-information range, not a forecast.</>
+          : <>Withheld · {(h.reasons ?? []).map(readableReason).join(" · ")}</>} />
+    <DataTable dense columns={columns([{ key: "part", label: "Part" }, { key: "weight", label: "Weight", align: "right" }, { key: "score", label: "Score", align: "right" }, { key: "points", label: "Points", align: "right" }, { key: "why", label: "Status" }])}
+      rows={h.components.map((c) => ({ id: c.key, part: c.label, weight: pp(c.weight * 100, 0), score: score(c.score), points: score(c.points), why: c.score == null ? (c.reasons ?? []).map(readableReason).join(" · ") : c.status ?? "" }))} />
+    {unprofiled.length > 0 && <div style={note}>Business quality has no supported test for: {unprofiled.map(([isin, s]) => {
+      const [kind = s, industry] = s.split(":");
+      return `${symbol(isin)} (${readableReason(kind)}${industry ? ` · ${industry}` : ""})`;
+    }).join(", ")}. Banks and non-financial companies are scored; NBFCs and insurers need their own tests and are not guessed.</div>}
+    {cov && <>
+      <Reading label="Diversification ratio" value={ratio(cov.diversification_volatility_ratio)} detail={<>Average holding volatility ÷ portfolio volatility ({pct(cov.annual_volatility)} a year, {cov.observations} sessions). Above 1 means holdings partly offset each other.</>} />
+      <DataTable dense columns={columns([{ key: "asset", label: "Holding" }, { key: "share", label: "Share of risk", align: "right" }])}
+        rows={Object.entries(cov.risk_shares).sort((a, b) => (b[1].risk_share ?? 0) - (a[1].risk_share ?? 0)).map(([isin, r]) => ({ id: isin, asset: symbol(isin), share: pct(r.risk_share, 1) }))} />
+      <div style={note}>Estimator check (shrink toward equal variances, not Ledoit–Wolf): {Object.entries(cov.shrinkage_sensitivity).map(([a, v]) => `α ${a}: ${pct(v?.annual_volatility ?? null)}`).join(" · ")}. Uses today&apos;s weights on past returns, not your account history.</div>
+    </>}
+    {recovery && <Reading label="Longest time below a previous high" value={`${recovery.longest_underwater_sessions} sessions`}
+      detail={<>Currently {recovery.current_underwater_sessions} sessions below the high ({pct(recovery.terminal_drawdown)}). Only counted inside the one-year window; an unfinished recovery has no invented end date.</>} />}
+    {weights && <div style={note}>If each part&apos;s weight moved ±{pct(weights.relative_weight_change, 0)}, the score would range {score(weights.minimum)}–{score(weights.maximum)} (grades {weights.grades.join(", ")}).{cutoffs && ` Moving every grade cut-off ±5 points gives ${Object.values(cutoffs).join(" / ")}.`}</div>}
+    <div style={note}>Validation: calibration {ev.validation?.grade_calibration ?? "pending"} · Indian data check {ev.validation?.indian_equity_mf_validation ?? "pending"} · independent review {ev.validation?.independent_human_review ?? "pending"}.</div>
+  </Card>;
+}
+
 export function OverviewPanel({ data }: { data: AnalyticsResponse }) {
   const c = data.concentration;
   const available = data.health.components.filter((p) => p.score != null).length;
@@ -104,6 +143,7 @@ export function OverviewPanel({ data }: { data: AnalyticsResponse }) {
       </Card>
     </div>
     <CashFlowDisclosure data={data} />
+    {data.advisor && <AdvisorHealthCard data={data} />}
     <Card title="Data to review" subtitle="Visible limitations, with affected holdings named.">
       <Reading label="Sector classification" value={<Coverage value={data.coverage.sector_pct} />} detail={ordered(data).filter((p) => !p.sector).map((p) => `${p.symbol ?? p.isin} ${pp(p.weight, 1)}`).join(" · ")} />
       <Reading label="P/B inputs" value={<Coverage value={data.coverage.pb_pct} />} detail={ordered(data).filter((p) => p.pb == null).map((p) => p.symbol ?? p.isin).join(", ")} />
@@ -118,8 +158,13 @@ export function OverviewPanel({ data }: { data: AnalyticsResponse }) {
       </details>}
     </Card>
     <details style={note}><summary>Profit and trend distribution · descriptive only</summary>
-      <Card title="Profit and 50-observation trend" subtitle="Within 2% of the moving average counts as flat. Missing history has its own bucket.">
-        {Object.entries(data.capital_state).map(([key, value]) => <Reading key={key} label={key} value={<Figure>{money(value)}</Figure>} detail={pp(data.derived.capital_state_pct[key], 1)} />)}
+      <Card title="Profit and 50-observation trend" subtitle={data.advisor
+        ? "In profit or loss × latest price above or below its 50-session average. An exact tie is neutral; missing history is unknown and still counted."
+        : "Within 2% of the moving average counts as flat. Missing history has its own bucket."}>
+        {Object.keys(data.capital_state).length === 0
+          ? <p style={note}>{data.advisor ? `Not available · ${(data.health.reasons ?? []).map(readableReason).join(" · ") || "no complete valuation"}.` : EMPTY}</p>
+          : Object.entries(data.capital_state).map(([key, value]) => <Reading key={key} label={key} value={<Figure>{money(value)}</Figure>}
+            detail={<>{pp(data.derived.capital_state_pct[key], 1)}{key === "UNKNOWN" && ` · ${data.positions.filter((p) => p.capital_state === "UNKNOWN").map((p) => `${p.symbol ?? p.isin}: ${readableReason(p.capital_state_reason ?? "unknown")}`).join(", ")}`}</>} />)}
       </Card>
     </details>
   </div>;
@@ -175,7 +220,7 @@ export function RiskPanel({ data }: { data: AnalyticsResponse }) {
         <Reading label="Annualised volatility" value={pct(r.volatility)} detail={<>Index: {pct(r.bench_volatility)} · one-day standard-deviation move <Figure>{money(r.volatility_1d_value)}</Figure>. Not a loss bound.</>} />
         <Reading label="Maximum drawdown" value={pct(r.max_drawdown)} detail={<>Peak {r.drawdown_dates?.peak ?? EMPTY} → trough {r.drawdown_dates?.trough ?? EMPTY} · recovered {r.drawdown_dates?.recovered ?? "not within the window"}.</>} />
         <Reading label="1-day historical VaR · 95%" value={<Figure>{money(r.var_1d_95_value)}</Figure>} detail={<>{pct(r.var_1d_95)} of covered value; empirical 5th-percentile loss. Losses beyond this estimate occur in the historical tail.</>} />
-        <Reading label="Expected shortfall · worst 5%" value={<Figure>{money(r.cvar_1d_95_value)}</Figure>} detail={<>{pct(r.cvar_1d_95)} of covered value; mean loss over the worst 5% of observed probability mass.</>} />
+        <Reading label="Expected shortfall · worst 5%" value={<Figure>{money(r.cvar_1d_95_value)}</Figure>} detail={<>{pct(r.cvar_1d_95)} of covered value; mean loss over the worst 5% of observed probability mass.{r.cvar_1d_95 != null && r.cvar_1d_95 < 0 && " Negative: even the worst 5% of sessions in this window were gains."}</>} />
         <Reading label="Beta" value={ratio(r.beta)} detail={<>Index: 1.00 · {betaLabel}. Covariance with index returns divided by index variance; no better/worse judgement.</>} />
         <Reading label="Simulated cumulative price return" value={pct(r.cum_return)} detail={<>Index total return: {pct(r.bench_cum_return)}. Dividend and transaction-cost treatment differs; use recorded cash-flow performance to assess investor outcomes.</>} />
       </div>

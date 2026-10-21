@@ -33,9 +33,9 @@ const COLUMNS = [
   {
     head: "Legal",
     links: [
-      { label: "Terms", href: "/terms" },
-      { label: "Privacy", href: "/privacy" },
-      { label: "Compliance", href: "/coming-soon?feature=Compliance" },
+      { label: "Terms of Use", href: "/terms" },
+      { label: "Privacy Policy", href: "/privacy-policy" },
+      { label: "Grievance", href: "/grievance" },
       { label: "Data & DPDP", href: "/privacy" },
     ],
   },

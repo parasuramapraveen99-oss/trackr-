@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from bisect import bisect_right
 from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import Decimal, localcontext
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -19,7 +20,8 @@ from app import securities
 from app.analytics import advisor, integration, milestone
 from app.analytics._vendor.advisor import cross_section, stats
 from app.analytics._vendor.advisor.core import Metric
-from app.db import identity_review
+from app.config import get_settings
+from app.db import health_profiles, identity_review
 from app.db.fundamentals import latest as latest_fundamentals
 from app.db.index_levels import list_index_levels
 from app.db.index_valuation import latest as latest_index_valuation
@@ -34,6 +36,7 @@ from app.engine.types import Snapshot, Transaction
 from app.prices.risk_free import RATE_INDEX
 from app.routers.analytics_performance import build_performance
 
+logger = logging.getLogger(__name__)
 ZERO = Decimal(0)
 IST = ZoneInfo("Asia/Kolkata")
 ENGINE_VERSION = "trackr-ledger-v1"
@@ -455,6 +458,54 @@ def materialize(
                             reasons=["CURRENT_CLASSIFICATION_SNAPSHOT"],
                         )
                     )
+    # Exchange-sourced rubric profiles. Current classification only; never backdated, and
+    # never asserted from an observation made after the knowledge cutoff.
+    profiles = health_profiles.read(connection, sorted(allowed))
+    profile_status = {}
+    if on == now.astimezone(IST).date():
+        data["health_profiles"] = []
+        for isin in sorted(allowed):
+            profile = profiles.get(isin)
+            if profile is None:
+                profile_status[isin] = "PROFILE_NOT_YET_CLASSIFIED"
+            elif profile.retrieved_at > cutoff:
+                profile_status[isin] = "LOOKAHEAD_INPUT"
+            elif profile.profile == "unsupported_financial":
+                profile_status[isin] = "UNSUPPORTED_FINANCIAL:" + (profile.industry or "")
+            else:
+                profile_status[isin] = profile.profile
+                data["health_profiles"].append(
+                    dict(
+                        isin=isin,
+                        profile=profile.profile,
+                        as_of=on.isoformat(),
+                        source_refs=["health_profiles"],
+                        quality="provisional",
+                        reasons=["CURRENT_EXCHANGE_CLASSIFICATION_SNAPSHOT"],
+                    )
+                )
+    else:
+        profile_status = {i: "HISTORICAL_PROFILE_NOT_RECORDED" for i in sorted(allowed)}
+    data["sources"].append(
+        _source(
+            "health_profiles",
+            "BSE scrip header sector / industry group (bank vs non-financial rubric)",
+            min(
+                on,
+                max(
+                    (
+                        p.retrieved_at.astimezone(IST).date()
+                        for p in profiles.values()
+                        if p.retrieved_at <= cutoff
+                    ),
+                    default=on,
+                ),
+            ),
+            now,
+            provider="BSE",
+            origin="BSE scrip classification",
+        )
+    )
     snapshots = list_snapshots_range(connection, investor_id, advised_only, start, on)
     # Existing snapshots exclude mutual funds but may include ETFs. Never project a
     # mixed snapshot series onto a company-only model or silently subtract fund values.
@@ -512,6 +563,7 @@ def materialize(
         universe=universe,
         reference_meta=reference_meta,
         skipped=skipped,
+        profile_status=profile_status,
     )
 
 
@@ -677,6 +729,215 @@ def _correlations(report: dict, positions: list[dict], data: dict) -> dict:
     )
 
 
+def cached_analytics(
+    connection: Any, investor_id: str, on: date, benchmark: str, advised_only: bool, universe: str
+) -> dict:
+    """Serve a stored response only on an exact input fingerprint match; else compute.
+
+    The fingerprint is read BEFORE computing (see app/db/analytics_cache.py), so a write
+    racing the computation can only cause a later recompute, never a stale hit. A failed
+    cache write is logged and the freshly computed, correct response is still returned.
+    """
+    from time import perf_counter
+
+    from app.db import analytics_cache
+    from app.schemas.analytics import AnalyticsResponse
+
+    key = analytics_cache.CacheKey(investor_id, on, advised_only, benchmark, universe)
+    version = analytics_cache.data_version(connection)
+    hit = analytics_cache.get(connection, key, version)
+    if hit is not None:
+        return hit
+    started = perf_counter()
+    report = build_analytics(connection, investor_id, on, benchmark, advised_only, universe)
+    payload = AnalyticsResponse.model_validate(report).model_dump(mode="json")
+    elapsed = round((perf_counter() - started) * 1000)
+    try:
+        analytics_cache.put(connection, key, version, payload, elapsed)
+    except Exception:
+        connection.rollback()
+        logger.exception(
+            "analytics_cache_put_failed",
+            extra={
+                "investor_ref": hashlib.sha256(investor_id.encode()).hexdigest()[:16],
+                "as_of": on.isoformat(),
+                "compute_ms": elapsed,
+            },
+        )
+    return payload
+
+
+CAPITAL_STATES = ("STRONG", "WEAKENING", "CAUTION", "RECOVERY", "NEUTRAL", "UNKNOWN")
+
+
+def _float(value: Any) -> float | None:
+    """Presentation-only conversion of a Decimal string ratio/score. Never money."""
+    return None if value is None else float(Decimal(str(value)))
+
+
+def _paise(value: Any) -> str | None:
+    return (
+        None if value is None else str(Decimal(str(value)).quantize(Decimal("0.01"), ROUND_HALF_UP))
+    )
+
+
+def _flat_evidence(evidence: dict) -> dict[str, float | None]:
+    """Scalar evidence figures for the card; nested detail stays in the advisor report."""
+    out: dict[str, float | None] = {}
+    for key, value in evidence.items():
+        if key == "subscores" and isinstance(value, dict):
+            out.update({f"{name}_score": _float(score) for name, score in value.items()})
+        elif value is None or isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[key] = None if value is None else float(value)
+        elif isinstance(value, str):
+            try:
+                out[key] = float(Decimal(value))
+            except ArithmeticError:
+                continue  # a label (ISIN, basis), not a figure
+    return out
+
+
+def _metric_view(metric: dict, value: Any) -> dict:
+    return {"status": metric["status"], "reasons": metric["reasons"], "value": value}
+
+
+def _health_evidence(overview: dict) -> dict:
+    cov = overview["health_covariance_evidence"]
+    cov_value = None
+    if cov["value"]:
+        sample = cov["value"]["sample_covariance"]["value"]
+        cov_value = {
+            "annual_volatility": _float(sample["annual_volatility"]),
+            "diversification_volatility_ratio": _float(sample["diversification_volatility_ratio"]),
+            "observations": sample["observations"],
+            "risk_shares": {
+                isin: {
+                    "risk_share": _float(row["risk_share"]),
+                    "annual_volatility_contribution": _float(row["annual_volatility_contribution"]),
+                }
+                for isin, row in sample["risk_contributions"].items()
+            },
+            "shrinkage_sensitivity": {
+                alpha: None
+                if variant["value"] is None
+                else {
+                    "annual_volatility": _float(variant["value"]["annual_volatility"]),
+                    "diversification_volatility_ratio": _float(
+                        variant["value"]["diversification_volatility_ratio"]
+                    ),
+                }
+                for alpha, variant in cov["value"]["identity_target_sensitivity"].items()
+            },
+            "period": cov["period"],
+        }
+    recovery = overview["health_recovery"]
+    weights = overview["health_weight_sensitivity"]
+    cutoffs = overview["health_grade_sensitivity"]
+    return {
+        "covariance": _metric_view(cov, cov_value),
+        "recovery": _metric_view(
+            recovery,
+            None
+            if recovery["value"] is None
+            else {
+                **recovery["value"],
+                "terminal_drawdown": _float(recovery["value"]["terminal_drawdown"]),
+                "period": recovery["period"],
+            },
+        ),
+        "weight_sensitivity": _metric_view(
+            weights,
+            None
+            if weights["value"] is None
+            else {
+                "minimum": _float(weights["value"]["minimum"]),
+                "maximum": _float(weights["value"]["maximum"]),
+                "grades": weights["value"]["grades"],
+                "relative_weight_change": _float(weights["value"]["relative_weight_change"]),
+            },
+        ),
+        "grade_cutoff_sensitivity": _metric_view(cutoffs, cutoffs["value"]),
+        "validation": overview["health_validation"],
+    }
+
+
+def _health_projection(report: dict, context: dict, enabled: bool) -> dict:
+    """portfolio-health-v1 onto HealthOut. Withheld components stay withheld."""
+    base = dict(
+        rule_version="portfolio-health-v1",
+        profile_status=context["profile_status"],
+        bands=[],
+        drivers=[],
+        components=[],
+    )
+    if not enabled:
+        return dict(
+            base, score=None, grade=None, status="unavailable", reasons=["FEATURE_DISABLED"]
+        )
+    health = report["sections"]["overview"]["health"]
+    if context["skipped"]:
+        # The calculation saw only reconciled holdings; any full-book grade would be false.
+        return dict(
+            base,
+            score=None,
+            grade=None,
+            status="unavailable",
+            reasons=["UNRECONCILED_SEGMENTS"],
+            bands=health["bands"],
+            limitations=health["limitations"],
+        )
+    components = [
+        dict(
+            key=c["key"],
+            label=c["label"],
+            weight=float(Decimal(c["weight"])),
+            score=_float(c["score"]["value"]),
+            points=_float(c["contribution"]),
+            evidence=_flat_evidence(c["evidence"]),
+            status=c["score"]["status"],
+            reasons=c["score"]["reasons"],
+        )
+        for c in health["components"]
+    ]
+    bounds = health["score_bounds"]
+    return dict(
+        base,
+        score=health["display_score"],
+        grade=health["grade"],
+        components=components,
+        drivers=health["drivers"],
+        bands=health["bands"],
+        status=health["score"]["status"],
+        reasons=health["score"]["reasons"],
+        score_exact=health["score"]["value"],
+        score_bounds=None
+        if health["score"]["value"] is not None
+        else {"lower": _float(bounds["lower"]), "upper": _float(bounds["upper"])},
+        data_status=health["data_status"],
+        limitations=health["limitations"],
+        evidence=_health_evidence(report["sections"]["overview"]),
+    )
+
+
+def _capital_projection(report: dict, context: dict, positions: list[dict], enabled: bool):
+    """Bucket money in paise, weights in percent; UNKNOWN is a bucket, never dropped."""
+    metric = report["sections"]["overview"]["capital_state"]
+    if not enabled or context["skipped"] or metric["value"] is None:
+        return {}, {}, None
+    value = metric["value"]
+    for position in positions:
+        state = value["states"].get(position["isin"])
+        position["capital_state"] = state["state"] if state else None
+        position["capital_state_reason"] = state["reason"] if state else None
+    money = {k: _paise(value["buckets"][k]) for k in CAPITAL_STATES}
+    pct = (
+        {k: float(Decimal(value["bucket_weights"][k]) * 100) for k in CAPITAL_STATES}
+        if value["bucket_weights"]
+        else {}
+    )
+    return money, pct, _paise(value["total"])
+
+
 def build_analytics(
     connection: Any, investor_id: str, on: date, benchmark: str, advised_only: bool, universe: str
 ) -> dict:
@@ -687,6 +948,15 @@ def build_analytics(
         # A contract failure is visible and cannot silently invoke legacy calculations.
         from fastapi import HTTPException
 
+        logger.error(
+            "advisor_input_unavailable",
+            extra={
+                "investor_ref": hashlib.sha256(investor_id.encode()).hexdigest()[:16],
+                "as_of": on.isoformat(),
+                "method_version": report.get("method_version"),
+                "reasons": report.get("reasons", []),
+            },
+        )
         raise HTTPException(
             422, detail={"code": "ADVISOR_INPUT_UNAVAILABLE", "reasons": report.get("reasons", [])}
         )
@@ -792,7 +1062,7 @@ def build_analytics(
         positions, context["unresolved"] + [{"isin": s.isin} for s in context["skipped"]], on
     )
     candidate["active_method"] = "advisor_v2"
-    candidate["method_version"] = "trackr-analytics-0.2"
+    candidate["method_version"] = "trackr-analytics-0.4"
     candidate["lenses"] = sections["valuation_map"]
 
     def allocation(field):
@@ -835,6 +1105,10 @@ def build_analytics(
         if overview["day_change_pct"]["value"] is None
         else float(Decimal(overview["day_change_pct"]["value"]) * 100),
     )
+    health_enabled = get_settings().advisor_health_enabled
+    capital_money, capital_pct, capital_total = _capital_projection(
+        report, context, positions, health_enabled
+    )
     # Legacy KPI fields allow null in this new coordinated contract; full value must
     # never become the known subtotal merely to satisfy a required string.
     return dict(
@@ -844,14 +1118,7 @@ def build_analytics(
         coverage=coverage,
         sources={s["id"]: s["dataset"] for s in data["sources"]},
         kpi=kpi,
-        health=dict(
-            score=None,
-            grade=None,
-            components=[],
-            drivers=["RUBRIC_NOT_VALIDATED"],
-            bands=[],
-            rule_version="advisor-rubric-unavailable",
-        ),
+        health=_health_projection(report, context, health_enabled),
         factors=factors,
         risk=risk,
         risk_coverage=risk_coverage,
@@ -863,15 +1130,15 @@ def build_analytics(
         allocation={"sector": allocation("sector"), "market_cap": allocation("market_cap")},
         correlation=_correlations(report, positions, data),
         fundamentals=fundamentals,
-        capital_state={},
+        capital_state=capital_money,
         derived=dict(
             effective_holdings=milestone.number(overview["effective_holdings"]) if full else None,
             concentration_target=None,
             position_count=len(positions),
             vol_ratio_1y=None,
             growth_delta_vs_benchmark=sections["performance"]["growth_delta"]["value"],
-            capital_state_pct={},
-            capital_state_total=None,
+            capital_state_pct=capital_pct,
+            capital_state_total=capital_total,
             lenses=integration.lens_projection(candidate, positions),
         ),
         growth_of_100k=None,

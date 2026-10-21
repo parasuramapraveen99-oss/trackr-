@@ -21,4 +21,4 @@ the entire point of storing a version rather than a boolean.
 from __future__ import annotations
 
 #: Bump together with the text on the frontend's /terms page.
-CURRENT_TOS_VERSION = "2026-09-terms-v1"
+CURRENT_TOS_VERSION = "2026-10-terms-v2"

@@ -131,7 +131,10 @@ select = [
 # specification and must not be trimmed to satisfy an unused-import check.
 "app/engine/*.py" = ["F401"]
 # Preserve the supplied calculation kernels byte-for-byte so source hashes remain useful.
-"app/analytics/_vendor/advisor/*.py" = ["E501", "I001", "B007", "B905", "F401"]
+"app/analytics/_vendor/advisor/*.py" = ["E501", "E701", "E702", "I001", "B007", "B905", "F401"]
+# Supplier health tests ported with only import/fixture-path edits, for the same reason.
+"tests/analytics/test_advisor_health_evidence.py" = ["E401", "E501", "E701", "E702", "E741", "I001", "B905"]
+"tests/analytics/test_advisor_health_integration.py" = ["E401", "E402", "F401", "E501", "E701", "E702", "E741", "I001", "B905"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's dependency-injection idiom IS `Depends(...)`/`Query(...)` in an argument

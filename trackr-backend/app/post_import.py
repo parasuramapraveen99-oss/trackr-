@@ -149,6 +149,13 @@ def _run_cycle_locked(
             conn.rollback()
             logger.warning("post_import_sectors_failed", exc_info=True)
             out["sectors"] = {"error": type(exc).__name__}
+        try:
+            out["health_profiles"] = phase("health_profile_enqueue", enqueue_health_profiles, conn)
+            conn.commit()
+        except Exception as exc:  # enrichment must not stop valuation steps below
+            conn.rollback()
+            logger.warning("post_import_health_profiles_failed", exc_info=True)
+            out["health_profiles"] = {"error": type(exc).__name__}
 
     try:
         out["fno"] = phase(
@@ -232,6 +239,18 @@ def _enqueue_sectors(conn):
     if not _isins_missing_sector(conn):
         return {"queued": False}
     enqueue(conn, "security_sectors", {}, work_key="security-sectors-missing")
+    return {"queued": True}
+
+
+def enqueue_health_profiles(conn):
+    """Exchange rubric profiles for held companies; BSE is slow, so never inline."""
+    from app.db import health_profiles
+    from app.db.prices import held_isins
+    from app.jobs.queue import enqueue
+
+    if not health_profiles.due(conn, held_isins(conn)):
+        return {"queued": False}
+    enqueue(conn, "security_health_profiles", {}, work_key=health_profiles.WORK_KEY)
     return {"queued": True}
 
 

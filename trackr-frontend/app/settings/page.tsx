@@ -272,7 +272,11 @@ export default function SettingsPage() {
                 <p style={{ margin: 0, font: "var(--type-body-sm)", color: "var(--text-tertiary)" }}>
                   <Link href="/privacy">Go to Privacy &amp; data →</Link>
                   {"  ·  "}
-                  <Link href="/terms">Terms &amp; Privacy Policy</Link>
+                  <Link href="/terms">Terms of Use</Link>
+                  {"  ·  "}
+                  <Link href="/privacy-policy">Privacy Policy</Link>
+                  {"  ·  "}
+                  <Link href="/grievance">Grievance</Link>
                 </p>
               </Section>
             )}

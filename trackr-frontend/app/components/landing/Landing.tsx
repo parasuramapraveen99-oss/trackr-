@@ -13,7 +13,7 @@ const INGESTION = [
   { icon: <Table />, title: "Upload a file", body: "Use the CSV or tradebook your broker already gives you. Upload the same file twice and nothing gets counted twice." },
   { icon: <Mail />, title: "Forward an email", body: "Forward your contract notes to us. We read the trades out of them for you." },
   { icon: <Doc />, title: "Share a PDF", body: "Send a contract note PDF. We turn it into a clean list of your trades." },
-  { icon: <Shield />, title: "Delete anytime", body: "One click deletes everything. Your trades, your history, your account." },
+  { icon: <Shield />, title: "Delete anytime", body: "Delete a portfolio, its trades and its files from Privacy & data whenever you want." },
 ];
 
 export function Landing() {
@@ -31,7 +31,7 @@ export function Landing() {
               We could not store one if we tried. All we need is a file you upload or an
               email you forward.
             </p>
-            <Link href="/coming-soon?feature=Compliance" className="l-navlink" style={{ marginTop: 22, display: "inline-flex", alignItems: "center", gap: 8, fontWeight: 500 }}>
+            <Link href="/privacy-policy" className="l-navlink" style={{ marginTop: 22, display: "inline-flex", alignItems: "center", gap: 8, fontWeight: 500 }}>
               How we handle your data <ArrowRight size={15} />
             </Link>
           </Reveal>

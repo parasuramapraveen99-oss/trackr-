@@ -67,7 +67,7 @@ def risk(returns, *, rf=None, target=None, benchmark=None, elapsed_days=None,
         raise ValueError('RETURN_BELOW_MINUS_ONE')
     keys=['cum_return','cagr','volatility','sharpe','sortino','beta','tracking_error',
           'information_ratio','var_1d_95','var_1d_99','cvar_1d_95','max_drawdown',
-          'growth_100k','var_1d_95_value']
+          'growth_100k','var_1d_95_value','threshold_tail_mean_1d_95']
     out={k:Metric.unavailable('INSUFFICIENT_HISTORY',method=k+'_v1',
                              unit='INR' if k in ('growth_100k','var_1d_95_value') else 'ratio') for k in keys}
     if not r:
@@ -123,7 +123,9 @@ def risk(returns, *, rf=None, target=None, benchmark=None, elapsed_days=None,
         for p,key in [(D('.05'),'var_1d_95'),(D('.01'),'var_1d_99')]:
             out[key]=Metric(max(ZERO,-quantile(r,p)),method='historical_r7_loss_floor_v1')
         threshold=quantile(r,D('.05'))
-        out['cvar_1d_95']=Metric(max(ZERO,-mean([x for x in r if x<=threshold])),method='threshold_tail_including_ties_v1')
+        from .health_evidence import expected_shortfall
+        out['cvar_1d_95']=Metric(expected_shortfall(r),method='empirical_signed_loss_tail_integral_95_v2')
+        out['threshold_tail_mean_1d_95']=Metric(max(ZERO,-mean([x for x in r if x<=threshold])),method='threshold_tail_including_ties_v1')
         if portfolio_value is not None:
             value=decimal(portfolio_value)
             if value<0:

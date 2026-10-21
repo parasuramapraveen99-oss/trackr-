@@ -32,7 +32,7 @@ def calculate(data: dict) -> dict:
     report["integration"] = {
         "backend": True,
         "consumer_contract": "trackr-advisor-v2",
-        "source_version": "0.2.0",
+        "source_version": "0.4.0",
     }
     report["reasons"] = [
         r

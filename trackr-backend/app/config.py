@@ -200,6 +200,10 @@ class Settings(BaseSettings):
     mf_reference_enabled: bool = False
     mf_valuation_enabled: bool = False
     mf_tax_enabled: bool = False
+    # ADVISOR_HEALTH_ENABLED: operational kill switch for the portfolio-health-v1 grade,
+    # capital state and health evidence on the advisor analytics page. Off shows a named
+    # "disabled" state; it never hides the tile or falls back to another grade.
+    advisor_health_enabled: bool = True
     # Whether THIS host may call AMFI (portal.amfiindia.com). A capability, like
     # NSE_API_ENABLED: where false, AMFI queue tasks are left for a host that can.
     amfi_fetch_enabled: bool = True

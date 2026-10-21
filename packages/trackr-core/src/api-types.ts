@@ -1126,15 +1126,58 @@ export interface HealthComponent {
    * never as zero.
    */
   evidence: Record<string, number | null>;
+  /** advisor_v2: this component's own availability; never imputed. */
+  status?: "available" | "provisional" | "unavailable" | null;
+  reasons?: string[];
+}
+
+export interface HealthEvidenceView<T> {
+  status: "available" | "provisional" | "unavailable";
+  reasons: string[];
+  value: T | null;
+}
+
+/** portfolio-health-v1 diagnostics; ratios are fractions, never money. */
+export interface AdvisorHealthEvidence {
+  covariance: HealthEvidenceView<{
+    annual_volatility: number | null;
+    diversification_volatility_ratio: number | null;
+    observations: number;
+    risk_shares: Record<string, { risk_share: number | null; annual_volatility_contribution: number | null }>;
+    shrinkage_sensitivity: Record<string, { annual_volatility: number | null; diversification_volatility_ratio: number | null } | null>;
+    period: Record<string, string | null>;
+  }>;
+  recovery: HealthEvidenceView<{
+    longest_underwater_sessions: number;
+    current_underwater_sessions: number;
+    completed_recovery_sessions: number[];
+    terminal_drawdown: number | null;
+    period: Record<string, string | null>;
+  }>;
+  weight_sensitivity: HealthEvidenceView<{ minimum: number | null; maximum: number | null; grades: string[]; relative_weight_change: number | null }>;
+  grade_cutoff_sensitivity: HealthEvidenceView<Record<string, string>>;
+  validation: Record<string, string>;
 }
 
 export interface AnalyticsHealth {
+  /** Display integer (HALF_UP of score_exact); the grade is read from this same number. */
   score: number | null;
   grade: string | null;
   components: HealthComponent[];
   drivers: string[];
   bands: [string, number][];
   rule_version: string;
+  // advisor_v2 (portfolio-health-v1) only:
+  status?: "available" | "provisional" | "unavailable" | null;
+  reasons?: string[];
+  score_exact?: string | null;
+  /** Missing-information bound when a component is unavailable; not a confidence interval. */
+  score_bounds?: { lower: number; upper: number } | null;
+  data_status?: { complete: boolean; available_components: number; total_components: number; calibration: string } | null;
+  limitations?: string[];
+  /** ISIN -> "bank" | "non_financial" | the named reason no rubric applies. */
+  profile_status?: Record<string, string>;
+  evidence?: Partial<AdvisorHealthEvidence>;
 }
 
 export interface FactorScore {
@@ -1225,6 +1268,8 @@ export interface AnalyticsPosition {
   sector: string | null;
   market_cap_bucket: string | null;
   capital_state: string | null;
+  /** advisor_v2: why the capital state is UNKNOWN, e.g. MISSING_PRICE_HISTORY. */
+  capital_state_reason?: string | null;
   trend: string | null;
   pe: number | null;
   pb: number | null;

@@ -94,9 +94,12 @@ def analytics(
     """Everything the analytics screen renders, from one replay of the ledger."""
     on = as_of or date.today()
     if calculation_method == "advisor_v2":
-        from app.routers.analytics_advisor import build_analytics
+        from app.routers.analytics_advisor import IST, cached_analytics
 
-        return build_analytics(connection, investor_id, on, benchmark, advised_only, universe)
+        # Indian-market sessions: "today" is the IST date, the same date the warm job and
+        # the current-classification rules use, so a default request can hit the cache.
+        on = as_of or datetime.now(IST).date()
+        return cached_analytics(connection, investor_id, on, benchmark, advised_only, universe)
     transactions = load_transactions(connection, investor_id, advised_only=advised_only, date_to=on)
 
     # Partitioned, not raw: a segment that does not reconcile is carried out as a named

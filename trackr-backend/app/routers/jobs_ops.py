@@ -119,13 +119,64 @@ def drain_jobs_cron(
     idempotent on a content hash. On the Hobby plan this fires once per day, which is
     sufficient for a backfill nobody is waiting on -- responsiveness, when it is wanted, is
     a free external pinger against ``POST /ops/jobs/drain``, not a paid plan.
+
+    Before draining it queues the daily reference sweep for health-rubric profiles older
+    than their refresh age, so the same tick also works it. A sweep failure is reported
+    in the response and logged; it does not stop the queue from draining.
     """
-    return _drain(
+    from app.post_import import enqueue_health_profiles
+
+    try:
+        sweep = enqueue_health_profiles(conn)
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        logger.exception("health_profile_sweep_enqueue_failed")
+        sweep = {"error": type(exc).__name__}
+    summary = _drain(
         conn,
         settings,
         budget_seconds=DEFAULT_HTTP_BUDGET_SECONDS,
         limit=DEFAULT_HTTP_LIMIT,
     )
+    return {**summary, "health_profile_sweep": sweep}
+
+
+@ops_router.get(
+    "/cron/analytics-warm",
+    summary="Precompute advisor analytics after the daily data load (CRON_SECRET)",
+    dependencies=[Depends(require_cron_secret)],
+)
+def analytics_warm_cron(
+    conn: Any = Depends(get_conn),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Queue one warm job per investor for today's IST date, then drain within budget.
+
+    Scheduled twice (vercel.json): 14:00 UTC (19:30 IST), after prices 10:30, corporate
+    actions 10:45, fundamentals 10:50, reference sync 11:35 and snapshots 13:30 UTC have
+    written the day's data; and 18:45 UTC (00:15 IST), so the new IST date is ready before
+    morning use. Jobs left undrained stay queued; a page request computes on a miss.
+    """
+    from datetime import datetime, timedelta
+
+    from app.db import analytics_cache
+    from app.routers.analytics_advisor import IST
+
+    today = datetime.now(IST).date()
+    pruned = analytics_cache.prune(conn, today - timedelta(days=7))
+    queued = drain.enqueue_analytics_warm(conn, today)
+    summary = _drain(
+        conn,
+        settings,
+        budget_seconds=DEFAULT_HTTP_BUDGET_SECONDS,
+        limit=DEFAULT_HTTP_LIMIT,
+    )
+    logger.info("analytics_warm", extra={"as_of": today.isoformat(), "queued": queued})
+    return {
+        **summary,
+        "analytics_warm": {"as_of": today.isoformat(), "queued": queued, "pruned": pruned},
+    }
 
 
 @ops_router.get(

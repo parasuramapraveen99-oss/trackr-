@@ -16,12 +16,20 @@ import { Banner, Button } from "./ds";
  *  half-filled form they left behind) and the landing page's footer. `/coming-soon` is
  *  where the landing's not-yet-built links (Pricing, About, Blog, ...) point, and a
  *  signed-out visitor clicking one must see that placeholder, not a login wall. */
-const PUBLIC_PATHS = ["/login", "/register", "/terms", "/privacy", "/coming-soon"];
+const PUBLIC_PATHS = [
+  "/login",
+  "/register",
+  "/terms",
+  "/privacy-policy",
+  "/grievance",
+  "/privacy",
+  "/coming-soon",
+];
 
 /** Public paths that are also app screens. Signed out they render bare like any public
  *  page; signed in they get the ribbon, so leaving them works like leaving Settings or
  *  Import instead of needing the browser's back button. */
-const SHELLED_WHEN_SIGNED_IN = ["/privacy", "/terms"];
+const SHELLED_WHEN_SIGNED_IN = ["/privacy", "/terms", "/privacy-policy", "/grievance"];
 
 /** `/` serves two different pages — the marketing landing to a signed-out visitor, the
  *  dashboard to a signed-in one — so it is the one private route that must not bounce

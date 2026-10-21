@@ -66,6 +66,9 @@ class HealthComponentOut(BaseModel):
     #: sentence -- see ``app.analytics.verdict.Component`` for why a sentence was the
     #: wrong container for a figure that existed nowhere else.
     evidence: dict[str, float | None] = {}
+    #: advisor_v2 only: the component's own availability, never imputed.
+    status: str | None = None
+    reasons: list[str] = []
 
 
 class HealthOut(BaseModel):
@@ -75,6 +78,19 @@ class HealthOut(BaseModel):
     drivers: list[str]
     bands: list[list]
     rule_version: str
+    # advisor_v2 (portfolio-health-v1) fields. Absent on the legacy method.
+    status: str | None = None
+    reasons: list[str] = []
+    #: Exact Decimal score as a string; ``score`` is its HALF_UP display integer.
+    score_exact: str | None = None
+    #: Missing-information bound when components are unavailable; not a confidence interval.
+    score_bounds: dict[str, float] | None = None
+    data_status: dict[str, Any] | None = None
+    limitations: list[str] = []
+    #: ISIN -> rubric profile, or the named reason it has none.
+    profile_status: dict[str, str] = {}
+    #: Covariance, recovery and sensitivity diagnostics, projected to plain numbers.
+    evidence: dict[str, Any] = {}
 
 
 class FactorOut(BaseModel):
@@ -185,6 +201,8 @@ class PositionOut(BaseModel):
     sector: str | None = None
     market_cap_bucket: str | None = None
     capital_state: str | None = None
+    #: advisor_v2: why a holding's capital state is UNKNOWN (e.g. MISSING_PRICE_HISTORY).
+    capital_state_reason: str | None = None
     trend: str | None = None
     #: Fundamentals. Null means UNKNOWN and must render as n/a, never as zero.
     pe: float | None = None

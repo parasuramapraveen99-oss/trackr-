@@ -34,6 +34,14 @@
       "schedule": "30 13 * * *"
     },
     {
+      "path": "/ops/cron/analytics-warm?slot=after-snapshots",
+      "schedule": "0 14 * * *"
+    },
+    {
+      "path": "/ops/cron/analytics-warm?slot=new-ist-day",
+      "schedule": "45 18 * * *"
+    },
+    {
       "path": "/ops/narrative/run-cron",
       "schedule": "15 11 * * *"
     },

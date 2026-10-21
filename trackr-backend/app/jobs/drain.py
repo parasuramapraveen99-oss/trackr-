@@ -183,10 +183,74 @@ def _security_sectors(conn, store, payload):
     return refresh_sectors(conn, missing) if missing else {"unclassified": []}
 
 
+def _security_health_profiles(conn, store, payload):
+    """Reference data for every held company, not one investor's: investor_id is NULL.
+
+    One bounded batch per job. Leftover work is re-queued without a work_key because the
+    claimed job still holds that key while RUNNING; a duplicate is harmless since each
+    run recomputes what is due.
+    """
+    from app.db import health_profiles
+    from app.db.prices import held_isins
+    from app.jobs.queue import enqueue
+
+    result = health_profiles.refresh(conn, health_profiles.due(conn, held_isins(conn)))
+    if result["remaining"]:
+        enqueue(conn, "security_health_profiles", {})
+        conn.commit()
+    if result["failed"]:
+        logger.warning("security_health_profiles_partial", extra={"failed": result["failed"]})
+    return result
+
+
+KIND_ANALYTICS_WARM = "analytics_report_warm"
+
+
+def _analytics_report_warm(conn, store, payload):
+    """Precompute one investor's default advisor analytics into the fingerprinted cache.
+
+    Payload carries ids only. Uses the same read-through path as the page, so a warm row
+    is exactly what a request would have computed; a hit means nothing changed since.
+    """
+    from datetime import date
+
+    from app.db.universe import DEFAULT_UNIVERSE
+    from app.prices.index_sources import NIFTY_TRI_INDEX_NAME
+    from app.routers.analytics_advisor import cached_analytics
+
+    investor_id = payload["investor_id"]
+    on = date.fromisoformat(payload["as_of"])
+    report = cached_analytics(conn, investor_id, on, NIFTY_TRI_INDEX_NAME, False, DEFAULT_UNIVERSE)
+    return {"investor_id": investor_id, "as_of": on.isoformat(), "grade": report["health"]["grade"]}
+
+
+def enqueue_analytics_warm(conn, on) -> int:
+    """One deduplicated warm job per investor with any recorded transaction."""
+    from app.jobs.queue import enqueue
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT a.investor_id FROM transaction t JOIN account a ON a.id = t.account_id"
+        )
+        investors = [str(r[0]) for r in cur.fetchall()]
+    for investor_id in investors:
+        enqueue(
+            conn,
+            KIND_ANALYTICS_WARM,
+            {"investor_id": investor_id, "as_of": on.isoformat()},
+            investor_id=investor_id,
+            work_key=f"analytics-warm:{investor_id}:{on.isoformat()}",
+        )
+    conn.commit()
+    return len(investors)
+
+
 _HANDLERS = {
     KIND_PARSE_DOCUMENT: _parse_document,
+    KIND_ANALYTICS_WARM: _analytics_report_warm,
     "butler_tick": _butler_tick,
     "security_sectors": _security_sectors,
+    "security_health_profiles": _security_health_profiles,
     "hosted_job_tick": _hosted_tick,
     "monitor_tick": _monitor_tick,
     "email_delivery": email_jobs.extract_delivery,

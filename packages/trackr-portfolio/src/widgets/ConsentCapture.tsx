@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties } from "react";
-import { api, ApiError, CONSENT_NOTICE_TEXT } from "@trackr/core";
+import { api, ApiError } from "@trackr/core";
 import type { ConsentStatusOut } from "@trackr/core";
 import { Banner, Button, Icon, Skeleton } from "@trackr/ui";
+import { ConsentNotice } from "./ConsentNotice";
 
 /**
  * Consent: status and withdrawal, plus the ONE grant action the host application owns.
@@ -187,18 +188,7 @@ export function ConsentCapture({
           <p style={{ margin: 0, font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>
             Nothing can be imported or entered for this investor until this is granted.
           </p>
-          <p
-            style={{
-              margin: 0,
-              font: "var(--type-body-sm)",
-              color: "var(--text-secondary)",
-              background: "var(--surface-sunken)",
-              border: "1px solid var(--border)",
-              padding: "10px 12px",
-            }}
-          >
-            {CONSENT_NOTICE_TEXT}
-          </p>
+          <ConsentNotice />
           <div>
             <Button size="sm" onClick={() => void handleGrant()} disabled={busy}>
               {busy ? "Saving…" : "Grant permission"}

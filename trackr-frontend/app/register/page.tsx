@@ -106,9 +106,13 @@ export default function RegisterPage() {
           style={{ alignItems: "flex-start", font: "var(--type-body-sm)" }}
           label={
             <span style={{ display: "block", lineHeight: 1.5 }}>
-              I accept the{" "}
+              I am 18 or over and accept the{" "}
               <Link href="/terms" target="_blank">
-                Terms of Service and Privacy Policy
+                Terms of Use
+              </Link>{" "}
+              and{" "}
+              <Link href="/privacy-policy" target="_blank">
+                Privacy Policy
               </Link>
               .
             </span>

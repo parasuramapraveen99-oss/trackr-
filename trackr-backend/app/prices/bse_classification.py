@@ -10,11 +10,15 @@ NSE leaves unclassified, never for the whole market.
 from __future__ import annotations
 
 import json
+import logging
 import time
+import urllib.error
 import urllib.request
 from typing import Any
 
 from app.prices.sources import BROWSER_HEADERS
+
+logger = logging.getLogger(__name__)
 
 SCRIP_LIST_URL = (
     "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w"
@@ -44,6 +48,57 @@ def scrip_codes(opener: Any = None) -> dict[str, str]:
         for r in rows
         if r.get("ISIN_NUMBER") and r.get("SCRIP_CD")
     }
+
+
+#: Failures a single scrip header can raise; anything else is a defect and propagates.
+FETCH_ERRORS = (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError)
+
+
+def classification_headers(
+    isins: list[str], opener: Any = None, pause: float = 0.4
+) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
+    """ISIN -> the exchange's three classification levels, plus named per-ISIN failures.
+
+    Returns ``({isin: {sector, industry_group, industry, source_ref}}, {isin: reason})``.
+    A scrip that fails is reported, logged and skipped; it never stops the others and is
+    never given a guessed classification.
+    """
+    if not isins:
+        return {}, {}
+    codes = scrip_codes(opener)
+    found: dict[str, dict[str, str]] = {}
+    failed: dict[str, str] = {}
+    for isin in isins:
+        code = codes.get(isin)
+        if not code:
+            failed[isin] = "NOT_LISTED_ON_BSE"
+            continue
+        url = HEADER_URL.format(code=code)
+        try:
+            header = _get(url, opener)
+        except FETCH_ERRORS as exc:
+            logger.warning(
+                "bse_classification_header_failed",
+                extra={"isin": isin, "scrip_code": code, "error": type(exc).__name__},
+            )
+            failed[isin] = "FETCH_FAILED:" + type(exc).__name__
+            continue
+        finally:
+            time.sleep(pause)
+        if not isinstance(header, dict) or header.get("ISIN") not in (None, "", isin):
+            failed[isin] = "HEADER_DESCRIBES_ANOTHER_SECURITY"
+            continue
+        sector = (header.get("Sector") or "").strip()
+        if not sector:
+            failed[isin] = "NO_EXCHANGE_SECTOR"
+            continue
+        found[isin] = {
+            "sector": sector,
+            "industry_group": (header.get("IGroup") or "").strip() or None,
+            "industry": (header.get("ISubGroup") or header.get("Industry") or "").strip() or None,
+            "source_ref": url,
+        }
+    return found, failed
 
 
 def sectors(isins: list[str], opener: Any = None, pause: float = 0.4) -> dict[str, str]:

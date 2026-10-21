@@ -116,6 +116,31 @@ export function AdvisorWindowMatrix({ data, basis }: { data: AnalyticsResponse; 
   </svg></div>;
 }
 
+/** Tile figure: the grade and its display score, or the honest missing-information range. */
+export function AdvisorHealthFigure({ data }: { data: AnalyticsResponse }) {
+  const h = data.health;
+  if (h.grade != null) return <>{h.grade}<Small>{h.score}/100 · provisional</Small></>;
+  const bounds = h.score_bounds;
+  return <span style={{ color: "var(--text-tertiary)" }}>—<Small>
+    {h.reasons?.includes("FEATURE_DISABLED") ? "disabled" : bounds ? `range ${Math.round(bounds.lower)}–${Math.round(bounds.upper)}` : "withheld"}
+  </Small></span>;
+}
+
+/** One line under the bars: why the grade is withheld, or what it is not. */
+export function AdvisorHealthNote({ data }: { data: AnalyticsResponse }) {
+  const h = data.health;
+  const style = { font: "400 12px var(--font-label)", color: "var(--text-secondary)", marginTop: 6, lineHeight: 1.5 };
+  if (h.reasons?.includes("FEATURE_DISABLED")) return <div style={style}>Portfolio health is switched off on this server.</div>;
+  if (h.reasons?.includes("UNRECONCILED_SEGMENTS")) return <div style={style}>Withheld: some holdings do not reconcile yet, so a whole-portfolio grade would be wrong. See Trust.</div>;
+  if (h.grade == null) {
+    const missing = h.components.filter((c) => c.score == null);
+    return <div style={style} title={missing.map((c) => `${c.label}: ${(c.reasons ?? []).map(readable).join(" · ")}`).join("\n")}>
+      Grade pending · {h.data_status?.available_components ?? h.components.length - missing.length} of {h.components.length} parts measured. Waiting on: {missing.map((c) => c.label.toLowerCase()).join(", ")}. No missing part is filled with an average.
+    </div>;
+  }
+  return <div style={style}>House rubric, not yet calibrated: describes structure and past risk, not future returns or suitability.</div>;
+}
+
 export function AdvisorMethodCoverage({ data }: { data: AnalyticsResponse }) {
   const [ref, width] = useWidth();
   const tip = useTip();
@@ -123,6 +148,7 @@ export function AdvisorMethodCoverage({ data }: { data: AnalyticsResponse }) {
   if (!report) return null;
   const groups = [
     ["Value", Object.values(report.sections.overview).filter((x) => x && typeof x === "object" && "status" in x)],
+    ["Health", data.health.components.map((c) => ({ value: c.score, status: c.status ?? "unavailable", reasons: c.reasons ?? [] }))],
     ["Factors", Object.values(report.sections.factor_score).map((x) => x.portfolio)],
     ["Risk", Object.values(report.sections.risk_return)],
     ["Periods", Object.values(report.sections.performance.windows)],

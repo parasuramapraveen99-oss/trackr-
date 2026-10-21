@@ -5,16 +5,17 @@ import { useAuth } from "@/lib/auth-context";
 import { api, ApiError } from "@/lib/api-client";
 import { CONSENT_NOTICE_VERSION } from "@/lib/consent";
 import type { ConsentGrantOut, ConsentStatusOut } from "@/lib/api-types";
+import { ConsentNotice } from "@trackr/portfolio";
 import { Banner, Icon } from "../ds";
 
 /**
  * Step 1 — permission, in one click. One click, and now genuinely one button.
  *
- * KEPT DELIBERATELY MINIMAL. The wizard's title and subtitle already state what the
- * permission covers, and the footer already carries the two real actions — "Allow and
- * continue" or "I'll do this later". This step's own body used to restate that case with
- * a three-item promise list and a "read the exact wording" disclosure; both are gone so
- * the screen is just the ask, the grant, and the skip.
+ * THE NOTICE IS SHOWN, NOT SUMMARISED. The footer carries the two real actions — "Allow
+ * and continue" or "I'll do this later" — and the body shows the shared `ConsentNotice`
+ * (the exact wording and version the grant is recorded against). An earlier version dropped
+ * the notice for brevity, which left consent rows naming text the person was never shown;
+ * DPDP Rule 3 requires the notice itself, itemised, before consent.
  *
  * THE BUG THIS SCREEN USED TO HAVE. There were two buttons that looked identical: an
  * inline one that did the work, and the wizard footer's — sitting in the position every
@@ -104,6 +105,10 @@ export function GrantAccessStep({
           {error}
         </Banner>
       )}
+
+      {/* The notice the grant is recorded against. It must be on screen when the footer's
+          "Allow and continue" is pressed, or the consent row names a notice nobody saw. */}
+      {granted === false && <ConsentNotice />}
 
       {granted === true && (
         <p

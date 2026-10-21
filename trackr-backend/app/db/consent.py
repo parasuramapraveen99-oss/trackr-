@@ -34,7 +34,7 @@ PURPOSE_PORTFOLIO_TRACKING = "PORTFOLIO_TRACKING"
 #: one, which is the entire reason ``notice_version`` exists as its own column instead
 #: of being inferred from ``consent_given_at``. The frontend's consent-capture screen
 #: hardcodes this same literal.
-CURRENT_NOTICE_VERSION = "2026-08-consent-v1"
+CURRENT_NOTICE_VERSION = "2026-10-consent-v2"
 
 
 class ConsentMissingError(PermissionError):
