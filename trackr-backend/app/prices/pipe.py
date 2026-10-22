@@ -7,6 +7,7 @@ unaffected. Neither blocks the other, which is why they are not the same code pa
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
@@ -181,16 +182,21 @@ def fetch_day(
     return result
 
 
-def trading_days(start: date, end: date) -> list[date]:
-    """Weekdays in range. Exchange holidays still 404 and are handled as NotPublished.
+def trading_days(start: date, end: date, sessions: Iterable[date] = ()) -> list[date]:
+    """Weekdays in range, plus any weekend ``sessions`` known to have traded. Exchange
+    holidays still 404 and are handled as NotPublished.
 
     Not a holiday calendar: one would need maintaining every year, and getting it wrong
     means either missing a real trading day or alerting on a real holiday. Letting the
-    exchange's own 404 be the answer is self-maintaining.
+    exchange's own 404 be the answer is self-maintaining. Weekend special sessions (the
+    1 February 2026 Budget Sunday) cannot be found that way -- nobody asks for a Sunday --
+    so callers pass ``app.db.index_levels.weekend_sessions``: the dates an index close
+    proves were traded. This function stays storage-free.
     """
+    extra = {d for d in sessions if start <= d <= end}
     days, cursor = [], start
     while cursor <= end:
-        if cursor.weekday() < 5:
+        if cursor.weekday() < 5 or cursor in extra:
             days.append(cursor)
         cursor += timedelta(days=1)
     return days
@@ -202,6 +208,7 @@ def backfill_days(
     already_present: set[date] = frozenset(),
     sources: list[Any] | None = None,
     notifier: Notifier | None = None,
+    sessions: Iterable[date] = (),
 ) -> list[PipeResult]:
     """``fetch_day`` for every trading day in ``[start, end]`` that isn't already stored.
 
@@ -214,7 +221,7 @@ def backfill_days(
     "already stored" means and does the upserting itself.
     """
     clamped_start = max(start, NSE_BHAVCOPY_EARLIEST)
-    days = [d for d in trading_days(clamped_start, end) if d not in already_present]
+    days = [d for d in trading_days(clamped_start, end, sessions) if d not in already_present]
     return [fetch_day(d, sources=sources, notifier=notifier) for d in days]
 
 
@@ -240,9 +247,7 @@ def main(on: date | None = None) -> int:
     with connect() as conn:
         stored = store_day(conn, result)
 
-    renamed = (
-        f"  renamed={len(stored.symbol_changes)}" if stored.symbol_changes else ""
-    )
+    renamed = f"  renamed={len(stored.symbol_changes)}" if stored.symbol_changes else ""
     print(
         f"{result.price_date}  fetched={result.fetched or '-'}"
         f"  stored={stored.prices_stored}{renamed}"

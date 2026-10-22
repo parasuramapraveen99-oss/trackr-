@@ -7,6 +7,7 @@ import json
 from datetime import date, timedelta
 
 from app.db import corporate_actions as ca
+from app.db.index_levels import weekend_sessions
 from app.db.reference_sync import enqueue
 from app.db.security_alias import SecurityAlias, add_alias, reconcile_after_alias, verify_alias
 from app.engine.corporate_actions import CorporateAction, Verification, check_price_consistency
@@ -182,9 +183,11 @@ def resolve_split(conn, number: str, source=None) -> None:
     if len(new_rows) != 1:
         raise EvidencePending("New ISIN/symbol is not unique on the circular's dated sessions")
     before = []
+    # A weekend special session (Budget Sunday) is the real preceding session.
+    traded = weekend_sessions(conn, ex_date - timedelta(days=7), ex_date)
     for offset in range(1, 8):
         on = ex_date - timedelta(days=offset)
-        if on.weekday() >= 5:
+        if on.weekday() >= 5 and on not in traded:
             continue
         try:
             rows, before_receipt = _day(conn, on, source, "NSE")

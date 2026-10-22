@@ -24,6 +24,7 @@ from decimal import Decimal
 from time import monotonic
 from typing import Any
 
+from app.db.index_levels import weekend_sessions
 from app.engine import fno_types
 from app.prices.alerts import Notifier
 from app.prices.fno_sources import (
@@ -276,7 +277,7 @@ def backfill_fno_prices(
     start = max(start, NSE_BHAVCOPY_EARLIEST)
     present = fno_price_days_present(conn, start, end)
     out: list[dict[str, Any]] = []
-    for day in trading_days(start, end):
+    for day in trading_days(start, end, weekend_sessions(conn, start, end)):
         wanted = [s for s in sources if (s.exchange, day) not in present]
         if wanted:
             out.append(refresh_fno_prices(conn, day, sources=wanted, notifier=notifier))

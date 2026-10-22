@@ -39,7 +39,7 @@ from app.config import Settings, get_settings
 from app.database import get_conn, money, rate
 from app.db import snapshots
 from app.db.fund_reference import exchange_isins
-from app.db.index_levels import get_index_levels
+from app.db.index_levels import get_index_levels, weekend_sessions
 from app.db.prices import (
     held_isins,
     latest_prices,
@@ -1129,11 +1129,14 @@ def _run_snapshots(connection: Any, start: date, end: date, notifier: Notifier) 
     skipped = []
     points = []
     with snapshot_batch(connection, start, end) as batch:
-        results = backfill_days(start, end, already_present=batch.settled, notifier=notifier)
+        sessions = weekend_sessions(connection, start, end)
+        results = backfill_days(
+            start, end, already_present=batch.settled, notifier=notifier, sessions=sessions
+        )
         fetched = store_backfilled_days(connection, results)
         if fetched:
             batch.prices_changed()
-        days = trading_days(start, end)
+        days = trading_days(start, end, sessions)
         batch.prefetch({scope for on in days for scope in batch.missing_scopes(on)})
         for on in days:
             for investor_id, advised_only in batch.missing_scopes(on):
@@ -1301,7 +1304,7 @@ def catch_up_snapshots(
         "skipped_missing_price": [],
         "complete": True,
     }
-    days = trading_days(start, target)
+    days = trading_days(start, target, weekend_sessions(connection, start, target))
     with snapshot_batch(connection, start, target) as batch:
         offset = 0
         while offset < len(days):
@@ -1353,8 +1356,13 @@ HOLE_RETRY_INTERVAL = "7 days"
 
 
 def enqueue_interior_holes(connection: Any, limit: int = HOLE_REPAIR_BATCH) -> int:
-    """Queue a SNAPSHOT rebuild for every weekday missing BETWEEN an investor's first and
+    """Queue a SNAPSHOT rebuild for every session missing BETWEEN an investor's first and
     last stored row (``_catch_up_start`` only sees a short head or tail).
+
+    A session is a weekday, or a weekend day that traded (an index close exists, see
+    ``weekend_sessions``) AND whose closes are already stored: the repair builds from
+    stored prices, so offering a Sunday before its bhavcopy lands would value it at
+    Friday's closes and keep that flat day permanently.
 
     Each is a ``repair`` task: one that still cannot be priced is recorded on the task
     (``unrepairable``) and finished, not failed -- and offered again only after
@@ -1370,6 +1378,8 @@ def enqueue_interior_holes(connection: Any, limit: int = HOLE_REPAIR_BATCH) -> i
                    SELECT b.investor_id, b.advised_only, g::date AS on_
                    FROM b, generate_series(greatest(b.lo, %s), b.hi, interval '1 day') g
                    WHERE extract(isodow FROM g) < 6
+                      OR (EXISTS (SELECT 1 FROM index_level l WHERE l.level_date = g::date)
+                          AND EXISTS (SELECT 1 FROM price p WHERE p.price_date = g::date))
                )
                SELECT d.investor_id::text, d.on_, d.advised_only FROM d
                WHERE NOT EXISTS (
@@ -1441,9 +1451,10 @@ def _catch_up_start(connection: Any, target: date) -> date | None:
         latest = cur.fetchone()[0]
 
     starts: list[date] = [latest + timedelta(days=1) if latest else target]
+    sessions = weekend_sessions(connection, SNAPSHOT_HISTORY_FLOOR, target)
     for investor_id, first in first_trade.items():
         need_from = max(first, SNAPSHOT_HISTORY_FLOOR)
-        days = trading_days(need_from, target) if need_from <= target else []
+        days = trading_days(need_from, target, sessions) if need_from <= target else []
         if not days:
             continue
         have_first, have_last = stored.get(investor_id, (None, None))

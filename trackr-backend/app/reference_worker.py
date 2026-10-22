@@ -17,6 +17,7 @@ from app.db import reference_sync as queue
 from app.db.action_ingestion import record_observation, write_coverage
 from app.db.connection import connect
 from app.db.gap_resolution import ResearchDeferred
+from app.db.index_levels import weekend_sessions
 from app.db.isin_change_circulars import refresh_isin_change_feed
 from app.db.security_alias import promote_draft_aliases
 from app.engine.corporate_actions import Verification, check_price_consistency
@@ -268,9 +269,11 @@ def _verify_action(conn, action_id, source=None):
     prior_rows = []
     before = []
     before_receipt = None
+    # A weekend special session (Budget Sunday) is the real preceding session.
+    traded = weekend_sessions(conn, action.ex_date - timedelta(days=7), action.ex_date)
     for offset in range(1, 8):
         on = action.ex_date - timedelta(days=offset)
-        if on.weekday() >= 5:
+        if on.weekday() >= 5 and on not in traded:
             continue
         try:
             before, before_receipt = identity._day(conn, on, source, exchange)

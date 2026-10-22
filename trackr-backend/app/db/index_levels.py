@@ -109,3 +109,20 @@ def list_index_levels(
             (index_name, start, end),
         )
         return [(row[0], row[1]) for row in cur.fetchall()]
+
+
+def weekend_sessions(conn: Any, start: date, end: date) -> frozenset[date]:
+    """Saturdays and Sundays in ``[start, end]`` on which the exchanges actually traded.
+
+    The evidence is a published index close on that date -- NSE Indices publishes a level
+    only for a session that took place (1 February 2026, the Union Budget Sunday, has
+    NIFTY50/NIFTY500 TRI closes and full NSE and BSE bhavcopies). No hand-kept calendar:
+    a special session is known once its index level is stored. Weekdays are not returned;
+    the weekday calendar already covers them and a holiday settles as NotPublished.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT level_date FROM index_level "
+        "WHERE level_date BETWEEN %s AND %s AND extract(isodow FROM level_date) >= 6",
+        (start, end),
+    ).fetchall()
+    return frozenset(row[0] for row in rows)

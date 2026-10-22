@@ -24,6 +24,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from app.db.fund_reference import sync_route_observations
+from app.db.index_levels import weekend_sessions
 from app.db.prices import (
     held_isins,
     price_dates_settled,
@@ -140,14 +141,15 @@ def backfill_price_history(
     settled = price_dates_settled(connection, start, end)
     closed = _closed_days(connection, start, end)
     skip = settled | (closed or set())
-    pending = [d for d in reversed(trading_days(start, end)) if d not in skip]
+    sessions = weekend_sessions(connection, start, end)
+    pending = [d for d in reversed(trading_days(start, end, sessions)) if d not in skip]
 
     fetched_days = closed_days = failed_days = 0
     began = time.monotonic()
     for on in pending[:max_days]:
         if time.monotonic() - began > time_budget_seconds:
             break
-        result = backfill_days(on, on, sources=sources, notifier=notifier)[0]
+        result = backfill_days(on, on, sources=sources, notifier=notifier, sessions=sessions)[0]
         try:
             if store_backfilled_days(connection, [result]):
                 fetched_days += 1
@@ -201,15 +203,18 @@ def backfill_universe_prices(
             (members, start, end),
         )
         done = {d for d, n in cur.fetchall() if n >= coverage * len(members)}
+    sessions = weekend_sessions(connection, start, end)
     pending = [
-        d for d in reversed(trading_days(max(start, NSE_BHAVCOPY_EARLIEST), end)) if d not in done
+        d
+        for d in reversed(trading_days(max(start, NSE_BHAVCOPY_EARLIEST), end, sessions))
+        if d not in done
     ]
     fetched = failed = 0
     began = time.monotonic()
     for on in pending:
         if time.monotonic() - began > time_budget_seconds:
             break
-        result = backfill_days(on, on, sources=sources)[0]
+        result = backfill_days(on, on, sources=sources, sessions=sessions)[0]
         try:
             if result.prices:
                 store_day(connection, result)

@@ -22,6 +22,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.db.identity_evidence import traded_identifier
+from app.db.index_levels import weekend_sessions
 
 logger = logging.getLogger("db.price_adjustments")
 
@@ -115,9 +116,11 @@ def resolve_demerger_adjustments(
         try:
             after, after_receipt = fetch_day(ex_date)
             before = before_receipt = None
+            # A weekend special session (Budget Sunday) is the real preceding session.
+            traded = weekend_sessions(conn, ex_date - timedelta(days=7), ex_date)
             for offset in range(1, 8):
                 on = ex_date - timedelta(days=offset)
-                if on.weekday() >= 5:
+                if on.weekday() >= 5 and on not in traded:
                     continue
                 try:
                     before, before_receipt = fetch_day(on)
