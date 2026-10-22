@@ -4,12 +4,13 @@ import Link from "next/link";
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { api, ApiError } from "@/lib/api-client";
-import type { ClientsOverview, InvestorIn, InvestorOut } from "@/lib/api-types";
+import type { ClientsOverview, EraseResultOut, InvestorIn, InvestorOut } from "@/lib/api-types";
 import { useFetch } from "@/lib/use-fetch";
 import { AccountOnboarding } from "../components/AccountOnboarding";
 import { ConsentCapture } from "../components/ConsentCapture";
 import { FilePasswords } from "../components/FilePasswords";
 import { ClientsTree } from "../components/ClientsTree";
+import { DeletePortfolio } from "../components/DeletePortfolio";
 import { PageHeader } from "../components/PageHeader";
 import { PageBody } from "../components/Shell";
 import { Banner, Button, Field, Input, Select } from "../components/ds";
@@ -52,6 +53,7 @@ type TabKey = (typeof TABS)[number]["key"];
  */
 export default function SettingsPage() {
   const { user, investorId, setInvestorId, token, asOf } = useAuth();
+  const [deleted, setDeleted] = useState<{ name: string | null; result: EraseResultOut } | null>(null);
   // One request feeds both the clients tree and the family menu in "Add another portfolio".
   const overview = useFetch<ClientsOverview>(
     token ? "/investors/overview" : null,
@@ -234,6 +236,25 @@ export default function SettingsPage() {
                     <ClientsTree overview={overview} />
                   </div>
                 </Section>
+
+                {deleted && (
+                  <Banner tone="positive" title={`${deleted.name ?? "Portfolio"} deleted`}>
+                    {deleted.result.transactions} transaction{deleted.result.transactions === 1 ? "" : "s"} and {deleted.result.documents} stored file{deleted.result.documents === 1 ? "" : "s"} removed from our servers. Pick another user above to continue.
+                  </Banner>
+                )}
+                {investorId && (
+                  <DeletePortfolio
+                    key={investorId}
+                    investorId={investorId}
+                    token={token}
+                    portfolioName={overview.data?.clients.find((c) => c.id === investorId)?.display_name ?? null}
+                    onDeleted={(result) => {
+                      setDeleted({ name: overview.data?.clients.find((c) => c.id === investorId)?.display_name ?? null, result });
+                      setInvestorId("");
+                      overview.refetch();
+                    }}
+                  />
+                )}
               </>
             )}
 

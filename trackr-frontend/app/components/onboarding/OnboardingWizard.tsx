@@ -33,10 +33,9 @@ interface StepDef {
 const ALL_STEPS: StepDef[] = [
   {
     key: "access",
-    rail: { label: "Permission" },
-    title: "First, your permission",
-    subtitle:
-      "We read only the statements you send us. We never log in to your broker, and we never ask for your password. You can take this permission back any time in Settings.",
+    rail: { label: "Welcome" },
+    title: "Your whole portfolio, made clear",
+    subtitle: "Here is what Trackr+ does for you. You can take back your permission any time in Settings.",
   },
   {
     key: "brokers",
@@ -45,10 +44,8 @@ const ALL_STEPS: StepDef[] = [
   },
   {
     key: "files",
-    rail: { label: "Your history" },
-    title: "Bring in your past trades",
-    subtitle:
-      "Drop in whatever your broker gave you. Any broker, any file, all at once. We work out what each file is.",
+    rail: { label: "Import stocks" },
+    title: "Bring in your tradebook",
   },
   {
     key: "align",
@@ -60,8 +57,6 @@ const ALL_STEPS: StepDef[] = [
     key: "forward",
     rail: { label: "Gmail forwarding" },
     title: "Set up Gmail forwarding",
-    subtitle:
-      "Follow the highlighted clicks from Gmail settings to your attachment-only forwarding filter.",
   },
 ];
 

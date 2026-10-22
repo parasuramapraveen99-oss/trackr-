@@ -68,9 +68,6 @@ export function DividendCard({ names }: { names?: Record<string, string> }) {
   const { investorId, token, asOf } = useAuth();
   const [range, setRange] = useState<RangeKey>("1Y");
   const [drawerOpen, setDrawerOpen] = useState(false);
-  /** Which chart: receipts alone, or announced beside received per security. `null` until
-   *  the person picks one, so the default can follow the data (see `view` below). */
-  const [tab, setTab] = useState<"received" | "announced" | null>(null);
 
   // No `from`: the earliest dividend has to be known to say which ranges have anything of
   // their own to show, and switching range must not cost a round trip. `to` is the
@@ -145,35 +142,9 @@ export function DividendCard({ names }: { names?: Record<string, string> }) {
   }, [dividendRows, effectiveRange, asOf]);
 
   /**
-   * Per-security totals inside the window, largest first -- summed and ordered in Decimal.
+   * Received over the WHOLE selected window.
    *
-   * Only POSITIVE totals get a bar, because a bar with a negative height is not a shape.
-   * That is a drawing decision and nothing more: a reversing row is still in `received`
-   * below, so the headline and the plot can legitimately disagree, and the headline is the
-   * one that is complete.
-   *
-   * A row whose amount cannot be read is dropped from its security's bar rather than
-   * counted as zero -- and `received` goes unavailable for the same row, so the card
-   * cannot show a confident total built on a value it could not parse.
-   */
-  const bars = useMemo(() => {
-    const byIsin = new Map<string, Dec>();
-    for (const t of windowRows) {
-      const amount = parseDecimal(t.dividend_amount);
-      if (amount === null) continue;
-      byIsin.set(t.isin, (byIsin.get(t.isin) ?? new Dec(0)).plus(amount));
-    }
-    return Array.from(byIsin, ([isin, amount]) => ({ isin, amount }))
-      .filter((b) => b.amount.greaterThan(0))
-      .sort((a, b) => b.amount.comparedTo(a.amount))
-      .slice(0, MAX_BARS);
-  }, [windowRows]);
-
-  /**
-   * Received over the WHOLE selected window, not the sum of the drawn bars.
-   *
-   * Every DIVIDEND row in the window counts, including a negative reversing one and
-   * including securities past the twelve-bar limit. Null when a row's amount is
+   * Every DIVIDEND row in the window counts, including a negative reversing one. Null when a row's amount is
    * unreadable: a total that silently skipped it would be smaller than the truth while
    * looking exact.
    */
@@ -181,10 +152,6 @@ export function DividendCard({ names }: { names?: Record<string, string> }) {
     () => sumDecimals(windowRows.map((t) => t.dividend_amount)),
     [windowRows]
   );
-
-  /** The tallest bar, as the denominator for every bar's height. Never zero: `bars` only
-   *  holds positive totals, so this is positive whenever there is anything to draw. */
-  const tallest = bars.reduce((most, b) => (b.amount.greaterThan(most) ? b.amount : most), new Dec(1));
 
   /**
    * Announced beside received, per security, inside the selected window -- the Announced
@@ -252,10 +219,6 @@ export function DividendCard({ names }: { names?: Record<string, string> }) {
 
   const label = (isin: string) => names?.[isin] ?? isin;
 
-  /** With no receipt on file the Received chart can only ever be empty, so the card opens
-   *  on the comparison instead; once the person picks a tab, their choice stands. */
-  const view = tab ?? (earliest ? "received" : "announced");
-
   /** Never claims a receipt the ledger cannot show. With declarations on file but no
    *  DIVIDEND row yet, the card is genuinely reporting the announced side only, and
    *  saying "Received since ..." there would name a date that does not exist. */
@@ -273,20 +236,9 @@ export function DividendCard({ names }: { names?: Record<string, string> }) {
       title="Dividends"
       subtitle={subtitle}
       action={
-        // Range on top, the chart choice directly under it: both decide what the plot
-        // shows, so they sit together rather than one above the card and one inside it.
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
-          <SegmentedControl size="sm" options={options} value={range} onChange={setRange} />
-          <SegmentedControl
-            size="sm"
-            options={[
-              { value: "received", label: "Received" },
-              { value: "announced", label: "Announced vs received" },
-            ]}
-            value={view}
-            onChange={(v) => setTab(v as "received" | "announced")}
-          />
-        </div>
+        // One chart, always the announced view: no receipt feed exists yet (CLAUDE.md, the
+        // four dividend states), so a Received-only chart was empty for nearly everyone.
+        <SegmentedControl size="sm" options={options} value={range} onChange={setRange} />
       }
     >
       {ledger.loading || expected.loading ? (
@@ -346,12 +298,15 @@ export function DividendCard({ names }: { names?: Record<string, string> }) {
       ) : (
         <>
           <div style={{ display: "flex", gap: 40 }}>
-            <div>
-              <span style={figureLabel}>Received</span>
-              <span className="tabular-nums" style={figureValue()}>
-                {formatMoney(received?.toString() ?? null)}
-              </span>
-            </div>
+            {/* Received appears only once the ledger holds a real DIVIDEND row. */}
+            {earliest && (
+              <div>
+                <span style={figureLabel}>Received</span>
+                <span className="tabular-nums" style={figureValue()}>
+                  {formatMoney(received?.toString() ?? null)}
+                </span>
+              </div>
+            )}
             <button
               type="button"
               onClick={() => setDrawerOpen(true)}
@@ -372,7 +327,6 @@ export function DividendCard({ names }: { names?: Record<string, string> }) {
             </button>
           </div>
 
-          {view === "announced" ? (
             <AnnouncedComparison
               rows={comparison.rows}
               top={comparison.top}
@@ -382,96 +336,6 @@ export function DividendCard({ names }: { names?: Record<string, string> }) {
                 effectiveRange === "Max" ? "your ledger" : RANGE_SPAN_LABEL[effectiveRange]
               }
             />
-          ) : bars.length === 0 ? (
-            // A window with no DIVIDEND rows is a true, known zero -- nothing was paid in
-            // it -- so the figure above stays ₹0 and only the plot goes away. Reserving
-            // the band's height keeps the card from resizing as ranges are switched.
-            <div style={{ marginTop: 20, minHeight: PLOT_H }}>
-              <EmptyState
-                title={`No dividends received in ${
-                  effectiveRange === "Max" ? "your ledger" : RANGE_SPAN_LABEL[effectiveRange]
-                }`}
-                hint={
-                  earliest
-                    ? `First received ${formatDate(earliest)}. Widen the range to see it.`
-                    : announcedUnavailable
-                      ? // The projection request failed: claim nothing about it.
-                        "Announced dividends could not be loaded."
-                      : // Declarations exist, no receipt does -- never imply it was paid.
-                        "Import a funds statement to record dividends received."
-                }
-              />
-            </div>
-          ) : (
-            <>
-              <div
-                style={{
-                  marginTop: 20,
-                  display: "flex",
-                  alignItems: "flex-end",
-                  gap: 10,
-                  height: PLOT_H,
-                  borderBottom: "1px solid var(--ledger-ink)",
-                }}
-              >
-                {bars.map((b) => {
-                  // Ratio in Decimal; a NUMBER only once it is a pixel height. The exact
-                  // amount goes to the label and the tooltip, never derived back from `h`.
-                  const h = b.amount.dividedBy(tallest).times(PLOT_H - 26).toNumber();
-                  const exact = b.amount.toString();
-                  return (
-                    <div
-                      key={b.isin}
-                      title={`${label(b.isin)} · ${formatMoney(exact)}`}
-                      style={{
-                        flex: 1,
-                        display: "flex",
-                        flexDirection: "column",
-                        alignItems: "center",
-                        justifyContent: "flex-end",
-                        gap: 5,
-                        height: "100%",
-                      }}
-                    >
-                      <span
-                        className="tabular-nums"
-                        style={{ fontFamily: "var(--font-slip)", fontSize: 12, color: "var(--ledger-ink-soft)" }}
-                      >
-                        {formatMoney(exact)}
-                      </span>
-                      <div
-                        style={{
-                          width: "100%",
-                          maxWidth: 38,
-                          height: Math.max(3, h),
-                          background: "var(--data-received)",
-                          borderRadius: "var(--radius-xs) var(--radius-xs) 0 0",
-                        }}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-              <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-                {bars.map((b) => (
-                  <span
-                    key={b.isin}
-                    style={{
-                      flex: 1,
-                      textAlign: "center",
-                      font: "var(--type-label)",
-                      color: "var(--chart-axis-text)",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {label(b.isin)}
-                  </span>
-                ))}
-              </div>
-            </>
-          )}
 
           <div
             style={{
@@ -492,15 +356,14 @@ export function DividendCard({ names }: { names?: Record<string, string> }) {
                 color: "var(--text-secondary)",
               }}
             >
-              <span style={{ width: 11, height: 11, borderRadius: 2, background: "var(--data-received)" }} />
-              Received
-              {view === "announced" && (
+              {earliest && (
                 <>
-                  <span style={{ ...ANNOUNCED_BAR, width: 11, height: 11, marginLeft: 10 }} />
-                  Announced
+                  <span style={{ width: 11, height: 11, borderRadius: 2, background: "var(--data-received)" }} />
+                  <span style={{ marginRight: 10 }}>Received</span>
                 </>
               )}
-              {view === "received" && ", per security"}
+              <span style={{ ...ANNOUNCED_BAR, width: 11, height: 11 }} />
+              Announced
             </span>
             <p style={{ margin: 0, font: "var(--type-body-sm)", color: "var(--text-tertiary)" }}>
               {/* Announced is a projection, never income -- say so in as few words as possible. */}

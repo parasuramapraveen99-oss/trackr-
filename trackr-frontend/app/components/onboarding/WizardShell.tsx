@@ -273,7 +273,8 @@ function StepRail({
           <li
             key={step.label}
             aria-current={current ? "step" : undefined}
-            style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}
+            // Never shrink: on a phone the rail scrolls sideways rather than stacking labels.
+            style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}
           >
             {i > 0 && (
               <span

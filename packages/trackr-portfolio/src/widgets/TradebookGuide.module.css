@@ -1,4 +1,7 @@
-.help { display:flex; align-items:center; gap:8px; flex-wrap:wrap; color:var(--text-secondary); font:var(--type-body-sm); }
+.help { display:flex; align-items:center; gap:10px 12px; justify-content:center; padding:14px; border:1px dashed var(--border-strong); background:var(--surface-sunken); flex-wrap:wrap; color:var(--text-secondary); font:var(--type-body-sm); }
+.guideButton { display:inline-flex; align-items:center; gap:8px; padding:9px 16px; border:1px solid var(--ink-900); background:var(--ink-900); color:var(--text-inverse); font:var(--type-label); font-weight:600; letter-spacing:.12em; cursor:pointer; }
+.guideButton:hover { opacity:.88; }
+.guideButton:focus-visible { outline:2px solid var(--border-focus); outline-offset:2px; }
 .overlay { position:fixed; inset:0; z-index:100; display:flex; align-items:center; justify-content:center; background:var(--overlay-scrim,rgba(0,0,0,.75)); padding:24px; }
 .dialog { width:100%; max-width:1000px; max-height:calc(100dvh - 48px); display:flex; flex-direction:column; background:var(--surface); border:1px solid var(--border-strong); box-shadow:var(--shadow-overlay); color:var(--text-primary); }
 .header { display:flex; justify-content:space-between; gap:16px; padding:22px 26px; border-bottom:1px solid var(--border); }

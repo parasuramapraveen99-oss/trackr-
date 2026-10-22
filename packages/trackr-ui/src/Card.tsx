@@ -46,11 +46,14 @@ export function Card({ title, subtitle, action, children, padding, tone = "defau
             display: "flex",
             alignItems: "flex-start",
             justifyContent: "space-between",
+            flexWrap: "wrap",
             gap: 12,
             marginBottom: 16,
           }}
         >
-          <div style={{ minWidth: 0 }}>
+          {/* On a narrow screen the action wraps under the title instead of pushing the
+              card wider than the viewport. */}
+          <div style={{ minWidth: 0, flex: "1 1 220px" }}>
             {title && <h3 style={cardTitle}>{title}</h3>}
             {subtitle && (
               <p style={{ margin: "6px 0 0", font: "var(--type-body-sm)", color: "var(--text-tertiary)" }}>

@@ -23,8 +23,6 @@ const ALLOWED = ["pdf", "csv", "xlsx"] as const;
  * sit in a browser for a minute before the server got a chance to say no. */
 const MAX_BYTES = 25 * 1024 * 1024;
 
-const CAS_TEMPLATE = "CAS Holdings\nStatement Date,YYYY-MM-DD\nBroker,\nTotal Securities,\nPortfolio Value,\nPAN,\nISIN,Quantity,Market Price,Market Value\n";
-
 interface Rejected {
   filename: string;
   reason: string;
@@ -323,12 +321,9 @@ export function FileUploadStep({
           {!compact && <div className={visual.intro}>
             <ImportIllustration />
             <span className={visual.eyebrow}>Your portfolio starts here</span>
-            <h3>A few files.<br />Your whole investment story.</h3>
-            <p>Bring your stock contract notes, mutual fund CAS and tradebooks together. Drop your files beside this panel to get started.</p>
-            <div className={visual.fileTypes}><span>Contract notes</span><span>Mutual fund CAS</span><span>Tradebooks</span></div>
+            <h3>Upload your tradebook, contract notes and CAS</h3>
           </div>}
           <div className={compact ? visual.compactUploadSide : visual.uploadSide}>
-            {!compact && <div className={visual.uploadHeading}><Icon name="plus" size={16} /> New import</div>}
             <div
               className={`${visual.dropZone} ${compact ? visual.compactDropZone : ""} ${dragging ? visual.dragging : ""}`}
               onDragOver={(e) => { e.preventDefault(); if (!uploading) setDragging(true); }}
@@ -352,14 +347,7 @@ export function FileUploadStep({
               <p>or drag and drop files here</p>
               <input ref={inputRef} type="file" disabled={uploading} aria-label="Upload statements" multiple accept=".pdf,.csv,.xlsx" onChange={(e) => void upload(Array.from(e.target.files ?? []))} style={{ display: "none" }} />
             </div>
-            <span className={visual.formatHint}>Tradebooks: CSV or XLSX · Contract notes: PDF, CSV or XLSX<br />CAS: PDF or a holdings CSV/XLSX · Up to 25 MB per file<br />Select several files in one go. We identify each one.</span>
-            <details style={{ font: "var(--type-body-sm)", color: "var(--text-secondary)", marginTop: 10 }}>
-              <summary style={{ cursor: "pointer" }}>CAS spreadsheet format</summary>
-              <p>Use one broker and one holdings table per file. Include the statement date, security count and portfolio total, followed by ISIN, quantity, market price and market value for every holding. These balances are checked against your trade history.</p>
-              <p>For mutual fund folios and transaction details, upload the original CAS PDF. Contract-note CSVs must include their charges and totals.</p>
-              <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(CAS_TEMPLATE)}`} download="cas-holdings-template.csv">Download the holdings template</a>
-              <p>Fill in the template, using YYYY-MM-DD for the statement date. PAN is optional. Save as CSV or XLSX.</p>
-            </details>
+            <span className={visual.formatHint}>Tradebook, contract notes or CAS. You can pick several at once.</span>
           </div>
         </div>
         {!compact && <div className={visual.journey}><span><b>1</b> Choose files</span><span>→</span><span><b>2</b> We read them</span><span>→</span><span><b>3</b> Review your imports</span></div>}
@@ -427,7 +415,6 @@ export function FileUploadStep({
 
 
       <TradebookGuide accounts={accounts} brokers={brokers} />
-      {!compact && <WhereToFindFiles accounts={accounts} brokers={brokers} />}
     </div>
   );
 }
@@ -650,65 +637,6 @@ function OutcomeRow({
         ))}
       </div>
     </li>
-  );
-}
-
-/**
- * Where the files live, per broker the person actually said they use.
- *
- * This used to name Zerodha Console and nothing else, which is unhelpful in exactly the
- * proportion that the product is multi-broker. The steps come from `GET /brokers`, so a
- * broker added to the registry gets its instructions here for free and none of them can
- * describe a console that does not exist.
- */
-function WhereToFindFiles({ accounts, brokers }: { accounts: AccountOut[]; brokers: BrokerOut[] }) {
-  const mine = brokers.filter((b) =>
-    accounts.some((a) => a.broker.trim().toUpperCase() === b.code)
-  );
-  if (mine.length === 0) return null;
-
-  return (
-    <details style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-      <summary style={{ cursor: "pointer", font: "var(--type-body-sm)", color: "var(--text-tertiary)" }}>
-        Where do I find these files?
-      </summary>
-      <div style={{ display: "grid", gap: 14, marginTop: 10 }}>
-        {mine.map((broker) => (
-          <div key={broker.code}>
-            {mine.length > 1 && (
-              <p
-                style={{
-                  margin: "0 0 4px",
-                  font: "var(--type-label)",
-                  textTransform: "uppercase",
-                  letterSpacing: "var(--tracking-label)",
-                  color: "var(--text-tertiary)",
-                }}
-              >
-                {broker.name}
-              </p>
-            )}
-            <ol
-              style={{
-                margin: 0,
-                paddingLeft: 18,
-                display: "grid",
-                gap: 6,
-                font: "var(--type-body-sm)",
-                color: "var(--text-secondary)",
-              }}
-            >
-              {broker.console_steps.map((step) => (
-                <li key={step}>{step}</li>
-              ))}
-            </ol>
-          </div>
-        ))}
-        <p style={{ margin: 0, font: "var(--type-body-sm)", color: "var(--text-tertiary)" }}>
-          Drag everything you downloaded into the box above, in one go.
-        </p>
-      </div>
-    </details>
   );
 }
 

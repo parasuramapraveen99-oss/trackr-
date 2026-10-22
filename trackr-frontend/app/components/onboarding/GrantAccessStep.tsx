@@ -7,6 +7,7 @@ import { CONSENT_NOTICE_VERSION } from "@/lib/consent";
 import type { ConsentGrantOut, ConsentStatusOut } from "@/lib/api-types";
 import { ConsentNotice } from "@trackr/portfolio";
 import { Banner, Icon } from "../ds";
+import { FeatureShowcase } from "./FeatureShowcase";
 
 /**
  * Step 1 — permission, in one click. One click, and now genuinely one button.
@@ -100,15 +101,28 @@ export function GrantAccessStep({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <FeatureShowcase />
       {error && (
         <Banner tone="negative" title="We couldn't save your permission">
           {error}
         </Banner>
       )}
 
-      {/* The notice the grant is recorded against. It must be on screen when the footer's
-          "Allow and continue" is pressed, or the consent row names a notice nobody saw. */}
-      {granted === false && <ConsentNotice />}
+      {/* The notice the grant is recorded against. It stays on this screen, one click open,
+          directly above the footer's "Allow and continue" -- folded for length, never removed,
+          or the consent row would name a notice nobody could read. */}
+      {granted === false && (
+        <div style={{ display: "grid", gap: 8, padding: "12px 14px", border: "1px solid var(--border)", background: "var(--surface)" }}>
+          <p style={{ margin: 0, display: "flex", gap: 8, alignItems: "center", font: "var(--type-body-sm)", color: "var(--text-primary)" }}>
+            <Icon name="privacy" size={15} />
+            We only read the statements you send us. We never ask for your broker password.
+          </p>
+          <details>
+            <summary style={{ cursor: "pointer", font: "var(--type-body-sm)", color: "var(--text-link)" }}>Read what you are allowing</summary>
+            <ConsentNotice style={{ marginTop: 8 }} />
+          </details>
+        </div>
+      )}
 
       {granted === true && (
         <p

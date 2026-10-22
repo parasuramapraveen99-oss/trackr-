@@ -1,12 +1,19 @@
 /** Native vector artwork stays crisp in the upload panel and the setup dialog. */
 export function ImportIllustration({ compact = false }: { compact?: boolean }) {
   return (
-    <svg viewBox="0 0 360 220" width={compact ? 160 : 300} role="img" aria-label="Contract notes, CAS statements and tradebooks flowing into your portfolio" style={{ maxWidth: "100%", height: "auto", display: "block" }}>
+    <svg viewBox="0 0 360 220" width={compact ? 160 : 300} role="img" aria-label="Tradebooks, contract notes and CAS statements flowing into your portfolio" style={{ maxWidth: "100%", height: "auto", display: "block" }}>
       <ellipse cx="180" cy="191" rx="126" ry="13" fill="var(--surface-hover)" />
       <circle cx="179" cy="105" r="87" fill="var(--surface-sunken)" />
       <g stroke="var(--border-strong)" strokeWidth="1.5" fill="none">
         <path d="M32 93h37m-29 9h21M290 70h35m-25 10h31M61 158h24m198-5h33M274 33v12m-6-6h12M66 46v10m-5-5h10" />
         <circle cx="305" cy="124" r="4" /><circle cx="82" cy="28" r="3" />
+      </g>
+      <g>
+        {/* Header and label sit above y≈27, where neither tilted sheet reaches. */}
+        <rect x="136" y="2" width="90" height="120" rx="5" fill="var(--surface-raised)" stroke="var(--text-secondary)" strokeWidth="1.8" />
+        <path d="M147 10h18" stroke="var(--ledger-ink-soft)" strokeWidth="3" />
+        <text x="147" y="23" fontFamily="Arial,sans-serif" fontSize="9" fontWeight="bold" fill="var(--text-primary)">TRADEBOOK</text>
+        <path d="M147 29h66M147 39h66M147 49h66M170 29v20M192 29v20" stroke="var(--border-strong)" strokeWidth="1.5" fill="none" />
       </g>
       <g transform="rotate(-13 126 103)">
         <rect x="80" y="43" width="89" height="118" rx="5" fill="var(--surface-raised)" stroke="var(--text-secondary)" strokeWidth="1.8" />

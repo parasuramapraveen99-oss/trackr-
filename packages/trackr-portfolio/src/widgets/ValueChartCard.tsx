@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@trackr/core";
 import { useFetch, usePortfolioRefresh } from "@trackr/core";
 import type { BenchmarkSeriesResponse, IndexSeriesResponse, SnapshotOut } from "@trackr/core";
-import { formatLakh } from "@trackr/core";
+import { formatLakh, parseDecimal } from "@trackr/core";
 import { sampleSnapshotRows } from "./snapshot-sampling";
 // The 1M/3M/6M/1Y/3Y/Max definitions live in lib/ranges.ts so this chart and the
 // dividends card cannot end up meaning different things by the same button.
@@ -92,7 +92,26 @@ interface Sampled {
   /** ₹ lakh as EXACT decimal strings. `null` is a real gap in the snapshot series. */
   market: (string | null)[];
   benchmark: (string | null)[];
+  /** The same points as a percentage of the amount invested on that date -- see pctOfInvested. */
+  marketPct: (string | null)[];
+  benchmarkPct: (string | null)[];
   hasGap: boolean;
+}
+
+/**
+ * (value ÷ invested − 1) × 100, in Decimal, to one place.
+ *
+ * BOTH lines use the portfolio's own invested amount on that date as the base. The index
+ * line replicates the same cash flows (docs/ENGINE_SPEC.md section 6), so with one shared
+ * base the gap between the lines means exactly what it means in rupees, and the portfolio's
+ * last point equals the dashboard's Unrealised % tile. Null when nothing is invested or a
+ * figure is unreadable: a percentage of zero is undefined, never 0%.
+ */
+function pctOfInvested(value: string | null | undefined, invested: string): string | null {
+  const v = parseDecimal(value ?? null);
+  const base = parseDecimal(invested);
+  if (v === null || base === null || base.lte(0)) return null;
+  return v.div(base).minus(1).times(100).toFixed(1);
 }
 
 /**
@@ -117,7 +136,7 @@ function sample(rows: SnapshotOut[], benchmarkByDate: Map<string, string>): Samp
   const first = rows[0];
   const last = rows[rows.length - 1];
   if (!first || !last) {
-    return { labels: [], market: [], benchmark: [], hasGap: false };
+    return { labels: [], market: [], benchmark: [], marketPct: [], benchmarkPct: [], hasGap: false };
   }
   const firstDate = first.as_of;
   const lastDate = last.as_of;
@@ -139,6 +158,8 @@ function sample(rows: SnapshotOut[], benchmarkByDate: Map<string, string>): Samp
       const value = benchmarkByDate.get(r.as_of);
       return value == null ? null : formatLakh(value, LAKH_DIGITS);
     }),
+    marketPct: picked.map((r) => (r ? pctOfInvested(r.market_value, r.invested) : null)),
+    benchmarkPct: picked.map((r) => (r ? pctOfInvested(benchmarkByDate.get(r.as_of), r.invested) : null)),
     hasGap,
   };
 }
@@ -163,6 +184,7 @@ export function ValueChartCard() {
   const { investorId, token, asOf } = useAuth();
   const router = useRouter();
   const [range, setRange] = useState<RangeKey>("1Y");
+  const [unit, setUnit] = useState<"amount" | "percent">("amount");
 
   // Today's point is computed live on the server until the day settles, so while the
   // chart is showing today it refreshes on the same two-minute cadence as the summary.
@@ -286,12 +308,21 @@ export function ValueChartCard() {
     () => new Map((benchmark.data?.points ?? []).map((p) => [p.as_of, p.value])),
     [benchmark.data]
   );
-  const { labels, market, benchmark: benchmarkPoints, hasGap } = useMemo(
+  const { labels, market, benchmark: benchmarkLakh, marketPct, benchmarkPct, hasGap } = useMemo(
     () => sample(rows, benchmarkByDate),
     [rows, benchmarkByDate]
   );
 
-  const hasBenchmark = benchmarkPoints.some((v) => v != null);
+  const hasBenchmark = benchmarkLakh.some((v) => v != null);
+  const percent = unit === "percent";
+  const portfolioPoints = percent ? marketPct : market;
+  const benchmarkPoints = percent ? benchmarkPct : benchmarkLakh;
+  const lastOf = (points: (string | null)[]) => [...points].reverse().find((v) => v != null) ?? null;
+  const show = (v: string | null) => (v == null ? "—" : percent ? `${v.startsWith("-") ? "" : "+"}${v}%` : `₹${v}L`);
+
+  /** The latest plotted date, exactly: invested, your value and the same cash in the index. */
+  const latest = rows[rows.length - 1];
+  const latestBench = latest ? benchmarkByDate.get(latest.as_of) ?? null : null;
 
   /** Holdings these lines leave out, because their buy history doesn't reconcile. Taken
    *  from the most recent plotted snapshot: it is the one whose figure the eye lands on,
@@ -310,11 +341,11 @@ export function ValueChartCard() {
   const PORTFOLIO_COLOR = "var(--alloc-accent)";
   const BENCHMARK_COLOR = "var(--ledger-ink-faint)";
   const series: PlotSeries[] = [
-    { label: "Portfolio value", points: market, color: PORTFOLIO_COLOR, weight: 2.2, area: true },
+    { label: `You ${show(lastOf(portfolioPoints))}`, points: portfolioPoints, color: PORTFOLIO_COLOR, weight: 2.2, area: !percent },
   ];
   if (hasBenchmark) {
     series.push({
-      label: "NIFTY 500",
+      label: `Nifty ${show(lastOf(benchmarkPoints))}`,
       points: benchmarkPoints,
       color: BENCHMARK_COLOR,
       weight: 1.4,
@@ -416,13 +447,38 @@ export function ValueChartCard() {
     }
     return (
       <>
+        {latest && (
+          <div style={{ display: "flex", gap: 28, flexWrap: "wrap", margin: "0 0 10px", font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>
+            {([
+              ["Invested", `₹${formatLakh(latest.invested, LAKH_DIGITS)}L`, "var(--text-primary)"],
+              ["You", percent ? show(pctOfInvested(latest.market_value, latest.invested)) : `₹${formatLakh(latest.market_value, LAKH_DIGITS)}L`, PORTFOLIO_COLOR],
+              ...(hasBenchmark ? [["Same cash in NIFTY 500", latestBench == null ? "—" : percent ? show(pctOfInvested(latestBench, latest.invested)) : `₹${formatLakh(latestBench, LAKH_DIGITS)}L`, "var(--text-primary)"]] : []),
+            ] as [string, string, string][]).map(([name, value, color]) => (
+              <span key={name} style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+                <span style={{ font: "var(--type-label)", textTransform: "uppercase", letterSpacing: "var(--tracking-label)", color: "var(--text-tertiary)" }}>{name}</span>
+                <span className="tabular-nums" style={{ font: "500 18px var(--font-figure)", color }}>{value}</span>
+              </span>
+            ))}
+            <span style={{ alignSelf: "flex-end", font: "var(--type-label)", color: "var(--text-tertiary)" }}>{dayLabel(latest.as_of)}</span>
+            <SegmentedControl
+              size="sm"
+              style={{ marginLeft: "auto", alignSelf: "flex-end" }}
+              options={[
+                { value: "amount", label: "₹", title: "Value in rupees" },
+                { value: "percent", label: "%", title: "Gain as a percentage of the amount invested on each date. Both lines use the same base." },
+              ]}
+              value={unit}
+              onChange={(v) => setUnit(v as "amount" | "percent")}
+            />
+          </div>
+        )}
         <VintageLinePlot
           height={PLOT_HEIGHT}
           labels={labels}
           series={series}
           gapNote={hasGap ? "no snapshot" : undefined}
-          formatTick={(v) => `${v}L`}
-          inlineLabels={false}
+          formatTick={(v) => (percent ? `${v}%` : `${v}L`)}
+          baseline={percent ? { value: "0", label: "0%" } : undefined}
           gridStyle="solid"
         />
         <div
@@ -467,7 +523,9 @@ export function ValueChartCard() {
   return (
     <Card
       title="Portfolio value vs benchmark"
-      subtitle="Daily snapshots in ₹ lakh. Benchmark is NIFTY 500 TRI, replicating your own cash flows."
+      subtitle={unit === "percent"
+        ? "Gain on the amount invested, in %. Benchmark is NIFTY 500 TRI, replicating your own cash flows."
+        : "Daily snapshots in ₹ lakh. Benchmark is NIFTY 500 TRI, replicating your own cash flows."}
       action={
         <SegmentedControl size="sm" options={options} value={effectiveRange} onChange={setRange} />
       }

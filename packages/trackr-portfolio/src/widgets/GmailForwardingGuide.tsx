@@ -100,7 +100,6 @@ export function GmailForwardingGuide() {
 
   return (
     <section className={styles.guide} aria-label="Animated Gmail forwarding tutorial">
-      <div className={styles.guideHeader}><span className={styles.liveDot} /> GMAIL WALKTHROUGH <span>25 steps · About 3 minutes</span></div>
       <div className={styles.player} ref={player}>
         <div className={styles.browserBar}><span /><span /><span /><div><Icon name="privacy" size={10} />{scene.screen === "trackr" ? "Trackr+" : "mail.google.com"}</div><small>DEMO</small></div>
         <div className={styles.timeline} aria-label="Choose a tutorial step">

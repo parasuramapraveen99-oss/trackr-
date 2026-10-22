@@ -53,7 +53,10 @@ export function TradebookGuide({ accounts, brokers }: { accounts: AccountOut[]; 
 
   if (!choices.length) return null;
   return <>
-    <div className={styles.help}><Icon name="download" size={16} /><span>Need your tradebook?</span><Button variant="ghost" size="sm" onClick={() => { setStep(0); setOpen(true); }}>View download guide</Button></div>
+    <div className={styles.help}>
+      <span>Not sure where to get these files?</span>
+      <button type="button" className={styles.guideButton} onClick={() => { setStep(0); setOpen(true); }}><Icon name="document" size={16} />DOWNLOAD GUIDE</button>
+    </div>
     {open && createPortal(<div className={styles.overlay} onClick={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
       <div ref={dialog} className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <header className={styles.header}><div><span className={styles.eyebrow}>TRADEBOOK DOWNLOAD GUIDE</span><h2 id={titleId}>Download your trade history</h2></div><button ref={closeButton} className={styles.close} type="button" onClick={() => setOpen(false)} aria-label="Close tradebook guide"><Icon name="close" size={18} /></button></header>

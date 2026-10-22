@@ -12,7 +12,7 @@ import { Banner, Button, Card, Checkbox, Input } from "../components/ds";
 
 // Must be typed exactly, not just any non-empty text -- this is the type-to-confirm
 // gate in front of an irreversible delete (app/db/privacy.py erase_investor).
-const ERASE_CONFIRM_PHRASE = "DELETE MY DATA";
+const ERASE_CONFIRM_PHRASE = "DELETE MY PORTFOLIO";
 
 function downloadJson(payload: unknown, filename: string) {
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
