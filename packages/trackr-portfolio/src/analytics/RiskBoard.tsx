@@ -33,7 +33,7 @@ const tone = (neg: boolean | undefined) => ({ color: neg ? "var(--negative)" : "
 const Loading = ({ h }: { h: number }) => <Skeleton height={h} />;
 
 /** The five Risk tiles, for a `.tp-grid`. No `data` yet draws the loading state. */
-export function RiskTiles({ data, masked = false }: { data: RiskData | null | undefined; masked?: boolean }) {
+export function RiskTiles({ data, masked = false, riskLabel = "Money vs risk" }: { data: RiskData | null | undefined; masked?: boolean; riskLabel?: string }) {
   const risk = data ? data.risk["1y"] ?? data.risk.available : undefined;
   return (
     <>
@@ -50,7 +50,7 @@ export function RiskTiles({ data, masked = false }: { data: RiskData | null | un
         figure={risk?.sharpe != null ? <span style={risk.sharpe < 0 ? tone(true) : undefined}>{risk.sharpe.toFixed(2)}<Small>Sharpe</Small></span> : undefined}>
         {data ? risk?.sharpe != null || risk?.sortino != null || risk?.bench_sharpe != null ? <RewardPerRisk data={data} /> : <MissingVisual reason={metricTip(risk?.metrics?.sharpe ?? risk)} /> : <Loading h={120} />}
       </Tile>
-      <Tile span={8} label="Money vs risk" keys={[["Share of money", "var(--ink-300)"], ["Share of risk", "var(--negative)"]]}>
+      <Tile span={8} label={riskLabel} keys={[["Share of money", "var(--ink-300)"], ["Share of risk", "var(--negative)"]]}>
         {data ? (data.risk_contributions["1y"] ?? data.risk_contributions.available ?? []).length > 0 ? <RiskButterfly data={data} /> : <MissingVisual reason="No supported holding risk contributions" height={260} /> : <Loading h={260} />}
       </Tile>
     </>

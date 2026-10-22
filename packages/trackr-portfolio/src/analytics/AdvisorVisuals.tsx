@@ -43,7 +43,13 @@ export function selectedWindow(data: AnalyticsResponse, period: AdvisorPeriod, b
 export function riskBoardData(data: AnalyticsResponse, period: AdvisorPeriod, basis: AdvisorBasis): Pick<AnalyticsResponse, "risk" | "risk_contributions"> {
   const risk = selectedRisk(data, period, basis);
   const labels = new Map(data.positions.map((p) => [p.isin, p.symbol ?? p.name ?? p.isin]));
-  const contributions = basis === "illustration" ? data.advisor?.illustrations[period]?.risk_contributions ?? [] : data.positions.map((p) => ({ isin: p.isin, weight_pct: p.weight ?? 0, risk_share_pct: null }));
+  // Recorded returns are whole-portfolio, so they cannot be split by holding. The Euler
+  // shares shown instead are the health evidence's: today's weights on the last 252
+  // sessions -- a different basis, which the tile label states.
+  const euler = data.health.evidence?.covariance?.value?.risk_shares;
+  const contributions = basis === "illustration"
+    ? data.advisor?.illustrations[period]?.risk_contributions ?? []
+    : data.positions.map((p) => ({ isin: p.isin, weight_pct: p.weight ?? 0, risk_share_pct: euler?.[p.isin]?.risk_share == null ? null : euler[p.isin]!.risk_share! * 100 }));
   return { risk: risk ? { "1y": risk } : {}, risk_contributions: { "1y": contributions.map((row) => ({ ...row, symbol: labels.get(row.isin) ?? row.isin })) } };
 }
 

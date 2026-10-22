@@ -284,7 +284,7 @@ export function HealthSegments({ data }: { data: AnalyticsResponse }) {
   const short: Record<string, string> = {
     factor_composite: "Factors", concentration: "Spread", balance_sheet: "Balance sheet", benchmark_relative: "Vs index",
     // portfolio-health-v1 (advisor)
-    diversification: "Co-movement", risk: "Risk", quality: "Quality", valuation: "Valuation",
+    diversification: "Co-move", risk: "Risk", quality: "Quality", valuation: "Valuation",
   };
   let x0 = 0;
   return (

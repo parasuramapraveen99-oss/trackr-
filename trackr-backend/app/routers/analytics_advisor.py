@@ -29,7 +29,10 @@ from app.db.prices import adjusted_price_series, latest_price_dates, latest_pric
 from app.db.repository import load_transactions
 from app.db.security_alias import verified_map
 from app.db.snapshots import list_snapshots_range
+from app.engine.dividends import compute_dividends
 from app.engine.holdings import MAX_PRICE_STALENESS_DAYS, compute_holdings_partitioned
+from app.engine.realised import compute_realised
+from app.engine.returns import compute_net_invested
 from app.engine.snapshot import compute_snapshot
 from app.engine.twrr import _period_flow
 from app.engine.types import Snapshot, Transaction
@@ -548,6 +551,47 @@ def materialize(
                 as_of=on.isoformat(),
             )
         )
+    # Engine-owned ledger figures, passed through unchanged: realised = FIFO gains
+    # (ENGINE_SPEC section 3), dividends = recorded DIVIDEND rows (REALISED state, section
+    # 4), net contributions = compute_net_invested (section 5). Unreconciled securities are
+    # left out and named; nothing here re-derives accounting.
+    unreconciled = {s.isin for s in skipped}
+    reconciled = [t for t in equity_transactions if t.isin not in unreconciled]
+    if reconciled:
+        kpi_period = dict(start=min(t.txn_date for t in reconciled).isoformat(), end=on.isoformat())
+        for name, value, basis in (
+            (
+                "realised_pnl",
+                sum((g.gain for g in compute_realised(reconciled, on)), ZERO),
+                "engine_fifo_realised_gain",
+            ),
+            (
+                "net_contributions",
+                compute_net_invested(reconciled, on),
+                "engine_net_invested_buys_less_sells",
+            ),
+            (
+                "dividends_received",
+                sum((d.total for d in compute_dividends(reconciled)), ZERO),
+                "engine_recorded_dividend_ledger_rows",
+            ),
+        ):
+            data["upstream_kpis"].append(
+                dict(
+                    name=name,
+                    value=str(value),
+                    unit="INR",
+                    basis=basis,
+                    period=kpi_period,
+                    status="provisional" if unreconciled else "available",
+                    reasons=["UNRECONCILED_SEGMENTS_EXCLUDED"] if unreconciled else [],
+                    source_refs=["ledger"],
+                    ledger_revision=revision,
+                    engine_version=ENGINE_VERSION,
+                    currency="INR",
+                    as_of=on.isoformat(),
+                )
+            )
     return dict(
         data=data,
         positions=positions,
@@ -1003,10 +1047,19 @@ def build_analytics(
         }
     )
     report["illustrations"] = illustrations
+    # Sessions in the trailing 252-interval health window with no engine snapshot return.
+    # One missing interval withholds every full-year statistic, so the page names it.
+    window_sessions = data["sessions"][-253:]
+    observed = {(r["start"], r["end"]) for r in data["returns"]}
     report["scope"] = {
         "asset_class": "EQ",
         "excluded": context["other_assets"],
         "actual_series_reason": None,
+        "health_window_gaps": [
+            {"start": a, "end": b}
+            for a, b in zip(window_sessions, window_sessions[1:], strict=False)
+            if (a, b) not in observed
+        ],
     }
     risk = milestone.risk_projection(report, data)
     risk_coverage = {}

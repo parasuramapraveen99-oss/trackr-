@@ -36,7 +36,7 @@ from typing import Any
 from app.analytics._vendor.advisor.service import METHOD_VERSION
 
 #: Bump when the projection in app/routers/analytics_advisor.py changes shape or meaning.
-PROJECTION_VERSION = "advisor-v2-projection-2026-10-21"
+PROJECTION_VERSION = "advisor-v2-projection-2026-10-22"
 CACHE_METHOD = f"{METHOD_VERSION}+{PROJECTION_VERSION}"
 
 #: Tables that never feed the advisor report. Prefixes cover whole feature families.

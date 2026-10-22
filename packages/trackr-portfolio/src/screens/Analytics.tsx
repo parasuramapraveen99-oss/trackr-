@@ -28,6 +28,7 @@ import {
 } from "../analytics/visual";
 import { BOARD_CSS, RiskTiles } from "../analytics/RiskBoard";
 import { AdvisorControls, AdvisorGrowth, AdvisorHealthFigure, AdvisorHealthNote, AdvisorMethodCoverage, AdvisorReturnBars, AdvisorRiskExtras, AdvisorScope, AdvisorWindowMatrix, MissingVisual, metricTip, riskBoardData, selectedRisk, selectedWindow, type AdvisorBasis, type AdvisorPeriod } from "../analytics/AdvisorVisuals";
+import { CapitalStates, HealthMaturity, HealthParts, HealthScale, LedgerFigure, LedgerFigures, PART_COLOR, QualityProfiles, Recovery, RecoveryFigure, RiskShares, Sensitivity, WindowGaps } from "../analytics/HealthBoard";
 import { FundsCard } from "../widgets/FundsCard";
 
 const IDX = "var(--ink-400)", YOU = "var(--chart-1)";
@@ -39,6 +40,7 @@ function Band({ title, children }: { title: string; children: ReactNode }) {
 /** One question per sub-tab, so a band is read on its own rather than scrolled past. */
 const VIEWS = [
   { key: "outcome", label: "Outcome" },
+  { key: "health", label: "Health" },
   { key: "exposure", label: "Exposure" },
   { key: "risk", label: "Risk" },
   { key: "companies", label: "Companies" },
@@ -213,11 +215,33 @@ export function AnalyticsScreen({ chrome }: PortfolioScreenProps) {
                 <Tile span={4} label="Health" figure={<AdvisorHealthFigure data={data} />}>
                   <HealthSegments data={data} />
                   <AdvisorHealthNote data={data} />
+                  <button type="button" onClick={() => setView("health")} style={{ alignSelf: "flex-start", background: "none", border: 0, padding: 0, font: "600 12px var(--font-label)", color: "var(--text-link)", cursor: "pointer" }}>Parts and evidence →</button>
                 </Tile>
-                <Tile span={4} label="Inputs supported"><AdvisorMethodCoverage data={data} /></Tile>
+                <Tile span={4} label="Ledger figures" figure={<LedgerFigure data={data} />}><LedgerFigures data={data} /></Tile>
               </> : <Tile span={8} label="Health" figure={data ? (data.health.grade ?? <span style={{ color: "var(--text-tertiary)" }}>—<Small>{4 - missingHealth}/4 inputs</Small></span>) : undefined}>
                 {data ? <HealthSegments data={data} /> : <Loading h={70} />}
               </Tile>}
+            </Band>}
+
+            {view === "health" && <Band title="Health">
+              {data?.advisor ? <>
+                <Tile span={8} label="Grade scale" figure={<AdvisorHealthFigure data={data} />}
+                  keys={data.health.components.map((c) => [c.label, PART_COLOR[c.key] ?? "var(--chart-1)"] as [string, string])}>
+                  <HealthScale data={data} />
+                </Tile>
+                <Tile span={4} label="Evidence"><HealthMaturity data={data} /></Tile>
+                <Tile span={12} label="Five parts" keys={[["Score", "var(--chart-1)"], ["Built from", "var(--text-primary)", "dot"]]}><HealthParts data={data} /></Tile>
+                <Tile span={7} label="Money vs risk" keys={[["Share of money", "var(--ink-300)"], ["Share of risk", "var(--negative)"]]}
+                  figure={data.health.evidence?.covariance?.value?.diversification_volatility_ratio != null ? <>{data.health.evidence.covariance.value.diversification_volatility_ratio.toFixed(2)}×<Small>diversification</Small></> : undefined}>
+                  <RiskShares data={data} />
+                </Tile>
+                <Tile span={5} label="Below a high" keys={[["Recovered", "var(--chart-1)"], ["Still below", "var(--negative)"]]} figure={<RecoveryFigure data={data} />}>
+                  <Recovery data={data} />
+                </Tile>
+                <Tile span={7} label="Holding stands" keys={[["Size = money", "var(--ink-300)", "dot"]]}><CapitalStates data={data} /></Tile>
+                <Tile span={5} label="Sensitivity"><Sensitivity data={data} /></Tile>
+                <Tile span={12} label="Quality test"><QualityProfiles data={data} /></Tile>
+              </> : <Tile span={12} label="Health">{data ? <HealthSegments data={data} /> : <Loading h={160} />}</Tile>}
             </Band>}
 
             {view === "exposure" && <Band title="Exposure">
@@ -244,7 +268,8 @@ export function AnalyticsScreen({ chrome }: PortfolioScreenProps) {
                   {selectedRisk(data, period, riskBasis)?.period?.start && <span>{selectedRisk(data, period, riskBasis)!.period!.start} – {selectedRisk(data, period, riskBasis)!.period!.end}</span>}
                   <span title={metricTip(selectedWindow(data, period, riskBasis) ?? data.advisor.illustrations[period])}>{selectedWindow(data, period, riskBasis)?.status ?? data.advisor.illustrations[period]?.status ?? "unavailable"}</span>
                 </AdvisorScope>
-                <RiskTiles data={riskBoardData(data, period, riskBasis)} masked={masked} />
+                <RiskTiles data={riskBoardData(data, period, riskBasis)} masked={masked}
+                  riskLabel={riskBasis === "recorded" ? "Money vs risk · today's weights, last 252 sessions" : undefined} />
                 <AdvisorRiskExtras data={data} period={period} basis={riskBasis} />
               </> : <>
                 <AdvisorScope>Current-weight simulation</AdvisorScope>
@@ -300,6 +325,7 @@ export function AnalyticsScreen({ chrome }: PortfolioScreenProps) {
                   <IdentityQuestions items={reviews.data!.items} onDecide={decide} busy={deciding} />
                 </Tile>
               )}
+              {data?.advisor && <Tile span={12} label="History gaps"><WindowGaps data={data} /></Tile>}
               <Tile span={5} label={data?.advisor ? "Validated inputs" : "Data covered"} figure={data && data.unresolved.length ? <span style={tone(true)}>{data.unresolved.length}<Small>not valued</Small></span> : undefined}>
                 {data ? <CoverageRings data={data} /> : <Loading h={100} />}
               </Tile>

@@ -1502,6 +1502,31 @@ export interface MilestoneIllustration extends MilestoneMetric<{
   risk?: RiskWindow;
   risk_contributions?: AnalyticsExposure[];
 }
+/** Engine-owned ledger KPIs carried through the advisor unchanged (overview.upstream_kpis). */
+export interface AdvisorUpstreamKpis {
+  metrics: Record<"xirr" | "realised_pnl" | "net_contributions" | "dividends_received", MilestoneMetric>;
+  errors: string[];
+}
+
+/** overview.health.components[] as the advisor emits it, before HealthOut flattening. */
+export interface AdvisorHealthComponentRaw {
+  key: string;
+  label: string;
+  weight: string;
+  score: MilestoneMetric;
+  contribution: string | null;
+  evidence: Record<string, unknown>;
+}
+
+/** overview.capital_state value: per-ISIN state plus the moving-average evidence. */
+export interface AdvisorCapitalStates {
+  buckets: Record<string, string>;
+  states: Record<string, { state: string; reason: string | null; market_value: string | null; evidence: { unrealised?: string; latest_level?: string; moving_average_50?: string } }>;
+  total: string | null;
+  bucket_weights: Record<string, string> | null;
+  trend_window: { start: string; end: string } | null;
+}
+
 export interface MilestoneReport {
   schema_version: string;
   method_version: string;
@@ -1520,7 +1545,11 @@ export interface MilestoneReport {
   };
   status: string;
   reasons: string[];
-  scope: { asset_class: string; excluded: { isin: string; name: string; asset_class: string; reason: string }[]; actual_series_reason: string | null };
+  scope: {
+    asset_class: string; excluded: { isin: string; name: string; asset_class: string; reason: string }[]; actual_series_reason: string | null;
+    /** Sessions in the trailing 252-interval health window with no snapshot return. */
+    health_window_gaps?: { start: string; end: string }[];
+  };
   illustrations: Record<string, MilestoneIllustration>;
   reported_inputs: {
     status?: string;
