@@ -6,6 +6,7 @@ import { MissingPriceNotice } from "./MissingPriceNotice";
 import { NegativeHoldingNotice } from "./NegativeHoldingNotice";
 import { SkippedHoldingsNotice } from "./SkippedHoldingsBanner";
 import { UnpricedBanner } from "./UnpricedBanner";
+import { AnalyticsDataQuestions, useAnalyticsDataQuestions } from "./AnalyticsDataQuestions";
 
 /** One cash flow the pipeline inferred (GET /investors/{id}/inferred-cash-flows). */
 interface InferredCashFlow {
@@ -150,6 +151,7 @@ export function DataToReview() {
     undefined,
     token,
   );
+  const questions = useAnalyticsDataQuestions();
   if (!investorId) return null;
 
   const s = summary.data;
@@ -184,6 +186,7 @@ export function DataToReview() {
     items.push(<SkippedHoldingsNotice key="skipped" skipped={s.skipped} />);
   }
   const inferred = inferredFlows.data?.items ?? [];
+  if (questions.count > 0) items.push(<AnalyticsDataQuestions key="analytics-questions" questions={questions} />);
   if (inferred.length > 0) {
     items.push(
       <div key="inferred" style={{ display: "flex", flexDirection: "column", gap: 6 }}>

@@ -17,6 +17,7 @@ import type { HoldingOut, HoldingsResponse } from "@trackr/core";
 import { ErrorState, NoInvestorState } from "../widgets/PageState";
 import { UnpricedBanner } from "../widgets/UnpricedBanner";
 import { SkippedHoldingsBanner } from "../widgets/SkippedHoldingsBanner";
+import { LedgerFiguresCard } from "../widgets/LedgerFiguresCard";
 import {
   Card,
   EmptyState,
@@ -190,6 +191,7 @@ export function HoldingsScreen({ chrome }: PortfolioScreenProps) {
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--gap-section)" }}>
           {holdings.data && <UnpricedBanner unpriced={holdings.data.unpriced} />}
           {holdings.data && <SkippedHoldingsBanner skipped={holdings.data.skipped} onFixed={holdings.refetch} />}
+          <LedgerFiguresCard />
 
           <Card
             title="Holdings"

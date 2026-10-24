@@ -91,9 +91,9 @@ export const PORTFOLIO_GROUPS: PortfolioGroup[] = [
       },
       {
         href: "/contribution",
-        label: "Contribution",
+        label: "Performance",
         icon: "contribution",
-        summary: "Which holdings drove the period's gain",
+        summary: "Which holdings made or lost money over a period",
       },
     ],
   },
@@ -116,6 +116,12 @@ export const PORTFOLIO_GROUPS: PortfolioGroup[] = [
         label: "Import",
         icon: "import",
         summary: "Contract notes, tradebooks and statements",
+      },
+      {
+        href: "/import/mutual-funds",
+        label: "Check MF statement",
+        icon: "import",
+        summary: "Preview a CAMS or KFintech statement and check its figures",
       },
       {
         href: "/reconcile",

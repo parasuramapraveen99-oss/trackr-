@@ -1,73 +1,75 @@
 "use client";
 
 /**
- * /analytics — the visual board. One question per tile, answered by a shape.
+ * /analytics — the revamped page (analytics-revamp-review/analytics-revamp-with-comments.html).
  *
- * Redesigned 10 Oct 2026 from a seven-tab, text-first page: the figures did not change,
- * their presentation did. Words are labels of at most three words; every method note,
- * caveat and exact value lives in a hover tooltip on the mark it describes.
+ * Above the tabs, staying in place: the greeting line, the KPI strip, the Stocks / Mutual
+ * funds toggle and the Basic / Advanced switch. Six tabs in the reference's order:
+ * Overview, Factor Score (one view), Risk & Return, Diversification, Fundamentals,
+ * Performance. Basic = plain one-liners written by the model and checked by the server;
+ * Advanced = the charts and tables. Each tab ends with a one-line coverage footer.
  *
- * Data: one /analytics call drives every tile except three that already have their own
- * endpoints -- /snapshots + /benchmark-series (the money path, requested with the SAME
- * benchmark the analytics use, so the two never disagree) and /contribution (1Y gain by
- * holding). Loading is per tile; the header renders in every state.
+ * Moved off this page (review §10): data questions and history gaps (to /import, with a
+ * banner here when one is outstanding), ledger figures (to Holdings). Removed: the Trust
+ * tab, health evidence/sensitivity, method coverage, the one-day-moves timeline, the
+ * VaR 99/CVaR/TE/IR tiles, the Recorded/Hypothetical and Reported/Validated toggles and
+ * the period matrix.
+ *
+ * Data: one /analytics call (advisor_v2, which carries the `basic` and `revamp` blocks)
+ * drives every tile, plus /contribution for 1Y gain by holding. A failed call is an error
+ * state, never an empty page.
  */
 
 import type { PortfolioScreenProps } from "../chrome";
-import { useEffect, useState, type ReactNode } from "react";
-import { Figure, api, useAuth, useFetch, usePortfolioRefresh, usePrivacy } from "@trackr/core";
-import type { AnalyticsResponse, BenchmarkSeriesResponse, ContributionResponse, IdentityReview, IdentityReviewsResponse, SnapshotOut } from "@trackr/core";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { useAuth, useFetch, usePortfolioRefresh, usePrivacy } from "@trackr/core";
+import type { AnalyticsResponse, BasicTab, ContributionResponse } from "@trackr/core";
 import { IconButton, SegmentedControl, Skeleton, TabBar } from "@trackr/ui";
 import { ErrorState, NoInvestorState } from "../widgets/PageState";
-import { HISTORY_START } from "../ranges";
-import { money, pp, signOf } from "../analytics/format";
-import {
-  COMPANY_LENSES, type CompanyLens, BookVsIndex, ConcentrationCurve, CorrelationMap, CoverageRings, FactorStrips, GainBars,
-  HealthSegments, HoldingsTreemap, IdentityQuestions, MixBars, MoneyPath, MoveTimeline, Small,
-  Tile, TipProvider, ValuationBubbles, WindowsDumbbell, compactInr, moneyGap,
-} from "../analytics/visual";
-import { BOARD_CSS, RiskTiles } from "../analytics/RiskBoard";
-import { AdvisorControls, AdvisorGrowth, AdvisorHealthFigure, AdvisorHealthNote, AdvisorMethodCoverage, AdvisorReturnBars, AdvisorRiskExtras, AdvisorScope, AdvisorWindowMatrix, MissingVisual, metricTip, riskBoardData, selectedRisk, selectedWindow, type AdvisorBasis, type AdvisorPeriod } from "../analytics/AdvisorVisuals";
-import { CapitalStates, HealthMaturity, HealthParts, HealthScale, LedgerFigure, LedgerFigures, PART_COLOR, QualityProfiles, Recovery, RecoveryFigure, RiskShares, Sensitivity, WindowGaps } from "../analytics/HealthBoard";
+import { TipProvider } from "../analytics/visual";
+import { BOARD_CSS } from "../analytics/RiskBoard";
 import { FundsCard } from "../widgets/FundsCard";
+import { BasicInsights } from "../widgets/BasicInsights";
+import { useIdentityReviews } from "../widgets/AnalyticsDataQuestions";
+import { CoverageFooter, Grid, RESPONSIVE_CSS } from "../analytics/revamp/common";
+import { Greeting, KpiStrip } from "../analytics/revamp/Header";
+import { OverviewAdvanced, OverviewBasic } from "../analytics/revamp/Overview";
+import { FactorTab } from "../analytics/revamp/Factor";
+import { RiskAdvanced } from "../analytics/revamp/Risk";
+import { DiversificationAdvanced } from "../analytics/revamp/Diversification";
+import { FundamentalsAdvanced } from "../analytics/revamp/Fundamentals";
+import { PerformanceAdvanced, PerformanceBasic } from "../analytics/revamp/Performance";
 
-const IDX = "var(--ink-400)", YOU = "var(--chart-1)";
-
-function Band({ title, children }: { title: string; children: ReactNode }) {
-  return <section className="tp-band" aria-label={title}><div className="tp-grid">{children}</div></section>;
-}
-
-/** One question per sub-tab, so a band is read on its own rather than scrolled past. */
 const VIEWS = [
-  { key: "outcome", label: "Outcome" },
-  { key: "health", label: "Health" },
-  { key: "exposure", label: "Exposure" },
-  { key: "risk", label: "Risk" },
-  { key: "companies", label: "Companies" },
-  { key: "style", label: "Style" },
+  { key: "overview", label: "Overview" },
+  { key: "factor", label: "Factor Score" },
+  { key: "risk", label: "Risk & Return" },
+  { key: "diversification", label: "Diversification" },
+  { key: "fundamentals", label: "Fundamentals" },
   { key: "performance", label: "Performance" },
-  { key: "trust", label: "Trust" },
 ] as const;
 type View = (typeof VIEWS)[number]["key"];
+type Mode = "basic" | "advanced";
 const isView = (v: string | null): v is View => VIEWS.some((x) => x.key === v);
 
-/** The open sub-tab, kept in `?view=` so a refresh or a shared link lands on the same one.
- * Read after mount and written with replaceState: no Suspense boundary needed, and no
- * history entry per click. */
-function useView(): [View, (v: View) => void] {
-  const [view, setView] = useState<View>("outcome");
+/** `?view=` and `?mode=`, so a refresh or a shared link lands on the same place. Read after
+ * mount and written with replaceState: no Suspense boundary, no history entry per click. */
+function useParam<T extends string>(name: string, initial: T, valid: (v: string | null) => v is T): [T, (v: T) => void] {
+  const [value, setValue] = useState<T>(initial);
   useEffect(() => {
-    const v = new URLSearchParams(window.location.search).get("view");
-    if (isView(v)) setView(v);
-  }, []);
-  function choose(v: View) {
-    setView(v);
+    const v = new URLSearchParams(window.location.search).get(name);
+    if (valid(v)) setValue(v);
+  }, [name, valid]);
+  function choose(v: T) {
+    setValue(v);
     const url = new URL(window.location.href);
-    url.searchParams.set("view", v);
+    url.searchParams.set(name, v);
     window.history.replaceState(window.history.state, "", url);
   }
-  return [view, choose];
+  return [value, choose];
 }
+const isMode = (v: string | null): v is Mode => v === "basic" || v === "advanced";
 
 /** Same calendar date one year earlier (29 Feb -> 28 Feb), as app.engine.xirr.years_before. */
 function oneYearBefore(iso: string): string {
@@ -76,91 +78,36 @@ function oneYearBefore(iso: string): string {
   return `${y - 1}-${String(m).padStart(2, "0")}-${String(Math.min(d, last)).padStart(2, "0")}`;
 }
 
-const Loading = ({ h = 160 }: { h?: number }) => <Skeleton height={h} />;
-
 export function AnalyticsScreen({ chrome }: PortfolioScreenProps) {
   const { Header, Body } = chrome;
   const { investorId, token, asOf, advisedOnly } = useAuth();
   const { masked, toggleMask } = usePrivacy();
+  const [benchmark, setBenchmark] = useState("NIFTY50_TRI");
+  const [view, setView] = useParam<View>("view", "overview", isView);
+  const [mode, setMode] = useParam<Mode>("mode", "basic", isMode);
+  const [asset, setAsset] = useState<"stocks" | "funds">("stocks");
 
   const isToday = asOf === new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
   const analytics = useFetch<AnalyticsResponse>(
     investorId ? `/investors/${investorId}/analytics` : null,
-    { as_of: asOf, advised_only: advisedOnly || undefined, calculation_method: "advisor_v2" },
+    { as_of: asOf, advised_only: advisedOnly || undefined, calculation_method: "advisor_v2", benchmark },
     token,
     { refreshMs: isToday ? 120_000 : 0 },
   );
   const data = analytics.data;
   const end = asOf ?? data?.as_of;
-  const snapshots = useFetch<SnapshotOut[]>(
-    investorId && end && data && !data.advisor ? `/investors/${investorId}/snapshots` : null,
-    { start: HISTORY_START, end, advised_only: advisedOnly || undefined },
-    token,
-  );
-  const bench = useFetch<BenchmarkSeriesResponse>(
-    investorId && end && data && !data.advisor ? `/investors/${investorId}/benchmark-series` : null,
-    { start: HISTORY_START, end, name: data?.benchmark, advised_only: advisedOnly || undefined },
-    token,
-  );
   const contribution = useFetch<ContributionResponse>(
-    investorId && end && data && !data.advisor ? `/investors/${investorId}/contribution` : null,
+    investorId && end && view === "performance" && mode === "advanced" ? `/investors/${investorId}/contribution` : null,
     { period_start: end ? oneYearBefore(end) : undefined, as_of: asOf, advised_only: advisedOnly || undefined },
     token,
   );
-  const reviews = useFetch<IdentityReviewsResponse>(
-    investorId ? `/investors/${investorId}/identity-reviews` : null,
-    { advised_only: advisedOnly || undefined },
-    token,
-  );
-  const [deciding, setDeciding] = useState<string | null>(null);
-  const [view, setView] = useView();
-  const [lens, setLens] = useState<CompanyLens>("valuation");
-  const [periodChoice, setPeriodChoice] = useState<{ scope: string; period: AdvisorPeriod } | null>(null);
-  const [riskBasis, setRiskBasis] = useState<AdvisorBasis>("recorded");
-  const [performanceBasis, setPerformanceBasis] = useState<AdvisorBasis>("recorded");
-  const [companySource, setCompanySource] = useState<"reported" | "validated">("reported");
-  const activeBasis = view === "risk" ? riskBasis : performanceBasis;
-  const periodScope = `${investorId}|${asOf}|${advisedOnly}|${activeBasis}`;
-  const supportedPeriod = (["1Y", "6M", "3M", "1M", "All", "3Y", "5Y"] as AdvisorPeriod[]).find((key) => activeBasis === "illustration" ? data?.advisor?.illustrations[key]?.window?.value : data?.advisor?.sections.performance.windows[key]?.value) ?? "All";
-  const period = periodChoice?.scope === periodScope ? periodChoice.period : supportedPeriod;
-  const setPeriod = (value: AdvisorPeriod) => setPeriodChoice({ scope: periodScope, period: value });
-  const reported = data?.advisor?.reported_inputs;
-  const companyData = data && companySource === "reported" && reported?.positions && reported?.fundamentals && reported?.lenses ? {
-    ...data, positions: reported.positions,
-    fundamentals: { ...data.fundamentals, ...reported.fundamentals },
-    characteristics: reported.characteristics ?? data.characteristics,
-    derived: { ...data.derived, lenses: reported.lenses },
-  } : data;
-  const styleData = data && companySource === "reported" && reported?.factors ? {
-    ...data, factors: { ...data.factors, ...reported.factors },
-    positions: data.positions.map((position) => ({ ...position, factors: { ...position.factors, ...reported.positions?.find((p) => p.isin === position.isin)?.factors } })),
-  } : data;
-  async function decide(item: IdentityReview, decision: "SAME" | "DIFFERENT") {
-    const key = `${item.isin}|${item.ticker}|${item.vendor_name}`;
-    setDeciding(key);
-    try {
-      await api.post(`/investors/${investorId}/identity-reviews/decide`, {
-        json: { isin: item.isin, provider: item.provider, ticker: item.ticker, vendor_name: item.vendor_name, decision },
-        token,
-      });
-      reviews.refetch();
-      analytics.refetch();
-    } finally {
-      setDeciding(null);
-    }
-  }
-  usePortfolioRefresh(() => { analytics.refetch(); snapshots.refetch(); bench.refetch(); contribution.refetch(); reviews.refetch(); });
+  const reviews = useIdentityReviews();
+  usePortfolioRefresh(() => { analytics.refetch(); contribution.refetch(); reviews.refetch(); });
 
-  const kpi = data?.kpi;
   const header = (
     <Header
       title="Analytics"
-      subtitle={data ? `${data.advisor ? "Equities · " : ""}${data.as_of} · ${data.benchmark.replace("_TRI", "").replace("NIFTY50", "Nifty 50").replace("NIFTY500", "Nifty 500")}` : analytics.loading ? "…" : ""}
-      headline={<Figure>{money(kpi?.market_value)}</Figure>}
-      changes={kpi ? [
-        { key: "unrealised", label: "Unrealised", value: <Figure>{money(kpi.unrealised)} ({pp(kpi.unrealised_pct, 2, true)})</Figure>, negative: signOf(kpi.unrealised) === "neg" },
-        { key: "day", label: data?.advisor ? "Last session" : "Today", value: <Figure>{money(kpi.day_change)} ({pp(kpi.day_change_pct, 2, true)})</Figure>, negative: signOf(kpi.day_change) === "neg" },
-      ] : []}
+      subtitle={data ? `Equities · ${data.as_of} · ${data.benchmark.replace("_TRI", " TRI").replace("NIFTY50", "Nifty 50").replace("NIFTY500", "Nifty 500")}` : analytics.loading ? "…" : ""}
       action={<IconButton name="eye" label={masked ? "Show amounts" : "Hide amounts"} active={masked} onClick={toggleMask} />}
     />
   );
@@ -168,171 +115,55 @@ export function AnalyticsScreen({ chrome }: PortfolioScreenProps) {
   if (!investorId) return <>{header}<Body><NoInvestorState /></Body></>;
   if (analytics.error && !data) return <>{header}<Body><ErrorState message={analytics.error} /></Body></>;
 
-  const gap = snapshots.data && bench.data ? moneyGap(snapshots.data, bench.data) : null;
-  const gainTotal = contribution.data?.total_gain ?? null;
-  const missingHealth = data ? data.health.components.filter((c) => c.score == null).length : 0;
-  const tone = (neg: boolean | undefined) => ({ color: neg ? "var(--negative)" : "var(--positive)" });
-  // Things in Trust that want the investor's attention, so the tab says so from outside.
-  const trustCount = (reviews.data?.items.filter((i) => !i.decision).length ?? 0) + (data?.unresolved.length ?? 0);
+  const questions = (reviews.data?.items.filter((i) => !i.decision).length ?? 0) + (data?.advisor?.scope.health_window_gaps?.length ?? 0);
+  const tab: Record<View, BasicTab | null> = { overview: "overview", factor: null, risk: "risk", diversification: "diversification", fundamentals: "fundamentals", performance: "performance" };
+
+  function body() {
+    if (!data) return <Skeleton height={320} />;
+    if (!data.revamp || !data.basic) return <ErrorState message="This analytics response has no revamp block. Reload the page; if it persists the server is running an older build." />;
+    if (view === "factor") return <FactorTab data={data} />;
+    if (mode === "basic") {
+      if (view === "overview") return <OverviewBasic data={data} />;
+      if (view === "performance") return <PerformanceBasic data={data} />;
+      return <Grid><BasicInsights tab={tab[view]!} /><CoverageFooter data={data} /></Grid>;
+    }
+    switch (view) {
+      case "overview": return <OverviewAdvanced data={data} />;
+      case "risk": return <RiskAdvanced data={data} />;
+      case "diversification": return <DiversificationAdvanced data={data} />;
+      case "fundamentals": return <FundamentalsAdvanced data={data} />;
+      case "performance": return <PerformanceAdvanced data={data} contribution={contribution.data} benchmark={benchmark} setBenchmark={setBenchmark} />;
+    }
+  }
 
   return (
     <>
       {header}
       <Body>
-        <style>{BOARD_CSS}</style>
+        <style>{BOARD_CSS}{RESPONSIVE_CSS}</style>
         {chrome.banners}
         <TipProvider>
-          <div className="tp-board">
-            <TabBar
-              tabs={VIEWS.map((v) => ({
-                key: v.key,
-                label: v.key === "trust" && trustCount > 0
-                  ? <>{v.label}<span style={{ marginLeft: 6, opacity: 0.7, fontVariantNumeric: "tabular-nums" }}>{trustCount}</span></>
-                  : v.label,
-              }))}
-              active={view}
-              onChange={(k) => isView(k) && setView(k)}
-              style={{ alignSelf: "flex-start" }}
-            />
-            {data?.coverage.basis === "priced_subset" && <div style={{ font: "500 12px var(--font-label)", color: "var(--warning)" }} title={data.unresolved.map((p) => `${p.symbol ?? p.isin}: ${p.reason}`).join("; ")}>
-              Priced subtotal · {data.coverage.priced_count}/{data.coverage.total_count} positions
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            {data && <Greeting data={data} />}
+            {data && <KpiStrip data={data} onHealth={() => { setView("overview"); setMode("basic"); }} />}
+            {data?.coverage.basis === "priced_subset" && <div role="status" style={{ font: "500 12px var(--font-label)", color: "var(--warning)" }}>
+              Priced subtotal · {data.coverage.priced_count}/{data.coverage.total_count} positions. Not valued: {data.unresolved.map((p) => p.symbol ?? p.isin).join(", ")}.
             </div>}
-            {view === "outcome" && <Band title="Outcome">
-              {data?.advisor && <AdvisorControls period={period} setPeriod={setPeriod} basis={performanceBasis} setBasis={setPerformanceBasis} />}
-              <Tile span={8} label={data?.advisor ? "Growth of ₹1L" : "Your money vs index"}
-                keys={[["Worth", YOU], ["Same cash in index", IDX], ["Holdings cost", "var(--ink-300)"]]}
-                figure={gap ? <span style={tone(gap.isNegative())}>{compactInr(gap, masked)}</span> : undefined}>
-                {data?.advisor ? <AdvisorGrowth data={data} period={period} basis={performanceBasis} /> : snapshots.data ? <MoneyPath snapshots={snapshots.data} bench={bench.data} /> : <Loading h={250} />}
-              </Tile>
-              <Tile span={4} label={data?.advisor ? "Investor XIRR" : "Return a year"} keys={[["You", YOU, "dot"], ["Index", IDX, "dot"]]}>
-                {data ? <WindowsDumbbell data={data} /> : <Loading />}
-              </Tile>
-              <Tile span={4} label={data?.advisor ? "Period readings" : "1Y gain by holding"}
-                figure={!data?.advisor && gainTotal ? <span style={tone(gainTotal.startsWith("-"))}>{compactInr(gainTotal, masked)}</span> : undefined}>
-                {data?.advisor ? <AdvisorReturnBars data={data} period={period} basis={performanceBasis} /> : contribution.data ? <GainBars contribution={contribution.data} /> : <Loading />}
-              </Tile>
-              {data?.advisor ? <>
-                <Tile span={4} label="Health" figure={<AdvisorHealthFigure data={data} />}>
-                  <HealthSegments data={data} />
-                  <AdvisorHealthNote data={data} />
-                  <button type="button" onClick={() => setView("health")} style={{ alignSelf: "flex-start", background: "none", border: 0, padding: 0, font: "600 12px var(--font-label)", color: "var(--text-link)", cursor: "pointer" }}>Parts and evidence →</button>
-                </Tile>
-                <Tile span={4} label="Ledger figures" figure={<LedgerFigure data={data} />}><LedgerFigures data={data} /></Tile>
-              </> : <Tile span={8} label="Health" figure={data ? (data.health.grade ?? <span style={{ color: "var(--text-tertiary)" }}>—<Small>{4 - missingHealth}/4 inputs</Small></span>) : undefined}>
-                {data ? <HealthSegments data={data} /> : <Loading h={70} />}
-              </Tile>}
-            </Band>}
-
-            {view === "health" && <Band title="Health">
-              {data?.advisor ? <>
-                <Tile span={8} label="Grade scale" figure={<AdvisorHealthFigure data={data} />}
-                  keys={data.health.components.map((c) => [c.label, PART_COLOR[c.key] ?? "var(--chart-1)"] as [string, string])}>
-                  <HealthScale data={data} />
-                </Tile>
-                <Tile span={4} label="Evidence"><HealthMaturity data={data} /></Tile>
-                <Tile span={12} label="Five parts" keys={[["Score", "var(--chart-1)"], ["Built from", "var(--text-primary)", "dot"]]}><HealthParts data={data} /></Tile>
-                <Tile span={7} label="Money vs risk" keys={[["Share of money", "var(--ink-300)"], ["Share of risk", "var(--negative)"]]}
-                  figure={data.health.evidence?.covariance?.value?.diversification_volatility_ratio != null ? <>{data.health.evidence.covariance.value.diversification_volatility_ratio.toFixed(2)}×<Small>diversification</Small></> : undefined}>
-                  <RiskShares data={data} />
-                </Tile>
-                <Tile span={5} label="Below a high" keys={[["Recovered", "var(--chart-1)"], ["Still below", "var(--negative)"]]} figure={<RecoveryFigure data={data} />}>
-                  <Recovery data={data} />
-                </Tile>
-                <Tile span={7} label="Holding stands" keys={[["Size = money", "var(--ink-300)", "dot"]]}><CapitalStates data={data} /></Tile>
-                <Tile span={5} label="Sensitivity"><Sensitivity data={data} /></Tile>
-                <Tile span={12} label="Quality test"><QualityProfiles data={data} /></Tile>
-              </> : <Tile span={12} label="Health">{data ? <HealthSegments data={data} /> : <Loading h={160} />}</Tile>}
-            </Band>}
-
-            {view === "exposure" && <Band title="Exposure">
-              {data?.advisor && <AdvisorScope><span title={data.advisor.scope.excluded.map((p) => `${p.name ?? p.isin} · ${p.asset_class}`).join("; ")}>Equities · {data.positions.length} positions</span>{data.advisor.scope.excluded.length > 0 && <span>{data.advisor.scope.excluded.length} outside scope</span>}</AdvisorScope>}
-              <Tile span={8} label="Where the money is" keys={[["1Y down", "var(--negative)"], ["1Y up", "var(--positive)"]]}>
-                {data ? <HoldingsTreemap data={data} /> : <Loading h={300} />}
-              </Tile>
-              <Tile span={4} label="Concentration" figure={data ? <>{data.derived.effective_holdings?.toFixed(1) ?? "—"}<Small>{data.derived.effective_holdings == null ? "incomplete valuation" : `of ${data.positions.length} effective`}</Small></> : undefined}>
-                {data ? <ConcentrationCurve data={data} /> : <Loading />}
-              </Tile>
-              <Tile span={6} label="Sector · size">{data ? <MixBars data={data} /> : <Loading h={116} />}</Tile>
-              <Tile span={6} label="Move together" keys={[["Together", "var(--chart-1)"], ["Opposite", "var(--warning)"]]}>
-                {data ? <CorrelationMap data={data} /> : <Loading h={300} />}
-              </Tile>
-              {data?.advisor && <div style={{ gridColumn: "1 / -1", minWidth: 0 }}><FundsCard /></div>}
-            </Band>}
-
-            {view === "risk" && <Band title="Risk">
-              {data?.advisor ? <>
-                <AdvisorControls period={period} setPeriod={setPeriod} basis={riskBasis} setBasis={setRiskBasis} />
-                <AdvisorScope>
-                  <span>{riskBasis === "recorded" ? "Cash-flow adjusted" : "Initial-weight buy-and-hold"}</span>
-                  <span>{selectedRisk(data, period, riskBasis)?.observations ?? 0} observed intervals</span>
-                  {selectedRisk(data, period, riskBasis)?.period?.start && <span>{selectedRisk(data, period, riskBasis)!.period!.start} – {selectedRisk(data, period, riskBasis)!.period!.end}</span>}
-                  <span title={metricTip(selectedWindow(data, period, riskBasis) ?? data.advisor.illustrations[period])}>{selectedWindow(data, period, riskBasis)?.status ?? data.advisor.illustrations[period]?.status ?? "unavailable"}</span>
-                </AdvisorScope>
-                <RiskTiles data={riskBoardData(data, period, riskBasis)} masked={masked}
-                  riskLabel={riskBasis === "recorded" ? "Money vs risk · today's weights, last 252 sessions" : undefined} />
-                <AdvisorRiskExtras data={data} period={period} basis={riskBasis} />
-              </> : <>
-                <AdvisorScope>Current-weight simulation</AdvisorScope>
-                <RiskTiles data={data} masked={masked} />
-              </>}
-            </Band>}
-
-            {view === "companies" && <Band title="Companies">
-              {data?.advisor && <AdvisorScope>
-                <SegmentedControl size="sm" value={companySource} onChange={setCompanySource} options={[{ value: "reported", label: "Reported", title: "Owner formula diagnostics over cached vendor observations; reporting basis and publication metadata have not been verified" }, { value: "validated", label: "Validated", title: "Strict dated publication, reporting basis and applicability checks" }]} />
-                <span title={data.advisor.reported_inputs.reasons?.join(" · ")}>{companySource === "reported" ? "Provisional" : "Dated evidence"}</span>
-                {companySource === "reported" && <span>{[...new Set(reported?.positions?.map((p) => p.fundamentals_as_of).filter((day): day is string => !!day))].sort().filter((_, i, rows) => i === 0 || i === rows.length - 1).join(" – ")}</span>}
-              </AdvisorScope>}
-              <Tile span={7} label={`${COMPANY_LENSES[lens].label} · ${COMPANY_LENSES[lens].x} × ${COMPANY_LENSES[lens].y}`} keys={[["Holdings mean", IDX, "tick"]]}>
-                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-                  <SegmentedControl size="sm" value={lens} onChange={setLens} style={{ maxWidth: "100%", flexWrap: "wrap" }} options={(Object.keys(COMPANY_LENSES) as CompanyLens[]).map((key) => ({
-                    value: key, label: COMPANY_LENSES[key].label,
-                    disabled: data ? !((companyData!.derived.lenses[key]?.plotted ?? 0) > 0) : true,
-                    title: data?.derived.lenses[key]?.plotted ? undefined : "No holdings with both applicable inputs",
-                  }))} />
-                  {data && <Small>{companyData!.derived.lenses[lens]?.plotted ?? 0}/{companyData!.positions.length} plotted</Small>}
-                </div>
-                {data ? <ValuationBubbles data={companyData!} lens={lens} /> : <Loading h={300} />}
-                {data && Object.keys(companyData!.derived.lenses[lens]?.excluded ?? {}).length > 0 && <div style={{ font: "500 11px var(--font-label)", color: "var(--text-tertiary)" }} title={Object.entries(companyData!.derived.lenses[lens]?.excluded ?? {}).map(([isin, reason]) => `${companyData!.positions.find((p) => p.isin === isin)?.symbol ?? isin}: ${reason.replaceAll("_", " ").toLowerCase()}`).join("; ")}>Excluded {Object.keys(companyData!.derived.lenses[lens]?.excluded ?? {}).length}</div>}
-              </Tile>
-              <Tile span={5} label="Company ratios" keys={[["Eligible subset", YOU, "dot"]]}>
-                {data ? <BookVsIndex data={companyData!} /> : <Loading h={240} />}
-              </Tile>
-            </Band>}
-
-            {view === "style" && <Band title="Style">
-              {data?.advisor && <AdvisorScope><SegmentedControl size="sm" value={companySource} onChange={setCompanySource} options={[{ value: "reported", label: "Reported", title: "Fixed-universe advisor ranks over cached vendor snapshots; reporting basis and publication metadata remain unverified" }, { value: "validated", label: "Validated", title: "Strict source, period, publication and applicability checks" }]} /><span>{companySource === "reported" ? "Provisional" : "Dated evidence"}</span></AdvisorScope>}
-              <Tile span={12} label={`Rank vs ${data?.factors.momentum?.universe === "NIFTY500" ? "Nifty 500" : "market"}`}
-                keys={[["Holding", YOU, "dot"], ["Book", "var(--text-primary)", "tick"], ["Median", IDX, "tick"]]}>
-                {data ? <FactorStrips data={styleData!} /> : <Loading h={200} />}
-              </Tile>
-            </Band>}
-
-            {view === "performance" && <Band title="Performance">
-              {data?.advisor ? <>
-                <AdvisorControls period={period} setPeriod={setPeriod} basis={performanceBasis} setBasis={setPerformanceBasis} />
-                <AdvisorScope><span>{performanceBasis === "recorded" ? "Cash-flow adjusted" : "Hypothetical · price return"}</span><span title={metricTip(selectedWindow(data, period, performanceBasis) ?? data.advisor.illustrations[period])}>{selectedWindow(data, period, performanceBasis)?.status ?? data.advisor.illustrations[period]?.status ?? "unavailable"}</span></AdvisorScope>
-                <Tile span={8} label="Growth of ₹1L" keys={[["Portfolio", YOU], ["Matched index", IDX]]}><AdvisorGrowth data={data} period={period} basis={performanceBasis} /></Tile>
-                <Tile span={4} label="Period readings"><AdvisorReturnBars data={data} period={period} basis={performanceBasis} /></Tile>
-                <Tile span={12} label="Period matrix"><AdvisorWindowMatrix data={data} basis={performanceBasis} /></Tile>
-              </> : <Tile span={12} label="Growth of ₹1L"><MissingVisual reason="Advisor calculations unavailable" height={250} /></Tile>}
-            </Band>}
-
-            {view === "trust" && <Band title="Trust">
-              {(reviews.data?.items.length ?? 0) > 0 && (
-                <Tile span={12} label="Same company?" keys={[["Ours", "var(--text-primary)"], ["Data vendor", "var(--text-secondary)"]]}
-                  figure={<>{reviews.data!.items.filter((i) => !i.decision).length}<Small>to answer</Small></>}>
-                  <IdentityQuestions items={reviews.data!.items} onDecide={decide} busy={deciding} />
-                </Tile>
-              )}
-              {data?.advisor && <Tile span={12} label="History gaps"><WindowGaps data={data} /></Tile>}
-              <Tile span={5} label={data?.advisor ? "Validated inputs" : "Data covered"} figure={data && data.unresolved.length ? <span style={tone(true)}>{data.unresolved.length}<Small>not valued</Small></span> : undefined}>
-                {data ? <CoverageRings data={data} /> : <Loading h={100} />}
-              </Tile>
-              <Tile span={7} label={data?.advisor ? "Methods supported" : "Big one-day moves"} keys={[["Circuit", IDX, "dot"], ["Corp. action", "var(--chart-1)", "dot"], ["Check", "var(--warning)", "dot"]]}>
-                {data?.advisor ? <AdvisorMethodCoverage data={data} /> : data ? <MoveTimeline data={data} /> : <Loading h={140} />}
-              </Tile>
-            </Band>}
+            {questions > 0 && <div role="status" style={{ font: "500 12.5px var(--font-label)", color: "var(--text-secondary)", padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 8 }}>
+              {questions} data question{questions === 1 ? "" : "s"} could change these figures. <Link href="/import" style={{ color: "var(--text-link)" }}>Review data →</Link>
+            </div>}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <SegmentedControl size="sm" value={asset} onChange={setAsset} options={[{ value: "stocks", label: "Stocks" }, { value: "funds", label: "Mutual Funds" }]} />
+              {asset === "stocks" && view !== "factor" && <SegmentedControl size="sm" value={mode} onChange={setMode} options={[{ value: "basic", label: "Basic" }, { value: "advanced", label: "Advanced" }]} />}
+            </div>
+            {asset === "funds" ? <FundsCard /> : <>
+              <TabBar tabs={VIEWS.map((v) => ({ key: v.key, label: v.label }))} active={view} onChange={(k) => isView(k) && setView(k)} style={{ alignSelf: "flex-start" }} />
+              {body()}
+              {mode === "basic" && view !== "factor" && <button type="button" onClick={() => setMode("advanced")}
+                style={{ alignSelf: "flex-start", border: 0, background: "none", padding: 0, cursor: "pointer", font: "600 12px var(--font-label)", color: "var(--text-link)" }}>
+                Want the charts and tables? Switch to Advanced →
+              </button>}
+            </>}
           </div>
         </TipProvider>
       </Body>

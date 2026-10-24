@@ -69,6 +69,8 @@ class FundamentalsRow:
     market_cap: Decimal | None = None
     roe_basis: str | None = None
     fiscal_period: date | None = None
+    #: EBIT / (stockholders' equity + total debt), from the same annual statements.
+    roce: Decimal | None = None
 
 
 def _dec(value: Any) -> Decimal | None:
@@ -212,7 +214,7 @@ def _ratios(symbol: str, info: dict, ticker: Any) -> FundamentalsRow:
     """Every ratio field from one vendor record; identity is the caller's question."""
     roe = _dec(info.get("returnOnEquity"))
     roe_basis = "vendor" if roe is not None else None
-    interest_cover = None
+    interest_cover = roce = None
     sales_growth = profit_growth = None
     fiscal_period: date | None = None
 
@@ -231,6 +233,10 @@ def _ratios(symbol: str, info: dict, ticker: Any) -> FundamentalsRow:
         interest = _statement_value(financials, "Interest Expense")
         if ebit is not None and interest and interest > 0:
             interest_cover = (ebit / interest).quantize(_QUANTUM)
+        equity = _statement_value(balance, "Stockholders Equity")
+        debt = _statement_value(balance, "Total Debt")
+        if ebit is not None and equity is not None and equity > 0:
+            roce = (ebit / (equity + (debt or Decimal(0)))).quantize(_QUANTUM)
 
         sales_growth = _growth(financials, "Total Revenue")
         profit_growth = _growth(financials, "Net Income")
@@ -257,6 +263,7 @@ def _ratios(symbol: str, info: dict, ticker: Any) -> FundamentalsRow:
         market_cap=_dec(info.get("marketCap")),
         roe_basis=roe_basis,
         fiscal_period=fiscal_period,
+        roce=roce,
     )
 
 

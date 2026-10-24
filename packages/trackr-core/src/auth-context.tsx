@@ -29,6 +29,9 @@ const STORAGE_BLOCKED =
  * a trading day; resolving it in the exchange's timezone is what makes that true.
  */
 function today(): string {
+  // Local review runs can open the fully priced date used by their recorded summaries.
+  const devDate = process.env.NODE_ENV === "development" ? process.env.NEXT_PUBLIC_DEV_AS_OF : undefined;
+  if (devDate && /^\d{4}-\d{2}-\d{2}$/.test(devDate)) return devDate;
   // en-CA gives ISO-shaped YYYY-MM-DD, which is the only reason that locale is here.
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
 }

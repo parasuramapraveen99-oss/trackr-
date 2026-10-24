@@ -103,6 +103,12 @@ def export_investor(
 
         for table, sql in (
             ("accounts", "SELECT * FROM account WHERE investor_id = %s"),
+            ("reconciliation_runs", "SELECT * FROM reconciliation_run WHERE investor_id = %s"),
+            (
+                "reconciliation_statements",
+                "SELECT s.* FROM reconciliation_statement s "
+                "JOIN account a ON a.id=s.account_id WHERE a.investor_id = %s",
+            ),
             ("consents", "SELECT * FROM client_consent WHERE investor_id = %s"),
             ("legal_holds", "SELECT * FROM legal_hold WHERE investor_id = %s"),
             (
@@ -169,13 +175,12 @@ def export_investor(
     research_rows = 0
     if _workspace_schema_present(conn):
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT set_config(%s, %s, true)", (TENANT_SETTING, str(investor_id))
-            )
+            cur.execute("SELECT set_config(%s, %s, true)", (TENANT_SETTING, str(investor_id)))
         research = workspace_privacy.export_workspace(conn, investor_id)
         export.update(research)
         research_rows = sum(
-            len(v) for k, v in research.items()
+            len(v)
+            for k, v in research.items()
             if isinstance(v, list) and k != "research_export_exclusions"
         )
 
@@ -260,9 +265,7 @@ def erase_investor(
     workspace_counts: dict[str, int] = {}
     if workspace_present:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT set_config(%s, %s, true)", (TENANT_SETTING, str(investor_id))
-            )
+            cur.execute("SELECT set_config(%s, %s, true)", (TENANT_SETTING, str(investor_id)))
         workspace_counts = workspace_privacy.workspace_row_counts(conn, investor_id)
 
     if store is not None:
@@ -305,9 +308,7 @@ def erase_investor(
         # happened before object deletion; a hold placed in between must not be missed, and
         # `place_legal_hold` and this statement contend for the same tenant advisory lock below,
         # so the two orderings are both valid and both safe.
-        cur.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (str(investor_id),)
-        )
+        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (str(investor_id),))
         cur.execute(
             "SELECT reason FROM legal_hold WHERE investor_id = %s AND released_at IS NULL",
             (investor_id,),
@@ -322,9 +323,7 @@ def erase_investor(
         if workspace_present:
             # Migration 044's ws_append_only also requires the row's investor_id to equal
             # ws_tenant(), so the scope has to be set for the cascade to be permitted.
-            cur.execute(
-                "SELECT set_config(%s, %s, true)", (TENANT_SETTING, str(investor_id))
-            )
+            cur.execute("SELECT set_config(%s, %s, true)", (TENANT_SETTING, str(investor_id)))
         # ONE cascading statement removes accounts, transactions, documents and every workspace
         # row, in an order PostgreSQL works out and the FK checks confirm at statement end.
         cur.execute("DELETE FROM investor WHERE id = %s", (investor_id,))
@@ -342,9 +341,7 @@ def erase_investor(
     remaining: dict[str, int] = {}
     if workspace_present:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT set_config(%s, %s, true)", (TENANT_SETTING, str(investor_id))
-            )
+            cur.execute("SELECT set_config(%s, %s, true)", (TENANT_SETTING, str(investor_id)))
         remaining = {
             table: count
             for table, count in workspace_privacy.workspace_row_counts(conn, investor_id).items()

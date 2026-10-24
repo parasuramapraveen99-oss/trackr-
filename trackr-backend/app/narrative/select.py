@@ -29,6 +29,7 @@ _ALWAYS = ("coverage.*", "unresolved.*", "health.grade", "health.score", "delta.
 #: Surface -> the fnmatch patterns whose facts that surface may cite.
 SURFACES: dict[str, tuple[str, ...]] = {
     "analytics.overview": (
+        "basic.overview.*",
         "kpi.*", "health.*", "insight.*", "capital_state.*",
         "derived.capital_state_pct.*", "derived.effective_holdings",
         "derived.concentration_target", "derived.position_count",
@@ -39,15 +40,18 @@ SURFACES: dict[str, tuple[str, ...]] = {
         "position.*.name", "position.*.weight",
     ),
     "analytics.risk": (
+        "basic.risk.*",
         "risk.*", "derived.vol_ratio_1y", "kpi.market_value",
     ),
     "analytics.diversification": (
+        "basic.diversification.*",
         "allocation.*", "correlation.*", "derived.effective_holdings",
         "derived.concentration_target", "derived.position_count",
         "position.*.weight", "position.*.sector", "position.*.market_cap_bucket",
         "position.*.symbol", "position.*.name",
     ),
     "analytics.fundamentals": (
+        "basic.fundamentals.*",
         "fundamentals.*", "position.*.pe", "position.*.pb", "position.*.roe",
         "position.*.net_margin", "position.*.debt_to_equity",
         "position.*.interest_cover", "position.*.dividend_yield",
@@ -55,11 +59,13 @@ SURFACES: dict[str, tuple[str, ...]] = {
         "position.*.weight",
     ),
     "analytics.performance": (
+        "basic.performance.*",
         "derived.growth_delta_vs_benchmark", "risk.*.cum_return", "risk.*.cagr",
         "risk.*.bench_cum_return", "risk.*.bench_cagr", "risk.*.sharpe",
         "risk.*.bench_sharpe", "kpi.*",
         "risk.*.coverage.*", "risk.*.excluded.*",
     ),
+    "analytics.insights": ("basic.*",),
     "analytics.valuation": (
         "derived.lens.*", "position.*.pe", "position.*.pb", "position.*.roe",
         "position.*.net_margin", "position.*.debt_to_equity",

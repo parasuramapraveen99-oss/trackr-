@@ -354,6 +354,8 @@ def explain(
     discrepancy, which is the common, expected case when scanning many actions against
     one discrepancy.
     """
+    if discrepancy.computed_qty is None:
+        return None
     t = action.action_type
 
     if t in (CorpActionType.BONUS, CorpActionType.SPLIT):

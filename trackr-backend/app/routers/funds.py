@@ -12,15 +12,16 @@ import time
 from datetime import date, timedelta
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from app import securities
 from app.auth.dependencies import require_owned_investor
 from app.auth.ops import require_cron_secret, require_ops_key
 from app.config import Settings, get_settings
 from app.database import get_conn, money, rate
-from app.db import cas_folios, fund_tax
+from app.db import cas_folios, consent, fund_tax
 from app.db import fund_reference as ref
 from app.engine.fund_tax import FundTaxFacts
 from app.engine.holdings import compute_holdings, exclude_unreconciled
@@ -29,6 +30,7 @@ from app.engine.twrr import compute_twrr
 from app.engine.types import Snapshot
 from app.engine.xirr import compute_xirr, compute_xirr_holdings
 from app.funds import series
+from app.ingest import mf_cas_pdf
 from app.prices import amfi, amfi_jobs
 from app.prices.current import resolve_current_prices
 from app.routers import exclusions
@@ -106,6 +108,141 @@ def fund_statement_holdings(investor_id: str, as_of: date | None = None,
                            connection: Any = Depends(get_conn)) -> list[dict[str, Any]]:
     """Dated CAS balances, available even when NAV-based return valuation is disabled."""
     return cas_folios.latest(connection, investor_id, as_of or date.today())
+
+
+class MfTransactionOut(BaseModel):
+    date: str
+    kind: str
+    description: str
+    units: str | None
+    nav: str | None
+    amount: str | None
+    balance: str | None
+
+
+class MfSchemeOut(BaseModel):
+    #: Masked ("…6789"), like /funds/statements. The full folio number is never returned.
+    folio_label: str
+    amc: str
+    scheme: str
+    isin: str | None
+    registrar: str
+    opening_units: str
+    closing_units: str
+    calculated_units: str
+    nav: str | None
+    nav_date: str | None
+    value: str | None
+    checks_passed: bool
+    issues: list[str]
+    evidence_rows: int
+    transactions: list[MfTransactionOut]
+
+
+class MfStatementPreviewOut(BaseModel):
+    #: Always false in this version: the preview is never written to the ledger.
+    #: docs/MF_ETF_PLAN.md P5 -- see app/ingest/mf_cas_pdf.py's module docstring.
+    saved: Literal[False] = False
+    issuer: str
+    period_from: str
+    period_to: str
+    investor_name: str
+    folio_count: int
+    scheme_count: int
+    transaction_count: int
+    schemes_needing_attention: int
+    #: False when the reader skipped or doubted part of the statement (see ``warnings``).
+    complete: bool
+    #: Funds with no NAV/value printed; left out of ``total_value``, never counted as 0.
+    unvalued_count: int
+    total_value: str
+    warnings: list[str]
+    schemes: list[MfSchemeOut]
+
+
+def _text(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+@router.post(
+    "/investors/{investor_id}/funds/statement-preview",
+    response_model=MfStatementPreviewOut,
+    dependencies=[Depends(require_owned_investor)],
+)
+async def preview_fund_statement(
+    investor_id: str,
+    file: UploadFile = File(...),
+    password: str = Form(...),
+    connection: Any = Depends(get_conn),
+) -> dict[str, Any]:
+    """Read a CAMS/KFintech DETAILED CAS and say what is in it. Writes nothing.
+
+    The "Import Mutual Funds" flow's upload step. Ownership and consent are checked
+    before the file is opened (MF_ETF_PLAN section 6: "Account ownership and consent
+    checks apply before staging"). The file is read in memory and not stored; the
+    password is passed to the PDF library once and dropped -- never saved, unlike
+    /ingest/files, and never logged.
+    """
+    consent.require_consent(connection, investor_id)
+    content = await file.read(mf_cas_pdf.MAX_BYTES + 1)
+    try:
+        preview = await run_in_threadpool(mf_cas_pdf.parse_statement, content, password)
+    except mf_cas_pdf.MfStatementError as exc:
+        code = (
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+            if exc.code == "too_large"
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        raise HTTPException(code, str(exc)) from exc
+    finally:
+        del password
+
+    return {
+        "saved": False,
+        "issuer": preview.issuer,
+        "period_from": preview.period_from,
+        "period_to": preview.period_to,
+        "investor_name": preview.investor_name,
+        "folio_count": preview.folio_count,
+        "scheme_count": len(preview.schemes),
+        "transaction_count": preview.transaction_count,
+        "schemes_needing_attention": preview.schemes_needing_attention,
+        "complete": preview.complete,
+        "unvalued_count": preview.unvalued_count,
+        "total_value": str(preview.total_value),
+        "warnings": preview.warnings,
+        "schemes": [
+            {
+                "folio_label": s.folio_label,
+                "amc": s.amc,
+                "scheme": s.scheme,
+                "isin": s.isin,
+                "registrar": s.registrar,
+                "opening_units": str(s.opening_units),
+                "closing_units": str(s.closing_units),
+                "calculated_units": str(s.calculated_units),
+                "nav": _text(s.nav),
+                "nav_date": s.nav_date,
+                "value": _text(s.value),
+                "checks_passed": s.checks_passed,
+                "issues": s.issues,
+                "evidence_rows": s.evidence_rows,
+                "transactions": [
+                    {
+                        "date": t.date,
+                        "kind": t.kind,
+                        "description": t.description,
+                        "units": _text(t.units),
+                        "nav": _text(t.nav),
+                        "amount": _text(t.amount),
+                        "balance": _text(t.balance),
+                    }
+                    for t in s.transactions
+                ],
+            }
+            for s in preview.schemes
+        ],
+    }
 
 
 class TaxProfileIn(BaseModel):

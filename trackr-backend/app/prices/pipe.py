@@ -62,6 +62,9 @@ class PipeResult:
     #: whose only consumer builds a Yahoo ticker out of it. NSE's SYMBOL is a real ticker
     #: in both the current and legacy layouts, so it is the one safe source.
     nse_symbols: dict[str, str] = field(default_factory=dict)
+    #: (isin, date, exchange, rupees traded) for every row whose file carried a value.
+    #: Kept per exchange; the liquidity read sums them (migration 090).
+    traded_values: list[tuple[str, date, str, Decimal]] = field(default_factory=list)
     #: ISIN -> (exchange, that exchange's own symbol): where an indicative quote for the
     #: ISIN is looked up (app.db.quote_mapping). Same priority as the price merge, so the
     #: quote and the official close come from one exchange. A BSE row counts only from a
@@ -169,6 +172,12 @@ def fetch_day(
         if row.symbol and row.symbol.strip()
     }
     result.listings = listings(rows_by_exchange)
+    result.traded_values = [
+        (row.isin, row.price_date, exchange, row.traded_value)
+        for exchange, rows in rows_by_exchange.items()
+        for row in rows
+        if row.traded_value is not None
+    ]
 
     if result.only_one_exchange:
         notifier.notify(

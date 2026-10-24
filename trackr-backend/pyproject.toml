@@ -51,6 +51,10 @@ dependencies = [
   # app/ingest/zerodha_contract_note.py) is the primary production ingestion route per
   # docs/INGESTION.md, and brokers forward contract notes as PDFs.
   "pdfplumber>=0.11",
+  # CAMS / KFintech detailed CAS PDFs for the "Import Mutual Funds" preview
+  # (app/ingest/mf_cas_pdf.py). MIT licence. Its bundled ISIN lookup is NOT used for
+  # identity: mf_cas_pdf accepts only the ISIN printed on the statement.
+  "casparser>=1.4.1,<2",
   # Intraday quotes for "today, before tonight's bhavcopy settles" (app/prices/live.py,
   # app/prices/yfinance_live.py) -- bhavcopy has nothing to say about right now during
   # market hours. Pulls in pandas/numpy transitively, unlike every other dependency
@@ -86,6 +90,10 @@ dev = [
   # moto mocks S3 behind a real boto3 client for offline tests -- test-only, unlike
   # boto3 itself above which the app needs at runtime whenever STORAGE_BACKEND=s3.
   "moto[s3]>=5.0",
+  # Renders synthetic, password-locked CAMS/KFintech statements for the mutual fund
+  # import tests (tests/mf_cas_synth.py) -- there is no real client CAS in the repo.
+  # Test-only; those tests skip without it. BSD licence.
+  "reportlab>=4.0",
 ]
 # Gmail OAuth adapter -- PERSONAL TESTING ONLY, not authorised for client use until a
 # Google CASA assessment clears the restricted gmail.readonly scope. See

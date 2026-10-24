@@ -43,8 +43,44 @@ def upsert_snapshots(conn: Any, rows: list[tuple[str, bool, Snapshot]]) -> None:
            ON CONFLICT (investor_id,as_of,advised_only) DO UPDATE SET
              invested=EXCLUDED.invested,market_value=EXCLUDED.market_value,
              unrealised=EXCLUDED.unrealised,realised_to_date=EXCLUDED.realised_to_date,
-             excluded_isins=EXCLUDED.excluded_isins,computed_at=clock_timestamp()""",
+             excluded_isins=EXCLUDED.excluded_isins,computed_at=clock_timestamp()
+           WHERE """
+        + _CHANGED,
         (json.dumps(payload),),
+    )
+
+
+#: An upsert's DO UPDATE applies only when a stored figure differs. Re-valuing a day to the
+#: same numbers then changes no row, so it neither moves the chart's version
+#: (count:max computed_at) nor invalidates any cached analytics report (migration 093).
+_CHANGED = """(portfolio_snapshot.invested,portfolio_snapshot.market_value,
+             portfolio_snapshot.unrealised,portfolio_snapshot.realised_to_date,
+             portfolio_snapshot.excluded_isins)
+           IS DISTINCT FROM (EXCLUDED.invested,EXCLUDED.market_value,EXCLUDED.unrealised,
+             EXCLUDED.realised_to_date,EXCLUDED.excluded_isins)"""
+
+
+def settle_rebuild_tasks(conn: Any, rows: list[tuple[str, bool, Snapshot]], read_snapshot) -> None:
+    """Close queued SNAPSHOT rebuilds for days just written from inputs that already
+    included the change that queued them.
+
+    A task carries ``queued_xid``: the transaction that queued it (a replay that deleted
+    the day, or an interior hole being seen). ``read_snapshot`` was taken before the
+    writer read any input, so when that transaction is visible in it, the row just written
+    reflects the change and the worker re-valuing the day would only reproduce it. A task
+    queued by a transaction the writer could not see stays pending, and a task the worker
+    has already claimed ('running') is left to the worker.
+    """
+    if not rows or read_snapshot is None:
+        return
+    keys = [f"{investor}:{point.as_of.isoformat()}:{advised}" for investor, advised, point in rows]
+    conn.execute(
+        """UPDATE reference_sync_task SET state='done',last_error=NULL,attempts=0,
+             updated_at=clock_timestamp(),last_success_at=clock_timestamp()
+           WHERE kind='SNAPSHOT' AND state IN ('pending','retry') AND task_key=ANY(%s)
+             AND payload ? 'queued_xid'
+             AND pg_visible_in_snapshot((payload->>'queued_xid')::xid8, %s::pg_snapshot)""",
+        (keys, read_snapshot),
     )
 
 
@@ -69,7 +105,8 @@ def upsert_snapshot(conn: Any, investor_id: str, advised_only: bool, snapshot: S
                 realised_to_date = EXCLUDED.realised_to_date,
                 excluded_isins = EXCLUDED.excluded_isins,
                 computed_at = now()
-            """,
+            WHERE """
+            + _CHANGED,
             (
                 investor_id,
                 snapshot.as_of,

@@ -22,7 +22,8 @@ def upsert_index_levels(conn: Any, rows: list[Any]) -> int:
     """Store merged index levels. Idempotent: re-running a range changes nothing new.
 
     ``ON CONFLICT DO UPDATE`` rather than ``DO NOTHING``, same reasoning as
-    ``upsert_prices`` -- a republished/corrected value should carry through.
+    ``upsert_prices`` -- a republished/corrected value should carry through. An unchanged
+    level is not rewritten, so re-fetching an overlap invalidates no cached report.
     """
     if not rows:
         return 0
@@ -34,6 +35,8 @@ def upsert_index_levels(conn: Any, rows: list[Any]) -> int:
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (index_name, level_date) DO UPDATE
                 SET close = EXCLUDED.close, source = EXCLUDED.source
+                WHERE (index_level.close, index_level.source)
+                    IS DISTINCT FROM (EXCLUDED.close, EXCLUDED.source)
                 """,
                 (row.index_name, row.level_date, row.close, row.source),
             )

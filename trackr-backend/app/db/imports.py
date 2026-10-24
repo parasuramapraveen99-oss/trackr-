@@ -599,7 +599,7 @@ def stage_batch(
     cas_folios.record(conn, investor_id, batch_id, folios)
     declared_holdings = 0
     if declared:
-        declared_holdings = holdings.record_snapshot(conn, declared)
+        declared_holdings = holdings.record_snapshot(conn, declared, batch_id=batch_id)
         if declared_holdings:
             _replay_for_statement(conn, account_id)
 
@@ -733,7 +733,7 @@ def reparse_batch(
     cas_folios.record(conn, str(investor_id), batch_id, folios)
     declared_holdings = 0
     if declared:
-        declared_holdings = holdings.record_snapshot(conn, declared)
+        declared_holdings = holdings.record_snapshot(conn, declared, batch_id=batch_id)
         if declared_holdings:
             _replay_for_statement(conn, account_id)
 

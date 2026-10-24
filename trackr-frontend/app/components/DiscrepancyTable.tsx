@@ -24,9 +24,9 @@ export function DiscrepancyTable({ rows }: { rows: DiscrepancyOut[] }) {
         {rows.map((r) => (
           <tr key={r.isin} className="border-b border-navy-50 last:border-0">
             <td className="py-2 pr-3 font-mono text-xs text-navy-700">{r.isin}</td>
-            <td className="py-2 pr-3 text-right tabular-nums">{r.computed_qty}</td>
-            <td className="py-2 pr-3 text-right tabular-nums">{r.declared_qty}</td>
-            <td className="py-2 pr-3 text-right tabular-nums text-negative">{r.difference}</td>
+            <td className="py-2 pr-3 text-right tabular-nums">{r.computed_qty ?? "Unknown"}</td>
+            <td className="py-2 pr-3 text-right tabular-nums">{r.declared_qty ?? "Not checked"}</td>
+            <td className="py-2 pr-3 text-right tabular-nums text-negative">{r.difference ?? "Unknown"}</td>
             <td className="py-2 pr-3 text-navy-500 text-xs">{r.likely_cause ?? EMPTY_VALUE}</td>
             <td className="py-2 text-right">
               <Link

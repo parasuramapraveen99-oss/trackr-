@@ -78,6 +78,15 @@ SPECS: dict[str, Spec] = {
     "avg_cost": Spec(MONEY, 2),
     "last_price": Spec(MONEY, 2),
     "value": Spec(MONEY, 0),
+    "cvar_1d_95_value": Spec(MONEY, 0),
+    "volatility_1d_value": Spec(MONEY, 0),
+    # Basic-view findings (app.analytics.basic_slots). Rupees as decimal strings.
+    "gross_value": Spec(MONEY, 0),
+    "total_value": Spec(MONEY, 0),
+    "gain_value": Spec(MONEY, 0),
+    "portfolio_value": Spec(MONEY, 0),
+    "benchmark_value": Spec(MONEY, 0),
+    "gap_value": Spec(MONEY, 0),
 
     # --- already-a-percentage --------------------------------------------------------
     "unrealised_pct": Spec(PERCENT, 2),
@@ -110,6 +119,15 @@ SPECS: dict[str, Spec] = {
     "sector_pct_coverage": Spec(PERCENT, 1),
     "roe_derived_weight_pct": Spec(PERCENT, 1),
     "price_history_pct": Spec(PERCENT, 1),
+    "volatility_score": Spec(PERCENT, 0),
+    "drawdown_score": Spec(PERCENT, 0),
+    "var95_score": Spec(PERCENT, 0),
+    "share_of_gross_pct": Spec(PERCENT, 1),
+    "caution_pct": Spec(PERCENT, 1),
+    "risk_share_pct": Spec(PERCENT, 1),
+    "unclassified_pct": Spec(PERCENT, 1),
+    "covered_weight_pct": Spec(PERCENT, 1),
+    "yield_gap_pp": Spec(PERCENT, 2),
 
     # --- fractions -------------------------------------------------------------------
     "cum_return": Spec(FRACTION, 2),
@@ -128,6 +146,14 @@ SPECS: dict[str, Spec] = {
     "dividend_yield": Spec(FRACTION, 2),
     "sales_growth_1y": Spec(FRACTION, 2),
     "profit_growth_1y": Spec(FRACTION, 2),
+    "xirr_all": Spec(FRACTION, 2),
+    "xirr_holdings": Spec(FRACTION, 2),
+    "xirr": Spec(FRACTION, 1),
+    "benchmark_xirr": Spec(FRACTION, 1),
+    "max_drawdown_magnitude": Spec(FRACTION, 2),
+    "bench_dividend_yield": Spec(FRACTION, 2),
+    "bench_max_drawdown_magnitude": Spec(FRACTION, 1),
+    "coverage": Spec(FRACTION, 1),
 
     # --- ratios ----------------------------------------------------------------------
     "sharpe": Spec(RATIO, 2),
@@ -142,15 +168,23 @@ SPECS: dict[str, Spec] = {
     "concentration_target": Spec(RATIO, 0),
     "vol_ratio_1y": Spec(RATIO, 2),
     "average": Spec(RATIO, 2),
+    "weighted_pair_correlation": Spec(RATIO, 2),
     "weight_share": Spec(RATIO, 2),
     "target": Spec(RATIO, 0),
     "band_low": Spec(RATIO, 2),
     "band_high": Spec(RATIO, 2),
     "x_average": Spec(RATIO, 2),
     "y_average": Spec(RATIO, 2),
+    "tracking_error": Spec(RATIO, 2),
+    "information_ratio": Spec(RATIO, 2),
+    "unknown_weight": Spec(RATIO, 2),
+    "weighted_average": Spec(RATIO, 2),
+    "bench_pe": Spec(RATIO, 2),
+    "bench_pb": Spec(RATIO, 2),
 
     # --- counts ----------------------------------------------------------------------
     "position_count": Spec(COUNT, 0),
+    "pair_count": Spec(COUNT, 0),
     "priced_count": Spec(COUNT, 0),
     "total_count": Spec(COUNT, 0),
     "observations": Spec(COUNT, 0),
@@ -160,6 +194,15 @@ SPECS: dict[str, Spec] = {
     "factors_scored": Spec(COUNT, 0),
     "factors_offered": Spec(COUNT, 0),
     "unresolved_count": Spec(COUNT, 0),
+    "var_obs_needed": Spec(COUNT, 0),
+    "var_obs_remaining": Spec(COUNT, 0),
+    "holdings_covered": Spec(COUNT, 0),
+    "liquidity_sessions_needed": Spec(COUNT, 0),
+    "attractive_count": Spec(COUNT, 0),
+    "fair_count": Spec(COUNT, 0),
+    "expensive_count": Spec(COUNT, 0),
+    "na_count": Spec(COUNT, 0),
+    "missing_count": Spec(COUNT, 0),
 
     # --- non-numeric -----------------------------------------------------------------
     "grade": Spec(ENUM, 0, comparable=False),
@@ -184,6 +227,19 @@ SPECS: dict[str, Spec] = {
     # verbatim and never compared, and a change measured from an unnamed day is
     # unfalsifiable.
     "since_date": Spec(LABEL, 0, comparable=False),
+    # Dates rendered verbatim: window bounds, drawdown peak/trough, index ratio date.
+    "start": Spec(LABEL, 0, comparable=False),
+    "end": Spec(LABEL, 0, comparable=False),
+    "peak": Spec(LABEL, 0, comparable=False),
+    "trough": Spec(LABEL, 0, comparable=False),
+    "recovered": Spec(LABEL, 0, comparable=False),
+    "period_start": Spec(LABEL, 0, comparable=False),
+    "period_end": Spec(LABEL, 0, comparable=False),
+    "peak_date": Spec(LABEL, 0, comparable=False),
+    "recovered_date": Spec(LABEL, 0, comparable=False),
+    "benchmark_as_of": Spec(LABEL, 0, comparable=False),
+    "status": Spec(ENUM, 0, comparable=False),
+    "annualised": Spec(ENUM, 0, comparable=False),
 }
 
 

@@ -13,12 +13,23 @@ from app.ingest.nsdl import SearchPage
 
 
 def enqueue(conn, kind: str, key: str, payload: dict, *, refresh: bool = False) -> None:
+    """Queue (or, with ``refresh``, re-request) a task.
+
+    A refresh replaces the request but keeps the ``snapshot_*`` keys a REPLAY records about
+    the ledger it last saw (app.reference_worker). They are the baseline that limits the
+    next replay's invalidation to the days a change can reach; dropping them made every
+    import delete and requeue the investor's whole snapshot history.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO reference_sync_task(kind, task_key, payload)
                VALUES (%s, %s, %s::jsonb)
                ON CONFLICT(kind, task_key) DO UPDATE SET
-                   payload = CASE WHEN %s THEN EXCLUDED.payload
+                   payload = CASE WHEN %s THEN
+                                  COALESCE((SELECT jsonb_object_agg(e.key, e.value)
+                                            FROM jsonb_each(reference_sync_task.payload) e
+                                            WHERE left(e.key, 9) = 'snapshot_'), '{}'::jsonb)
+                                  || EXCLUDED.payload
                                   ELSE reference_sync_task.payload END,
                    state = CASE WHEN %s THEN 'pending' ELSE reference_sync_task.state END,
                    available_at = CASE WHEN %s THEN now()
@@ -79,7 +90,12 @@ def schedule(conn, today: date | None = None) -> None:
 
 
 def store_nsdl_page(conn, page: SearchPage, prefix: str) -> int:
-    """Never delete absent securities or turn a failed search into an inactive record."""
+    """Never delete absent securities or turn a failed search into an inactive record.
+
+    An unchanged record is not rewritten: identity lookups repeat daily per held ISIN, and
+    each rewrite of a shared table invalidated every investor's cached analytics report
+    (migration 093). ``observed_at`` is therefore when the current content was observed;
+    every distinct record stays in ``security_reference_history``."""
     matched = [r for r in page.records if r.isin.startswith(prefix)]
     with conn.cursor() as cur:
         for record in matched:
@@ -90,7 +106,8 @@ def store_nsdl_page(conn, page: SearchPage, prefix: str) -> int:
                 cur.execute(
                     """INSERT INTO security(isin, name) VALUES (%s,%s)
                        ON CONFLICT(isin) DO UPDATE
-                           SET name = COALESCE(security.name, EXCLUDED.name)""",
+                           SET name = COALESCE(security.name, EXCLUDED.name)
+                       WHERE security.name IS NULL AND EXCLUDED.name IS NOT NULL""",
                     (record.isin, record.issuer),
                 )
             cur.execute(
@@ -102,7 +119,12 @@ def store_nsdl_page(conn, page: SearchPage, prefix: str) -> int:
                        description=EXCLUDED.description, instrument=EXCLUDED.instrument,
                        status=EXCLUDED.status, source_url=EXCLUDED.source_url,
                        response_sha256=EXCLUDED.response_sha256,
-                       raw_payload=EXCLUDED.raw_payload, observed_at=now()""",
+                       raw_payload=EXCLUDED.raw_payload, observed_at=now()
+                   WHERE (security_reference.issuer, security_reference.description,
+                          security_reference.instrument, security_reference.status,
+                          security_reference.raw_payload)
+                       IS DISTINCT FROM (EXCLUDED.issuer, EXCLUDED.description,
+                          EXCLUDED.instrument, EXCLUDED.status, EXCLUDED.raw_payload)""",
                 (
                     record.isin,
                     record.issuer,

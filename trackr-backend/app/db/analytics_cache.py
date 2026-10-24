@@ -1,15 +1,19 @@
 """``analytics_report_cache``: serve a computed advisor response only if nothing changed.
 
 THE VERSION. ``data_version`` = (count, min id, max id) of ``analytics_input_change``
-(migration 089) + a hash of the backend source tree. A statement trigger on every
-analytics-input table writes one marker row per writing transaction, INSIDE that
-transaction, so a marker becomes visible atomically with the data it describes:
+markers that apply to one investor -- the shared ones (investor_id NULL) and that
+investor's own -- + a hash of the backend source tree. Triggers on every analytics-input
+table write a marker INSIDE the writing transaction, only when rows actually changed, and
+scoped to the owning investor where the table has one (migrations 089, 093). A marker
+becomes visible atomically with the data it describes:
 
   * a write committed before the version is read is visible to the computation;
   * a write committed after it adds a marker -> the next read differs -> recompute.
 
-The set of visible markers only grows (pruning removes the oldest, which raises the
-minimum id), so equal (count, min, max) means the identical set: no stale hit.
+Each set of visible markers (shared, and per investor) only grows (pruning removes the
+oldest, which raises the minimum id), so equal (count, min, max) means the identical set:
+no stale hit. One investor's snapshot rebuild therefore leaves every other investor's
+cached report valid, and a statement that changed no rows invalidates nothing.
 
 The first design read ``pg_stat_user_tables`` write counters. Measured on scratch they
 are published asynchronously: a request right after an in-place price correction saw
@@ -18,8 +22,8 @@ the old counters and was served the old report. That design is rejected.
 The source hash makes every deploy or local code change invalidate every row, so no
 one has to remember to bump a version when the projection or engine changes.
 
-COVERAGE. The trigger is attached to every public table except EXCLUDED_* below, which
-must match migration 089. ``tests/test_db_analytics_cache.py`` fails if a non-excluded
+COVERAGE. The triggers are attached to every public table except EXCLUDED_* below, which
+must match migrations 089 and 093. ``tests/test_db_analytics_cache.py`` fails if a non-excluded
 table lacks the trigger, so a table added later cannot silently escape invalidation.
 """
 
@@ -43,6 +47,8 @@ CACHE_METHOD = f"{METHOD_VERSION}+{PROJECTION_VERSION}"
 EXCLUDED_TABLES = frozenset(
     {
         "analytics_input_change",  # the markers themselves
+        "reconciliation_statement",
+        "reconciliation_run",  # comparison evidence, not a financial input
         "analytics_report_cache",  # itself: every put would otherwise invalidate
         "schema_migrations",
         "scratch_database_tag",
@@ -55,6 +61,11 @@ EXCLUDED_TABLES = frozenset(
         "document_password",
         "import_batch",  # staging; promotion writes `transaction`, which is included
         "import_row",
+        # Background-queue bookkeeping (migration 093): the report reads no queue table,
+        # and the catch-up cycle writes these on every run.
+        "reference_sync_task",
+        "reference_sync_dependency",
+        "reference_sync_import",
         "agent",
         "skill",
         "ritual",
@@ -103,12 +114,22 @@ def source_version() -> str:
     return digest.hexdigest()
 
 
-def data_version(conn: Any) -> str:
-    """Input-change markers + backend source hash. Read BEFORE computing a report."""
+def data_version(conn: Any, investor_id: str) -> str:
+    """Shared + this investor's input-change markers + backend source hash. Read BEFORE
+    computing a report."""
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*), min(id), max(id) FROM analytics_input_change")
-        count, low, high = cur.fetchone()
-    payload = json.dumps([source_version(), count, low, high], separators=(",", ":"))
+        cur.execute(
+            "SELECT count(*) FILTER (WHERE investor_id IS NULL), "
+            "min(id) FILTER (WHERE investor_id IS NULL), "
+            "max(id) FILTER (WHERE investor_id IS NULL), "
+            "count(*) FILTER (WHERE investor_id = %s), "
+            "min(id) FILTER (WHERE investor_id = %s), "
+            "max(id) FILTER (WHERE investor_id = %s) "
+            "FROM analytics_input_change WHERE investor_id IS NULL OR investor_id = %s",
+            (investor_id,) * 4,
+        )
+        markers = list(cur.fetchone())
+    payload = json.dumps([source_version(), *markers], separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
 
 

@@ -15,6 +15,7 @@ export function LandingHeader() {
         <nav className="l-nav l-rise" style={{ animationDelay: "60ms" }}>
           <a href="/#security" className="l-navlink">Security</a>
           <a href="/#faq" className="l-navlink">FAQ</a>
+          <Link href="/blog" className="l-navlink">Blog</Link>
           <Link href="/coming-soon?feature=Pricing" className="l-navlink">Pricing</Link>
         </nav>
 

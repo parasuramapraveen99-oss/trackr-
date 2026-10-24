@@ -144,3 +144,39 @@ def _one(statement: Any) -> Claim:
         cites=tuple(dict.fromkeys(cites)),
         card=card,
     )
+
+
+def generate_basic_lines(
+    client: LlmClient, request: dict[str, Any], feedback: list[str] | None = None
+) -> tuple[list[Any], list[str]]:
+    """One tab's Basic request -> candidate lines (unchecked; that is ``basic.verify_lines``).
+
+    ``feedback`` is the previous attempt's rejection reasons, appended for the one retry
+    the caller allows. The reasons name rules, never figures.
+    """
+    from app.narrative.basic import BASIC_SYSTEM_PROMPT, parse_lines, user_content
+
+    content = user_content(request)
+    if feedback:
+        content += "\n\nYOUR PREVIOUS LINES WERE REJECTED FOR:\n" + "\n".join(feedback)
+        content += (
+            '\nReturn the corrected {"lines":[...]} JSON using the original segment schema. '
+            'Both "lead" and "body" must be arrays of {"t":"text","v":"..."}, '
+            '{"t":"fact","id":"..."} or {"t":"lex","id":"..."} objects, '
+            'never strings. All figures must remain fact segments. '
+            'Keep each complete line under 140 displayed characters.'
+            ' Do not use any number words, including one, two, lakh, thousand or million; '
+            'use a neutral lead without a quantity and use fact segments for amounts. '
+            'Do not introduce jargon when correcting another error: P/E, P/B, beta and '
+            'other technical abbreviations are still forbidden in Basic text.'
+        )
+    try:
+        payload = client.complete_json(BASIC_SYSTEM_PROMPT, content)
+    except LlmUnavailable as exc:
+        raise NarrativeUnavailable(f"transport: {exc}") from None
+    except LlmResponseError as exc:
+        raise NarrativeUnavailable(f"response shape: {exc}") from None
+    try:
+        return parse_lines(payload)
+    except ValueError as exc:
+        raise NarrativeUnavailable(f"response shape: {exc}") from None

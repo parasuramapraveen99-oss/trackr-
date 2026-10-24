@@ -13,4 +13,5 @@ psycopg[binary]>=3.1
 cryptography>=42
 boto3>=1.34
 pdfplumber>=0.11
+casparser>=1.4.1,<2
 yfinance>=0.2

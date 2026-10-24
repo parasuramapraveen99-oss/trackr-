@@ -92,6 +92,7 @@ from app.routers import (
     market_assistant,
     monitors,
     narrative,
+    narrative_basic,
     privacy,
     reconcile,
     reference_sync,
@@ -849,6 +850,8 @@ app.include_router(consent.router)
 app.include_router(market_assistant.router)
 app.include_router(narrative.router)
 app.include_router(narrative.ops_router)
+app.include_router(narrative_basic.router)
+app.include_router(narrative_basic.ops_router)
 app.include_router(market.router)
 # Workspace research. Registered unconditionally; every route is guarded by
 # require_workspace_enabled (WORKSPACE_ENABLED + a ready schema) and every WRITE by

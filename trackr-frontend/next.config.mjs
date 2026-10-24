@@ -15,6 +15,8 @@ const apiBase = configuredApi.replace(/\/$/, "");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Keep a local verification server separate from an already running build.
+  distDir: process.env.TRACKR_NEXT_DIST_DIR ?? ".next",
   reactStrictMode: true,
   poweredByHeader: false,
   transpilePackages: ["@trackr/core", "@trackr/portfolio"],

@@ -72,25 +72,38 @@ def reconcile(
     Only ISINs that actually disagree are returned. A clean reconciliation is an empty
     list, not a list of zeroes.
 
-    PARTITIONED, deliberately, not the strict ``compute_holdings``: an ISIN whose own
-    ledger segment does not reconcile (``NegativeHoldingError`` -- typically the exact
-    "missing corporate action" case this function exists to diagnose) must not make
-    ``reconcile`` raise and refuse to look at every OTHER ISIN in the account. A broken
-    ISIN's computed quantity is unknowable, not zero, but it is treated as zero here for
-    one reason only: forcing a discrepancy to exist for it, so the caller (the
-    corporate-action matcher) gets a chance to explain it. If no verified action
-    explains it, the caller's own rejection path names the ISIN and the real cause
-    (``SkippedHolding.message``, not this function's generic heuristic) --
-    ``_likely_cause`` below is never the only place that ISIN's story gets told.
+    Broken ledger segments are reported as UNCOMPUTABLE, with null quantities and
+    their original error. They must survive even when the declared balance is zero.
     """
     computed_holdings, broken = compute_holdings_partitioned(transactions, as_of)
     computed = {h.isin: h.quantity for h in computed_holdings}
-    broken_isins = {s.isin for s in broken}
+    broken_by_isin = {s.isin: s for s in broken}
+    broken_isins = set(broken_by_isin)
 
     discrepancies = []
     for isin in sorted(set(computed) | set(declared_holdings) | broken_isins):
         computed_qty = computed.get(isin, ZERO)
         declared_qty = declared_holdings.get(isin, ZERO)
+        if isin in broken_by_isin:
+            failure = broken_by_isin[isin]
+            discrepancies.append(
+                Discrepancy(
+                    isin=isin,
+                    computed_qty=None,
+                    declared_qty=declared_qty,
+                    difference=None,
+                    status="UNCOMPUTABLE",
+                    error=failure.message,
+                    error_date=failure.as_of,
+                    deficit=failure.deficit,
+                    reason_code=failure.reason_code or "LEDGER_INCOMPLETE",
+                    likely_cause=(
+                        "Cannot reconcile—missing history. Acquisition or corporate-action "
+                        "history is missing or invalid. " + failure.message
+                    ),
+                )
+            )
+            continue
         if computed_qty == declared_qty:
             continue
 

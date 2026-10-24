@@ -149,6 +149,11 @@ def _source_for(fact_id: str, sources: dict[str, str]) -> str | None:
 
 # --- the builder ---------------------------------------------------------------------
 
+#: Risk-window keys that hold a chart series or an envelope, even when null for a window.
+_RISK_BLOCKS = frozenset(
+    {"metrics", "period", "reasons", "drawdown_dates", "drawdown_series", "return_histogram"}
+)
+
 
 class _Builder:
     def __init__(self, payload: dict[str, Any]) -> None:
@@ -238,8 +243,18 @@ def build_pack(payload: dict[str, Any]) -> FactPack:
     for window, metrics in (payload.get("risk") or {}).items():
         window_coverage = (payload.get("risk_coverage") or {}).get(window) or {}
         for name, value in metrics.items():
+            if isinstance(value, (dict, list)) or name in _RISK_BLOCKS:
+                # Chart series and per-metric envelopes are not single figures. Only
+                # their dates are addressable, below.
+                continue
             b.add(f"risk.{window}.{name}", value,
                   coverage_pct=window_coverage.get("weight_pct"))
+        for name in ("peak", "trough", "recovered"):
+            if name in (metrics.get("drawdown_dates") or {}):
+                b.add(f"risk.{window}.drawdown.{name}", metrics["drawdown_dates"][name])
+        for name in ("start", "end"):
+            if name in (metrics.get("period") or {}):
+                b.add(f"risk.{window}.period.{name}", metrics["period"][name])
         for name in ("start", "end", "observations", "weight_pct", "market_value", "basis"):
             if name in window_coverage:
                 value = window_coverage[name]
@@ -334,6 +349,10 @@ def build_pack(payload: dict[str, Any]) -> FactPack:
         # list-valued fact can only be quoted whole.
         for index, subject in enumerate(insight.get("subjects") or []):
             b.add(f"{base}.subject.{index}.label", subject)
+
+    # --- Basic-view findings: already computed by app.analytics.basic_slots ---------
+    for fact_id, value in ((payload.get("basic") or {}).get("facts") or {}).items():
+        b.add(fact_id, value)
 
     # --- exclusions, which invariant 16 requires be sayable -------------------------
     b.add("unresolved.unresolved_count", float(len(payload.get("unresolved") or [])))

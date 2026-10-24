@@ -32,6 +32,7 @@ from app.db.prices import (
     upsert_prices,
 )
 from app.db.quote_mapping import upsert_listings
+from app.db.traded_value import upsert as upsert_traded_values
 from app.db.universe import current_universe_isins
 from app.prices.alerts import Notifier
 from app.prices.pipe import NSE_BHAVCOPY_EARLIEST, PipeResult, backfill_days, trading_days
@@ -72,6 +73,7 @@ def store_backfilled_days(connection: Any, price_results: list[PipeResult]) -> i
             {isin: lst for isin, lst in result.listings.items() if isin in wanted},
             result.price_date,
         )
+        upsert_traded_values(connection, [r for r in result.traded_values if r[0] in held])
         # Whatever the archive answered with but did not mention is absent, not pending.
         # BOTH CONDITIONS ARE LOAD-BEARING:
         #   `result.fetched`   -- some data actually came back. Empty on a holiday or a

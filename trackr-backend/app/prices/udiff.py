@@ -28,6 +28,8 @@ DATE_COLUMN = "TradDt"
 SYMBOL_COLUMN = "TckrSymb"
 SERIES_COLUMN = "SctySrs"
 INSTRUMENT_COLUMN = "FinInstrmTp"
+#: Rupee value traded that session (liquidity). Optional: a file without it still prices.
+TRADED_VALUE_COLUMN = "TtlTrfVal"
 #: The exchange's own instrument id (BSE: the scrip code). Present only in a real UDiFF
 #: file -- a legacy file re-shaped by app.prices.sources._to_udiff_csv has no such column,
 #: which is how a caller tells a real BSE symbol from BSE legacy's company NAME.
@@ -47,6 +49,9 @@ class BhavcopyRow:
     series: str
     exchange: str
     instrument_id: str = ""
+    #: None when the file has no traded-value column or the cell is blank or not positive.
+    #: Never zero: an untraded day is absent, not a day of zero liquidity.
+    traded_value: Decimal | None = None
 
 
 class BhavcopyFormatError(ValueError):
@@ -109,6 +114,15 @@ def parse(payload: bytes, exchange: str) -> list[BhavcopyRow]:
                 series=(raw.get(SERIES_COLUMN) or "").strip(),
                 exchange=exchange,
                 instrument_id=(raw.get(INSTRUMENT_ID_COLUMN) or "").strip(),
+                traded_value=_positive(raw.get(TRADED_VALUE_COLUMN)),
             )
         )
     return rows
+
+
+def _positive(text: str | None) -> Decimal | None:
+    try:
+        value = Decimal(str(text or "").strip())
+    except InvalidOperation:
+        return None
+    return value if value > 0 else None

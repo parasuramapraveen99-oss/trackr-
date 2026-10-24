@@ -20,8 +20,9 @@ from app import securities
 from app.analytics import advisor, integration, milestone
 from app.analytics._vendor.advisor import cross_section, stats
 from app.analytics._vendor.advisor.core import Metric
+from app.analytics._vendor.advisor.health import RULE_VERSION as HEALTH_RULE_VERSION
 from app.config import get_settings
-from app.db import health_profiles, identity_review
+from app.db import company_inputs, health_profiles, identity_review
 from app.db.fundamentals import latest as latest_fundamentals
 from app.db.index_levels import list_index_levels
 from app.db.index_valuation import latest as latest_index_valuation
@@ -36,6 +37,7 @@ from app.engine.returns import compute_net_invested
 from app.engine.snapshot import compute_snapshot
 from app.engine.twrr import _period_flow
 from app.engine.types import Snapshot, Transaction
+from app.engine.xirr import years_before
 from app.prices.risk_free import RATE_INDEX
 from app.routers.analytics_performance import build_performance
 
@@ -461,15 +463,53 @@ def materialize(
                             reasons=["CURRENT_CLASSIFICATION_SNAPSHOT"],
                         )
                     )
+    # Company fundamentals for the health rubric: exchange filings first, vendor statements
+    # only where no filing exists (app/db/company_inputs.py).
+    company_isins = sorted(allowed | set(refs["members"]))
+    data["fundamentals"], filed_profiles, _ = company_inputs.build(
+        connection,
+        company_isins,
+        on,
+        cutoff,
+        latest_prices(connection, company_isins, on),
+        {i: securities.describe(meta, i).get("sector") for i in allowed},
+    )
+    data["sources"].append(
+        _source(
+            "company_financials",
+            "NSE integrated-filing XBRL (year-end results); Yahoo Finance statements where "
+            "a security has no NSE filing",
+            on,
+            now,
+        )
+    )
     # Exchange-sourced rubric profiles. Current classification only; never backdated, and
-    # never asserted from an observation made after the knowledge cutoff.
+    # never asserted from an observation made after the knowledge cutoff. The SEBI filing
+    # format (bank / NBFC / other) is used where the BSE header is absent or unsupported.
     profiles = health_profiles.read(connection, sorted(allowed))
     profile_status = {}
     if on == now.astimezone(IST).date():
         data["health_profiles"] = []
         for isin in sorted(allowed):
             profile = profiles.get(isin)
-            if profile is None:
+            filed = filed_profiles.get(isin)
+            if filed and (
+                profile is None
+                or profile.retrieved_at > cutoff
+                or profile.profile == "unsupported_financial"
+            ):
+                profile_status[isin] = filed
+                data["health_profiles"].append(
+                    dict(
+                        isin=isin,
+                        profile=filed,
+                        as_of=on.isoformat(),
+                        source_refs=["company_financials"],
+                        quality="provisional",
+                        reasons=["SEBI_FILING_FORMAT_PROFILE"],
+                    )
+                )
+            elif profile is None:
                 profile_status[isin] = "PROFILE_NOT_YET_CLASSIFIED"
             elif profile.retrieved_at > cutoff:
                 profile_status[isin] = "LOOKAHEAD_INPUT"
@@ -788,14 +828,179 @@ def cached_analytics(
     from app.schemas.analytics import AnalyticsResponse
 
     key = analytics_cache.CacheKey(investor_id, on, advised_only, benchmark, universe)
-    version = analytics_cache.data_version(connection)
+    version = analytics_cache.data_version(connection, investor_id)
     hit = analytics_cache.get(connection, key, version)
+    if hit is not None and _derived_current(hit):
+        return hit
     if hit is not None:
+        # Same inputs, but cached before (or under an older) revamp/Basic rule set. The
+        # rest of the payload is still exact; only the derived blocks are recomputed.
+        hit["revamp"] = revamp_block(connection, investor_id, on, advised_only, hit)
+        hit["basic"] = basic_block(connection, investor_id, on, advised_only, hit)
+        _put(connection, key, version, hit, 0, investor_id, on)
         return hit
     started = perf_counter()
     report = build_analytics(connection, investor_id, on, benchmark, advised_only, universe)
     payload = AnalyticsResponse.model_validate(report).model_dump(mode="json")
+    # Evaluated on the exact wire payload, so a Basic finding can only cite a figure the
+    # page itself shows (docs/ANALYTICS_BASIC_NARRATIVE.md).
+    payload["revamp"] = revamp_block(connection, investor_id, on, advised_only, payload)
+    payload["basic"] = basic_block(connection, investor_id, on, advised_only, payload)
     elapsed = round((perf_counter() - started) * 1000)
+    _put(connection, key, version, payload, elapsed, investor_id, on)
+    return payload
+
+
+def basic_slots_version() -> str:
+    from app.analytics.basic_slots import RULE_VERSION
+
+    return RULE_VERSION
+
+
+def _derived_current(payload: dict) -> bool:
+    from app.analytics.revamp import REVAMP_VERSION
+
+    return (payload.get("basic") or {}).get("rule_version") == basic_slots_version() and (
+        payload.get("revamp") or {}
+    ).get("version") == REVAMP_VERSION
+
+
+def revamp_block(
+    connection: Any, investor_id: str, on: date, advised_only: bool, payload: dict
+) -> dict:
+    """Inputs the revamped page needs beyond the payload, read once, computed in
+    app.analytics.revamp (pure). See that module for each figure's rule."""
+    from app.analytics import revamp
+    from app.analytics.basic_slots import UNCLASSIFIED_LABELS, screen_for
+    from app.db.fundamentals import latest as fundamentals_at
+    from app.db.traded_value import recent_sessions
+    from app.db.universe import current_universe_isins
+    from app.prices.market_cap_sources import AMFI_MARKET_CAP_URL
+
+    benchmark = payload.get("benchmark") or "NIFTY50_TRI"
+    positions = payload.get("positions") or []
+    isins = [p["isin"] for p in positions]
+    total = Decimal(str((payload.get("kpi") or {}).get("market_value")
+                        or (payload.get("coverage") or {}).get("known_value_subtotal") or "0"))
+    weights = {p["isin"]: p.get("weight") or 0.0 for p in positions}
+    symbols = {p["isin"]: p.get("symbol") or p["isin"] for p in positions}
+
+    # Exchange calendar = the benchmark's own sessions; last WINDOW_SESSIONS intervals.
+    levels = list_index_levels(connection, benchmark, on - timedelta(days=420), on)
+    sessions = [d for d, _ in levels][-(revamp.WINDOW_SESSIONS + 1):]
+    start = sessions[0] if sessions else on
+    history = adjusted_price_series(connection, isins, start, on) if isins else {}
+    returns = {i: revamp.interval_returns(history.get(i) or [], sessions) for i in isins}
+    bench_returns = revamp.interval_returns(levels, sessions)
+    betas = revamp.holding_betas(returns, bench_returns)
+
+    risk = payload.get("risk") or {}
+    one_year = risk.get("1y") or {}
+    worst = next(
+        (
+            {"window": key, "max_drawdown": risk[key].get("max_drawdown"),
+             **(risk[key].get("drawdown_dates") or {}), "period": risk[key].get("period")}
+            for key in ("5y", "3y", "1y")
+            if (risk.get(key) or {}).get("max_drawdown") is not None
+        ),
+        {"window": None, "max_drawdown": None, "reason": "NO_RISK_WINDOW"},
+    )
+    bench_window = [(d, float(v)) for d, v in levels if d in set(sessions)]
+
+    # Point-in-time: a holding is screened as a lender only from an accepted profile.
+    statuses = (payload.get("health") or {}).get("profile_status") or {}
+    stored = health_profiles.read(connection, sorted(statuses))
+    screens = {i: screen_for(st, stored[i].industry_group if i in stored else None)
+               for i, st in statuses.items()}
+
+    reported = {p["isin"]: p for p in
+                (((payload.get("advisor") or {}).get("reported_inputs") or {}).get("positions")
+                 or [])}
+    fund_positions = [{**p, **{k: v for k, v in reported.get(p["isin"], {}).items()
+                               if k in ("pe", "pb", "roe", "net_margin", "debt_to_equity",
+                                        "interest_cover", "dividend_yield", "sales_growth_1y",
+                                        "profit_growth_1y", "fundamentals_as_of")}}
+                      for p in positions]
+    universe = fundamentals_at(connection, current_universe_isins(connection), on)
+    medians = revamp.market_medians([
+        {k: (float(getattr(f, k)) if getattr(f, k, None) is not None else None)
+         for k in ("pe", "pb", "roe", "net_margin", "debt_to_equity", "interest_cover",
+                   "dividend_yield", "sales_growth_1y", "profit_growth_1y")}
+        for f in universe.values()
+    ])
+
+    first_prices = {}
+    if isins:
+        for isin, first in connection.execute(
+            "SELECT isin, min(price_date) FROM price WHERE isin = ANY(%s) GROUP BY isin",
+            (isins,),
+        ).fetchall():
+            first_prices[isin] = first
+    targets = {"1w": on - timedelta(days=7), "1m": on - timedelta(days=30),
+               "3m": on - timedelta(days=91),
+               **{f"{n}y": years_before(on, n) for n in (1, 3, 5)}}
+    return_reasons = {
+        p["isin"]: revamp.return_reasons(p.get("return_windows") or {},
+                                         first_prices.get(p["isin"]), targets)
+        for p in positions
+    }
+
+    snaps = list_snapshots_range(connection, investor_id, advised_only, on - timedelta(days=10), on)
+    now = next((s for s in snaps if s.as_of == on), None)
+    prev = next((s for s in reversed(snaps) if s.as_of < on), None)
+    trades_today = sum(
+        t.txn_date == on
+        for t in load_transactions(connection, investor_id, advised_only=advised_only, date_to=on)
+    )
+    day = (payload.get("kpi") or {}).get("day_change")
+    check = revamp.day_change_check(
+        Decimal(str(day)) if day is not None else None,
+        now.market_value if now else None, prev.market_value if prev else None,
+        Decimal(0) if trades_today == 0 else None,
+    )
+    amfi_period = AMFI_MARKET_CAP_URL.rsplit("AverageMarketCapitalization", 1)[-1].split(".")[0]
+
+    return {
+        "version": revamp.REVAMP_VERSION,
+        "header": revamp.header(payload, revamp.bench_day_change(levels, on), check),
+        "risk": {
+            "betas": betas,
+            "risk_shares": revamp.risk_shares(returns, weights),
+            "portfolio_beta": one_year.get("beta"),
+            "benchmark_drawdown": revamp.drawdown(bench_window),
+            "window_sessions": len(sessions) - 1,
+            "concentration_impact": revamp.concentration_impact(positions, total),
+            "index_shock": revamp.index_shock(positions, betas, one_year.get("beta"), total, worst),
+            "liquidity": revamp.liquidity(positions, recent_sessions(connection, isins, on), total),
+        },
+        "diversification": {
+            "correlation": revamp.correlation_matrix(returns, weights, symbols),
+            "sector": revamp.sector_mix((payload.get("allocation") or {}).get("sector") or [],
+                                        UNCLASSIFIED_LABELS),
+            "amfi_list_period": amfi_period,
+            "return_reasons": return_reasons,
+        },
+        "fundamentals": {
+            "dataset": "vendor_reported_provisional",
+            "as_of": sorted({p.get("fundamentals_as_of") for p in fund_positions
+                             if p.get("fundamentals_as_of")}),
+            "cards": revamp.fundamentals_cards(fund_positions, payload.get("fundamentals") or {}),
+            "map": revamp.valuation_map(fund_positions, medians, screens),
+            "positions": [{k: p.get(k) for k in ("isin", "symbol", "weight", "sector", "pe", "pb",
+                                                 "roe", "net_margin", "debt_to_equity",
+                                                 "interest_cover", "dividend_yield",
+                                                 "sales_growth_1y", "profit_growth_1y")}
+                          for p in fund_positions],
+        },
+        "coverage": revamp.coverage_footer(payload),
+    }
+
+
+def _put(connection: Any, key: Any, version: Any, payload: dict, elapsed: int,
+         investor_id: str, on: date) -> None:
+    """Store a response. A failed write is logged; the correct response is still served."""
+    from app.db import analytics_cache
+
     try:
         analytics_cache.put(connection, key, version, payload, elapsed)
     except Exception:
@@ -808,7 +1013,56 @@ def cached_analytics(
                 "compute_ms": elapsed,
             },
         )
-    return payload
+
+
+def basic_block(
+    connection: Any, investor_id: str, on: date, advised_only: bool, payload: dict
+) -> dict:
+    """The Basic-view findings for this payload: app.analytics.basic_slots.
+
+    Two inputs the payload does not carry are read here. The 1Y per-holding contribution
+    comes from the same routine as GET /contribution, so its scope and exclusions match
+    that endpoint. A missing price at either end is a named error on the loss-share
+    finding, never a zero. Exchange industry groups come from security_health_profile,
+    and only for ISINs whose profile the advisor accepted for this date.
+    """
+    from app.analytics import basic_slots
+    from app.engine.errors import MissingPriceError
+    from app.routers.analytical import contribution
+
+    try:
+        rows = contribution(
+            investor_id,
+            period_start=on - timedelta(days=365),
+            as_of=on,
+            advised_only=advised_only,
+            connection=connection,
+        )
+        contrib = {
+            "period_start": str(rows["period_start"]),
+            "total_gain": rows["total_gain"],
+            "contributions": [
+                {"isin": r["isin"], "symbol": r["symbol"], "gain": r["gain"]}
+                for r in rows["contributions"]
+            ],
+        }
+    except MissingPriceError as exc:
+        logger.warning(
+            "basic_contribution_unavailable",
+            extra={
+                "investor_ref": hashlib.sha256(investor_id.encode()).hexdigest()[:16],
+                "as_of": on.isoformat(),
+                "isins": list(exc.isins),
+            },
+        )
+        contrib = {"error": f"No price at the start or end of the year for: {', '.join(exc.isins)}"}
+    statuses = (payload.get("health") or {}).get("profile_status") or {}
+    stored = health_profiles.read(connection, sorted(statuses))
+    profiles = {
+        isin: (status, stored[isin].industry_group if isin in stored else None)
+        for isin, status in statuses.items()
+    }
+    return basic_slots.evaluate(payload, contrib, profiles)
 
 
 CAPITAL_STATES = ("STRONG", "WEAKENING", "CAUTION", "RECOVERY", "NEUTRAL", "UNKNOWN")
@@ -905,31 +1159,108 @@ def _health_evidence(overview: dict) -> dict:
     }
 
 
+def _health_exclusions(context: dict) -> list[dict]:
+    """Holdings the health rubric could not see, each with the reason it was left out."""
+    names = {a["isin"]: a["name"] for a in context["other_assets"]}
+    unpriced = [
+        dict(isin=u["isin"], name=u.get("symbol") or u.get("name"), reason=u["reason"])
+        for u in context["unresolved"]
+    ]
+    unreconciled = [
+        dict(isin=s.isin, name=names.get(s.isin), reason=s.message) for s in context["skipped"]
+    ]
+    return unpriced + unreconciled
+
+
+def _health_report(report: dict, context: dict) -> dict:
+    """The report the health rubric reads: the reconciled, priced book.
+
+    Owner amendment (8 October 2026): analytics compute on everything that reconciles
+    and name what they exclude. An unpriced holding has no market value, so the full
+    run has no value denominator and every component is withheld. Re-running the same
+    rubric without the unpriced rows gives a denominator that is exactly the priced
+    subtotal; the excluded rows are named by ``_health_exclusions``, never valued.
+    """
+    data = context["data"]
+    if all(row["market_value"] is not None for row in data["holdings"]):
+        return report
+    priced = [row for row in data["holdings"] if row["market_value"] is not None]
+    if not priced:
+        return report
+    return milestone.calculate(dict(data, holdings=priced, portfolio_value=str(context["total"])))
+
+
+def _insights(
+    positions: list[dict], cashflow: dict, risk: dict, sectors: list[dict], fundamentals: list
+) -> list:
+    """The published insight rules (app.analytics.verdict) over the priced book.
+
+    A window feeds a rule only when it is complete: the 1Y relative return needs 100%
+    coverage, and beta needs an available 1Y risk window.
+    """
+    from app.analytics import verdict
+
+    ranked = sorted(positions, key=lambda p: -p["weight"])
+    gains = sorted(
+        (Decimal(p["unrealised"]) for p in positions if Decimal(p["unrealised"]) > 0),
+        reverse=True,
+    )
+    gain_share = float(sum(gains[:2]) / sum(gains) * 100) if len(gains) >= 2 else None
+    one_year = (cashflow or {}).get("windows", {}).get("1y") or {}
+    relative = (
+        float(one_year["relative_pp"])
+        if one_year.get("relative_pp") is not None and one_year.get("coverage_pct") == 100
+        else None
+    )
+    risk_1y = risk.get("1y") or {}
+    beta = risk_1y.get("beta") if risk_1y.get("status") != "unavailable" else None
+    top_sector = max(sectors, key=lambda s: s["pct"]) if sectors else None
+    # ROE from the same filings the health rubric reads (company_inputs), else the position's.
+    roe = {f["isin"]: float(f["value"]) for f in fundamentals if f["field"] == "roe"}
+    return [
+        asdict(i)
+        for i in verdict.build_insights(
+            top_weights=[(p["symbol"] or p["isin"], p["weight"]) for p in ranked],
+            gain_share_top2=gain_share,
+            relative_1y_pp=relative,
+            beta=beta,
+            quality_leaders=[
+                p["symbol"] or p["isin"]
+                for p in ranked
+                if (roe.get(p["isin"], p.get("roe")) or 0) > 0.30
+            ],
+            top_sector=(top_sector["label"], top_sector["pct"]) if top_sector else None,
+        )
+    ]
+
+
 def _health_projection(report: dict, context: dict, enabled: bool) -> dict:
-    """portfolio-health-v1 onto HealthOut. Withheld components stay withheld."""
+    """The health rubric onto HealthOut, from ``_health_report``. Withheld components
+    stay withheld.
+
+    When holdings are excluded the score covers the reconciled, priced book only: it is
+    marked provisional, carries EXCLUDES_UNRECONCILED_SEGMENTS, and lists the exclusions.
+    """
+    excluded = _health_exclusions(context)
     base = dict(
-        rule_version="portfolio-health-v1",
+        rule_version=HEALTH_RULE_VERSION,
         profile_status=context["profile_status"],
         bands=[],
         drivers=[],
         components=[],
+        excluded=excluded,
     )
     if not enabled:
         return dict(
             base, score=None, grade=None, status="unavailable", reasons=["FEATURE_DISABLED"]
         )
     health = report["sections"]["overview"]["health"]
-    if context["skipped"]:
-        # The calculation saw only reconciled holdings; any full-book grade would be false.
-        return dict(
-            base,
-            score=None,
-            grade=None,
-            status="unavailable",
-            reasons=["UNRECONCILED_SEGMENTS"],
-            bands=health["bands"],
-            limitations=health["limitations"],
-        )
+    status = health["score"]["status"]
+    reasons = list(health["score"]["reasons"])
+    if excluded:
+        reasons.append("EXCLUDES_UNRECONCILED_SEGMENTS")
+        if status == "available":
+            status = "provisional"
     components = [
         dict(
             key=c["key"],
@@ -951,8 +1282,8 @@ def _health_projection(report: dict, context: dict, enabled: bool) -> dict:
         components=components,
         drivers=health["drivers"],
         bands=health["bands"],
-        status=health["score"]["status"],
-        reasons=health["score"]["reasons"],
+        status=status,
+        reasons=reasons,
         score_exact=health["score"]["value"],
         score_bounds=None
         if health["score"]["value"] is not None
@@ -964,9 +1295,12 @@ def _health_projection(report: dict, context: dict, enabled: bool) -> dict:
 
 
 def _capital_projection(report: dict, context: dict, positions: list[dict], enabled: bool):
-    """Bucket money in paise, weights in percent; UNKNOWN is a bucket, never dropped."""
+    """Bucket money in paise, weights in percent; UNKNOWN is a bucket, never dropped.
+
+    Reads ``_health_report``: per-holding states over the reconciled, priced book, with
+    the exclusions named on the health block."""
     metric = report["sections"]["overview"]["capital_state"]
-    if not enabled or context["skipped"] or metric["value"] is None:
+    if not enabled or metric["value"] is None:
         return {}, {}, None
     value = metric["value"]
     for position in positions:
@@ -1159,8 +1493,19 @@ def build_analytics(
         else float(Decimal(overview["day_change_pct"]["value"]) * 100),
     )
     health_enabled = get_settings().advisor_health_enabled
+    health_report = _health_report(report, context)
+    if health_report is not report:
+        # Keep raw Health tooltips on the same included book as the projected grade,
+        # while retaining the full-book availability of all other overview figures.
+        overview_health = health_report["sections"]["overview"]
+        report = dict(report, sections={
+            **report["sections"],
+            "overview": {**report["sections"]["overview"],
+                         "health": overview_health["health"],
+                         "capital_state": overview_health["capital_state"]},
+        })
     capital_money, capital_pct, capital_total = _capital_projection(
-        report, context, positions, health_enabled
+        health_report, context, positions, health_enabled
     )
     # Legacy KPI fields allow null in this new coordinated contract; full value must
     # never become the known subtotal merely to satisfy a required string.
@@ -1171,7 +1516,7 @@ def build_analytics(
         coverage=coverage,
         sources={s["id"]: s["dataset"] for s in data["sources"]},
         kpi=kpi,
-        health=_health_projection(report, context, health_enabled),
+        health=_health_projection(health_report, context, health_enabled),
         factors=factors,
         risk=risk,
         risk_coverage=risk_coverage,
@@ -1196,7 +1541,9 @@ def build_analytics(
         ),
         growth_of_100k=None,
         positions=positions,
-        insights=[],
+        insights=_insights(
+            positions, context["cashflow"], risk, allocation("sector"), data["fundamentals"]
+        ),
         unresolved=context["unresolved"],
         integration=candidate,
         advisor=report,

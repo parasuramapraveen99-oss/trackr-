@@ -34,6 +34,7 @@ from app.db.fund_reference import sync_route_observations
 from app.db.prices import held_isins, upsert_prices
 from app.db.quote_mapping import upsert_listings
 from app.db.symbols import SymbolChange, refresh_symbols
+from app.db.traded_value import upsert as upsert_traded_values
 from app.db.universe import current_universe_isins
 from app.prices.pipe import PipeResult
 
@@ -83,6 +84,8 @@ def store_day(conn: Any, result: PipeResult) -> StoreResult:
         {isin: lst for isin, lst in result.listings.items() if isin in wanted},
         result.price_date,
     )
+    # Liquidity is measured for holdings only, so turnover is kept for held ISINs.
+    upsert_traded_values(conn, [r for r in result.traded_values if r[0] in held])
 
     return StoreResult(
         prices_stored=stored,

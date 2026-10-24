@@ -399,11 +399,16 @@ class Discrepancy:
     """
 
     isin: str
-    computed_qty: Decimal
-    declared_qty: Decimal
-    difference: Decimal
+    computed_qty: Decimal | None
+    declared_qty: Decimal | None
+    difference: Decimal | None
     ratio: Decimal | None = None
     likely_cause: str | None = None
+    status: str = "MISMATCH"
+    error: str | None = None
+    error_date: date | None = None
+    deficit: Decimal | None = None
+    reason_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

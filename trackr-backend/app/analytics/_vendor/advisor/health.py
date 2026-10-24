@@ -1,23 +1,30 @@
 """Portfolio-only health rubric v1 and capital-state description.
 
 Trackr-authored, 21 October 2026, from the supplied ``PORTFOLIO_HEALTH.md``
-(portfolio-health-v1). The supplied 0.4.0 package imports this module but did not
+(portfolio-health-v1). Version 2 (owner decisions, 23 October 2026): ROCE replaces ROE
+for non-financial companies, NBFCs are scored on ROE and net margin, and a part is scored
+when at least 80% of portfolio value has its inputs (``MIN_COVERAGE``); the uncovered
+holdings are named in the part's evidence. docs/PORTFOLIO_HEALTH.md. The supplied 0.4.0 package imports this module but did not
 include it. Every weight, anchor, band, sample gate and freshness rule below is
 copied from that specification; nothing is tuned here. Acceptance is the package's
 own hand reference (43773/754, displayed 58, grade C) and its health tests.
 
 Rules carried from the specification:
-  * No missing component is replaced with 50 or renormalised away. A missing
-    component withholds the overall score and grade and exposes a bounded interval.
+  * No missing component is replaced with 50. A component below MIN_COVERAGE withholds
+    the overall score and grade and exposes a bounded interval.
   * Every calculated overall score is provisional: the rubric is uncalibrated.
   * Display score rounds HALF_UP to an integer and the grade uses that same integer.
   * No input is inferred: profiles, sectors, histories and fundamentals are supplied.
 """
+from datetime import date
 from decimal import Decimal as D, ROUND_HALF_UP
 from .core import Metric, ZERO, ONE, precision, decimal
 from .stats import correlation, interval_returns, mean
 
-RULE_VERSION = 'portfolio-health-v1'
+RULE_VERSION = 'portfolio-health-v2'
+
+#: Share of portfolio value a part needs inputs for before it is scored.
+MIN_COVERAGE = D('0.80')
 SCORE_UNIT = 'score_0_100'
 HUNDRED = D(100)
 
@@ -50,6 +57,7 @@ ANCHORS = {
     'drawdown': (('.05', 100), ('.10', 85), ('.20', 60), ('.35', 25), ('.50', 0)),
     'var95': (('.005', 100), ('.010', 85), ('.020', 60), ('.035', 25), ('.050', 0)),
     'roe': (('-.10', 0), (0, 20), ('.08', 50), ('.15', 80), ('.25', 100)),
+    'roce': (('-.10', 0), (0, 20), ('.10', 50), ('.18', 80), ('.30', 100)),
     'net_margin': (('-.10', 0), (0, 20), ('.05', 50), ('.12', 80), ('.25', 100)),
     'debt_to_equity': ((0, 100), ('.5', 90), (1, 70), (2, 35), (3, 0)),
     'interest_cover': ((0, 0), (1, 20), (2, 50), (4, 80), (8, 100)),
@@ -60,8 +68,9 @@ ANCHORS = {k: tuple((D(str(x)), D(str(s))) for x, s in v) for k, v in ANCHORS.it
 
 #: Business-quality fields per supported profile. Other financials are unsupported in v1.
 PROFILE_FIELDS = {
-    'non_financial': ('roe', 'net_margin', 'debt_to_equity', 'interest_cover'),
+    'non_financial': ('roce', 'net_margin', 'debt_to_equity', 'interest_cover'),
     'bank': ('roe', 'capital_adequacy_ratio', 'gross_npa_ratio'),
+    'nbfc': ('roe', 'net_margin'),
 }
 WINDOW_INTERVALS = 252
 TREND_SESSIONS = 50
@@ -122,13 +131,16 @@ def concentration(weights, sector_allocation):
         return _missing('UNKNOWN_VALUE_DENOMINATOR', method=method)
     if sector_allocation.value is None:
         return _missing('MISSING_SECTOR_ALLOCATION', method=method, extra=sector_allocation.reasons)
-    buckets = sector_allocation.value
-    if 'UNKNOWN' in buckets:
-        # An unknown bucket may hide several sectors; the effective count is not knowable.
-        return _missing('MISSING_SECTOR_CLASSIFICATION', {'unknown_weight': buckets['UNKNOWN']['weight']},
+    buckets = dict(sector_allocation.value)
+    unknown = buckets.pop('UNKNOWN', {'weight': ZERO})['weight']
+    if ONE - unknown < MIN_COVERAGE or not buckets:
+        # Too much value unclassified: the effective sector count is not knowable.
+        return _missing('MISSING_SECTOR_CLASSIFICATION', {'unknown_weight': unknown},
                         method=method, refs=sector_allocation.source_refs)
+    known = ONE - unknown
     hhi = sum((w * w for w in weights.values()), ZERO)
-    sector_hhi = sum((b['weight'] * b['weight'] for b in buckets.values()), ZERO)
+    # Sector concentration over the classified value only.
+    sector_hhi = sum(((b['weight'] / known) ** 2 for b in buckets.values()), ZERO)
     if hhi <= ZERO or sector_hhi <= ZERO:
         return _missing('UNDEFINED_DENOMINATOR', method=method)
     effective = ONE / hhi
@@ -141,7 +153,8 @@ def concentration(weights, sector_allocation):
              + subscores['effective_sectors']) / D(3)
     evidence = {'effective_holdings': effective, 'largest_holding_weight': largest,
                 'largest_holding_isin': max(sorted(weights), key=lambda i: weights[i]),
-                'effective_sectors': sectors, 'sector_count': len(buckets), 'subscores': subscores}
+                'effective_sectors': sectors, 'sector_count': len(buckets),
+                'sector_coverage': known, 'subscores': subscores}
     return _component(score, evidence, method=method, refs=sector_allocation.source_refs,
                       reasons=sector_allocation.reasons, period=sector_allocation.period)
 
@@ -164,11 +177,16 @@ def diversification(weights, histories, sessions, period):
                     'structural': 'SINGLE_HOLDING_CORRELATION_UNDEFINED'}
         return _component(ZERO, evidence, method=method, period=period,
                           reasons=['SINGLE_HOLDING_STRUCTURAL_SCORE'])
+    complete = [i for i in ids if histories.get(i)
+                and all(d in histories[i]['levels'] for d in dates)]
+    coverage = sum((active[i] for i in complete), ZERO) / sum(active.values(), ZERO)
+    if coverage < MIN_COVERAGE or len(complete) < 2:
+        missing = sorted(set(ids) - set(complete))
+        return _missing('INCOMPLETE_ASSET_HISTORY:' + ','.join(missing), method=method, period=period)
+    ids = complete
     returns, bases, refs, reasons = {}, set(), [], []
     for isin in ids:
-        history = histories.get(isin)
-        if not history or any(d not in history['levels'] for d in dates):
-            return _missing('INCOMPLETE_ASSET_HISTORY:' + isin, method=method, period=period)
+        history = histories[isin]
         bases.add(history['basis'])
         refs += history['source_refs']
         reasons += history.get('reasons', [])
@@ -190,7 +208,8 @@ def diversification(weights, histories, sessions, period):
             pairs.append({'isin_a': a, 'isin_b': b, 'correlation': rho.value})
     average = numerator / denominator
     evidence = {'weighted_pair_correlation': average, 'pair_count': len(pairs),
-                'observations': WINDOW_INTERVALS, 'basis': bases.pop(), 'pairs': pairs}
+                'observations': WINDOW_INTERVALS, 'basis': bases.pop(), 'pairs': pairs,
+                'coverage': coverage}
     return _component(scaled(average, 'correlation'), evidence, method=method, refs=refs,
                       reasons=reasons, period=period,
                       coverage={'eligible_count': WINDOW_INTERVALS, 'total_count': WINDOW_INTERVALS})
@@ -203,8 +222,10 @@ def observed_risk(window):
     if window.value is None:
         return _missing('MISSING_COMPLETE_252_INTERVAL_WINDOW', method=method,
                         period=window.period, extra=window.reasons)
-    if 'UPSTREAM_EXCLUDED_HOLDINGS' in window.reasons:
-        return _missing('INCOMPLETE_UPSTREAM_SCOPE', method=method, period=window.period)
+    # v2: a complete window only links intervals with identical exclusions, so an
+    # excluded holding is excluded for the whole year; the score is the reconciled book's
+    # risk, caveated and named upstream, rather than withheld.
+    excluded_scope = 'UPSTREAM_EXCLUDED_HOLDINGS' in window.reasons
     if window.coverage.get('eligible_count') != WINDOW_INTERVALS:
         return _missing('INCOMPLETE_252_INTERVAL_WINDOW', method=method, period=window.period)
     metrics = window.value['risk']
@@ -222,8 +243,9 @@ def observed_risk(window):
     score = (subscores['volatility'] + subscores['drawdown'] + subscores['var95']) / D(3)
     evidence = {**inputs, 'observations': WINDOW_INTERVALS, 'subscores': subscores,
                 'basis': window.value.get('basis')}
+    reasons = list(window.reasons) + (['EXCLUDES_UNRECONCILED_SEGMENTS'] if excluded_scope else [])
     return _component(score, evidence, method=method, refs=window.source_refs,
-                      reasons=window.reasons, period=window.period, coverage=window.coverage)
+                      reasons=reasons, period=window.period, coverage=window.coverage)
 
 
 @precision
@@ -259,15 +281,17 @@ def business_quality(weights, fundamentals, profiles, *, errors=(), refs=(), rea
             subscores[field] = ZERO if field == 'debt_to_equity' and value < ZERO else scaled(value, field)
         per_holding[isin] = {'profile': profile, 'subscores': subscores,
                              'score': sum(subscores.values(), ZERO) / D(len(subscores))}
-    if missing:
-        return _missing('INCOMPLETE_QUALITY_COVERAGE', {'input_errors': missing, 'holdings': per_holding},
+    covered = sum((active[i] for i in per_holding), ZERO)
+    fraction = covered / sum(active.values(), ZERO)
+    if fraction < MIN_COVERAGE:
+        return _missing('INCOMPLETE_QUALITY_COVERAGE',
+                        {'input_errors': missing, 'holdings': per_holding, 'coverage': fraction},
                         method=method, refs=refs)
-    total = sum(active.values(), ZERO)
-    score = sum((active[i] * per_holding[i]['score'] for i in sorted(active)), ZERO) / total
-    return _component(score, {'holdings': per_holding, 'input_errors': []}, method=method,
-                      refs=refs, reasons=reasons,
+    score = sum((active[i] * per_holding[i]['score'] for i in sorted(per_holding)), ZERO) / covered
+    return _component(score, {'holdings': per_holding, 'input_errors': missing, 'coverage': fraction},
+                      method=method, refs=refs, reasons=reasons,
                       coverage={'eligible_count': len(per_holding), 'total_count': len(active),
-                                'weight_fraction': ONE})
+                                'weight_fraction': fraction})
 
 
 @precision
@@ -279,13 +303,14 @@ def valuation(value_factor):
         return _missing('VALUE_FACTOR_UNAVAILABLE', method=method, refs=portfolio.source_refs,
                         extra=portfolio.reasons)
     fraction = portfolio.coverage.get('weight_fraction')
-    if fraction is None or fraction != ONE:
+    if fraction is None or fraction < MIN_COVERAGE:
         return _missing('PARTIAL_VALUATION_COVERAGE', {'weight_fraction': fraction}, method=method,
                         refs=portfolio.source_refs)
     if not value_factor.get('universe') or value_factor.get('eligible_count', 0) < 30:
         return _missing('INSUFFICIENT_ELIGIBLE_PEERS', method=method, refs=portfolio.source_refs)
     evidence = {'universe': value_factor['universe'], 'eligible_count': value_factor['eligible_count'],
-                'total_count': value_factor.get('total_count'), 'weight_fraction': fraction}
+                'total_count': value_factor.get('total_count'), 'weight_fraction': fraction,
+                'coverage': fraction}
     score = max(ZERO, min(HUNDRED, portfolio.value))
     return _component(score, evidence, method=method, refs=portfolio.source_refs,
                       reasons=portfolio.reasons, period=portfolio.period, coverage=portfolio.coverage)
@@ -350,8 +375,11 @@ def capital_states(rows, histories, sessions, as_of):
     Descriptive only; never a forecast, signal or health input. Unknowns stay visible.
     """
     method = 'capital_state_50_session_v1'
-    trend = sessions[-TREND_SESSIONS:]
-    trend_ok = len(trend) == TREND_SESSIONS and trend[-1] == as_of
+    # v2: the trend ends at the latest closed session within a week of as_of, so the
+    # buckets do not go blank between midnight and the evening bhavcopy.
+    trend = [s for s in sessions if s <= as_of][-TREND_SESSIONS:]
+    trend_ok = (len(trend) == TREND_SESSIONS and
+                (date.fromisoformat(as_of) - date.fromisoformat(trend[-1])).days <= 7)
     per_isin, buckets, refs = {}, {}, set()
     total, complete = ZERO, True
     for row in sorted(rows, key=lambda r: r['isin']):
@@ -403,6 +431,8 @@ def capital_states(rows, histories, sessions, as_of):
              'trend_window': {'start': trend[0], 'end': trend[-1]} if trend_ok else None}
     out = Metric(value, unit='buckets', method=method, source_refs=sorted(refs), period={'as_of': as_of})
     out.caveat('DESCRIPTIVE_NOT_A_SIGNAL')
+    if trend_ok and trend[-1] != as_of:
+        out.caveat('PREVIOUS_SESSION_CLOSE')
     if not complete:
         out.caveat('UNKNOWN_VALUE_COVERAGE')
     if ordered['UNKNOWN']:

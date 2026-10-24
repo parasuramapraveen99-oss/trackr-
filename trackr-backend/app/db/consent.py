@@ -27,6 +27,10 @@ from app.db import audit
 BASIS_CONSENT = "CONSENT"
 
 PURPOSE_PORTFOLIO_TRACKING = "PORTFOLIO_TRACKING"
+#: Sending this investor's portfolio (holdings, dated ledger, computed analytics) to the
+#: LLM provider to word the Analytics Basic view. Separate purpose: DPDP consent is per
+#: purpose. PAN, secrets and the portfolio's name never leave (docs/ANALYTICS_BASIC_NARRATIVE.md).
+PURPOSE_ANALYTICS_INSIGHTS = "ANALYTICS_INSIGHTS"
 
 #: The wording currently in force -- the exact sentence from ``docs/COMPLIANCE.md``
 #: §3, "The consent language that carries the legal weight." Bump this whenever that

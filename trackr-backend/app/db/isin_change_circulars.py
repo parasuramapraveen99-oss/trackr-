@@ -191,7 +191,13 @@ def _upsert_circular(
                 old_isin=EXCLUDED.old_isin, alias_created=EXCLUDED.alias_created,
                 skip_reason=EXCLUDED.skip_reason, pdf_sha256=EXCLUDED.pdf_sha256,
                 attempts=isin_change_circular.attempts+1,
-                next_retry_at=EXCLUDED.next_retry_at
+                -- 2h, 4h, 8h ... capped at a week. A fixed hour retried every circular
+                -- that will never resolve (an unparseable PDF, a symbol nobody holds)
+                -- forever: one NSE download and one shared-table write per circular per
+                -- hour, which also invalidated every investor's cached analytics report.
+                next_retry_at=now() + least(
+                    interval '1 hour' * power(2, least(isin_change_circular.attempts, 8)),
+                    interval '7 days')
             WHERE NOT isin_change_circular.alias_created
             """,
             (
@@ -272,8 +278,22 @@ def refresh_isin_change_feed(
             "AND (next_retry_at IS NULL OR next_retry_at <= now()) ORDER BY fetched_at"
         )
         retry_listings = [CircularListing(*row) for row in cur.fetchall()]
+        cur.execute("SELECT circular_number FROM isin_change_circular")
+        stored = {row[0] for row in cur.fetchall()}
     by_number = {row.circular_number: row for row in retry_listings + listings}
-    eligible = [r for r in by_number.values() if r.circular_number not in already_seen]
+    # Circulars never seen before come first and are the only ones that make a run
+    # "remaining". A stored circular that did not resolve is retried when due, in whatever
+    # room is left; counting it as remaining kept the month's NSE task -- and every
+    # investor depending on it -- "processing" for as long as any circular stayed unresolved.
+    fresh = [
+        r for r in by_number.values()
+        if r.circular_number not in already_seen and r.circular_number not in stored
+    ]
+    retries = [
+        r for r in by_number.values()
+        if r.circular_number not in already_seen and r.circular_number in stored
+    ]
+    eligible = fresh + retries
     new_listings = eligible[:max_documents]
 
     aliases_created = 0
@@ -364,6 +384,6 @@ def refresh_isin_change_feed(
         "breaker_open": False,
         "error": None,
     }
-    if len(eligible) > len(new_listings):
-        result["remaining"] = len(eligible) - len(new_listings)
+    if len(fresh) > max_documents:
+        result["remaining"] = len(fresh) - max_documents
     return result

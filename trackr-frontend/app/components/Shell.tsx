@@ -47,7 +47,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const { token, ready, sessionError, retrySession } = useAuth();
   const isPublic =
-    PUBLIC_PATHS.includes(pathname) && !(SHELLED_WHEN_SIGNED_IN.includes(pathname) && (!ready || token));
+    pathname === "/blog" || pathname.startsWith("/blog/") ||
+    (PUBLIC_PATHS.includes(pathname) && !(SHELLED_WHEN_SIGNED_IN.includes(pathname) && (!ready || token)));
   const isLanding = pathname === LANDING_PATH;
 
   useEffect(() => {

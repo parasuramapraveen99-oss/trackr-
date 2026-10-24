@@ -227,7 +227,7 @@ def _analyse(data):
             timestamp(f['retrieved_at'])
             if date.fromisoformat(f['fiscal_end'])>date.fromisoformat(data['as_of']):
                 raise ValueError('FUTURE_FISCAL_PERIOD')
-            if f['field'] not in ('pe','pb','roe','net_margin','debt_to_equity','interest_cover','dividend_yield','sales_growth_1y','profit_growth_1y','capital_adequacy_ratio','gross_npa_ratio'):
+            if f['field'] not in ('pe','pb','roe','roce','net_margin','debt_to_equity','interest_cover','dividend_yield','sales_growth_1y','profit_growth_1y','capital_adequacy_ratio','gross_npa_ratio'):
                 raise ValueError('UNKNOWN_FUNDAMENTAL')
             expected='ratio' if f['field'] in ('pe','pb','debt_to_equity','interest_cover') else 'fraction'
             if f['unit']!=expected:
@@ -242,8 +242,12 @@ def _analyse(data):
             allowed_fundamental_bases=('point_in_time',) if f['field'] in ('capital_adequacy_ratio','gross_npa_ratio') else ('TTM','annual')
             if f['basis'] not in allowed_fundamental_bases or f['consolidation'] not in ('consolidated','standalone'):
                 raise ValueError('INVALID_FUNDAMENTAL_BASIS')
-            if f['field'] in basis_by_field and basis_by_field[f['field']]!=basis:
+            previous=basis_by_field.get(f['field'])
+            if previous and previous[0]!=basis[0]:
                 raise ValueError('FUNDAMENTAL_BASIS_MISMATCH')
+            if previous and previous[1]!=basis[1]:
+                basis=(basis[0],'mixed')
+                fund_errors.append('MIXED_STANDALONE_CONSOLIDATED_INPUTS')
             basis_by_field[f['field']]=basis
             value=decimal(f['value']) if f.get('value') is not None and f.get('applicability')=='applicable' else None
             all_fund.setdefault(f['isin'],{})[f['field']]=value
@@ -504,8 +508,23 @@ def _analyse(data):
             component_ranks.append(ranks(component))
         if len(eligible)>=2:
             raw[key]={i:sum((rank[i] for rank in component_ranks),ZERO)/D(len(fields)) for i in eligible}
+    # v2: a holding outside the universe gets its value percentile against the same peers
+    # (each field ranked with the peers plus that one holding), so the portfolio's value
+    # score covers it instead of dropping it.
+    outside=[i for i in weights if i not in members and raw['value']
+             and all((all_fund.get(i,{}).get(f) or ZERO)>0 for f in ('pe','pb'))]
+    peers={f:{i:ONE/all_fund[i][f] for i in raw['value']} for f in ('pe','pb')}
+    for i in outside:
+        raw['value'][i]=sum((ranks({**peers[f],i:ONE/all_fund[i][f]})[i] for f in ('pe','pb')),ZERO)/D(2)
     for key in raw:
         factors[key]=factor(raw[key],weights,members,uid,pre_scored=key in ('value','quality'))
+        if key=='value' and outside and factors[key]['eligible_count']>=30:
+            metric=aggregate([(w,raw[key].get(i)) for i,w in weights.items()])
+            metric.unit='score_0_100'
+            metric.method='mean_component_percentiles_v1'
+            metric.caveat('HOLDINGS_OUTSIDE_UNIVERSE_RANKED_AGAINST_PEERS')
+            factors[key]['portfolio']=metric
+            factors[key]['holdings']={i:raw[key][i] for i in weights if i in raw[key]}
         if universe_error:
             factors[key]['portfolio']=Metric.unavailable(universe_error)
         if not weights:
@@ -525,7 +544,7 @@ def _analyse(data):
                 raise ValueError('CONFLICTING_HEALTH_PROFILE')
             if profile['as_of']!=data['as_of']:
                 raise ValueError('HEALTH_PROFILE_DATE_MISMATCH')
-            if profile['profile'] not in ('non_financial','bank'):
+            if profile['profile'] not in ('non_financial','bank','nbfc'):
                 raise ValueError('UNSUPPORTED_HEALTH_PROFILE')
             profiles[profile['isin']]=profile['profile']
             profile_refs+=profile['source_refs']
@@ -535,7 +554,8 @@ def _analyse(data):
     quality_freshness_errors=[]
     for observation in data.get('fundamentals',[]):
         profile=profiles.get(observation.get('isin'))
-        used_fields=('roe','net_margin','debt_to_equity','interest_cover') if profile=='non_financial' else ('roe','capital_adequacy_ratio','gross_npa_ratio') if profile=='bank' else ()
+        from .health import PROFILE_FIELDS
+        used_fields=PROFILE_FIELDS.get(profile,())
         if observation.get('field') in used_fields:
             try:
                 months=6 if observation['field'] in ('capital_adequacy_ratio','gross_npa_ratio') else 18
@@ -547,7 +567,12 @@ def _analyse(data):
     health_window=None
     if len(health_sessions)==253 and calendar and calendar['start']<=health_sessions[0] and calendar['end']>=data['as_of']:
         selected_health_returns=[r for r in portfolio if health_sessions[0]<=r['start'] and r['end']<=health_sessions[-1]]
-        health_window=windows(selected_health_returns,health_sessions,data['as_of'],calendar=calendar)['All']
+        # v2: risk may cover the reconciled book only if the exclusions never change.
+        scopes={tuple(sorted(r.get('excluded_isins') or [])) for r in selected_health_returns}
+        if len(scopes)>1:
+            health_window=Metric.unavailable('CHANGING_UPSTREAM_SCOPE',unit='window')
+        else:
+            health_window=windows(selected_health_returns,health_sessions,data['as_of'],calendar=calendar)['All']
     if health_window is None:
         health_window=Metric.unavailable('MISSING_COMPLETE_252_INTERVAL_WINDOW',unit='window')
     health_period=health_window.period if health_window.value else None

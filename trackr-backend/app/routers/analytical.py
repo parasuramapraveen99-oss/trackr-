@@ -839,6 +839,7 @@ def contribution(
     as_of: date | None = None,
     advised_only: bool = False,
     connection: Any = Depends(get_conn),
+    benchmark: Literal["NIFTY50_TRI", "NIFTY500_TRI"] | None = None,
 ) -> dict[str, Any]:
     """Per-ISIN rupee attribution of the portfolio's gain over
     ``(period_start, as_of]`` -- docs/ENGINE_SPEC.md section 10, the first
@@ -882,7 +883,7 @@ def contribution(
         transactions, start_isins, start_prices, period_start, skipped
     )
     end_isins = [h.isin for h in compute_holdings(transactions, resolved_as_of)]
-    end_prices = latest_prices(connection, end_isins, resolved_as_of)
+    end_prices = resolve_current_prices(connection, end_isins, resolved_as_of).prices
     transactions, end_isins, skipped = exclusions.drop_unpriced(
         transactions, end_isins, end_prices, resolved_as_of, skipped
     )
@@ -893,10 +894,22 @@ def contribution(
     meta = securities.lookup(connection, [c.isin for c in results])
     total_gain = sum((c.gain for c in results), ZERO)
 
+    performance = None
+    if benchmark:
+        from app.routers.analytics_performance import build_performance
+
+        performance = build_performance(
+            connection, investor_id, transactions, end_prices, resolved_as_of,
+            benchmark, advised_only, {s.isin for s in skipped},
+            requested_windows=[("custom", period_start)],
+        )["windows"].get("custom")
+
     return {
         "as_of": resolved_as_of,
         "period_start": period_start,
         "total_gain": money(total_gain),
+        "benchmark": benchmark,
+        "performance": performance,
         "contributions": sorted(
             (
                 {
@@ -1163,6 +1176,10 @@ def _run_snapshots(connection: Any, start: date, end: date, notifier: Notifier) 
                 batch.saved(investor_id, advised_only, on)
                 written += 1
         snapshots.upsert_snapshots(connection, points)
+        # The days just filled may also be queued for the worker (a replay deleted them, or
+        # a hole was seen). Close those this batch's reads already covered, so the worker
+        # does not value the same days again.
+        snapshots.settle_rebuild_tasks(connection, points, batch.read_snapshot)
     return {
         "snapshots_written": written,
         "price_dates_fetched": fetched,
@@ -1332,7 +1349,14 @@ def _catch_up_index_levels(connection: Any, target: date) -> None:
     """Pull the published NIFTY TRI levels up to ``target``. Without this the benchmark
     line only ever gets as far as whatever a page request last happened to fetch, so it
     stops at the last request, not at the last trading day. A source failure is logged
-    and skipped: the snapshots do not depend on it."""
+    and skipped: the snapshots do not depend on it.
+
+    Only when a level is actually missing (newest stored < ``target``), and at most once
+    per INDEX_RETRY_INTERVAL while it stays missing (recorded in ``feed_poll_state``): this
+    runs on every catch-up cycle, the browser repeats cycles every few seconds while an
+    import is processing, and a weekend or holiday ``target`` has no level to find. Weekend
+    special sessions are still discovered, one attempt per interval. The five-day overlap
+    still re-reads recent levels for corrections each time a new day is fetched."""
     for index in TRI_INDICES.values():
         try:
             with connection.cursor() as cur:
@@ -1341,13 +1365,37 @@ def _catch_up_index_levels(connection: Any, target: date) -> None:
                     (index.storage_name,),
                 )
                 newest = cur.fetchone()[0]
+            if newest is not None and newest >= target:
+                continue
+            feed = f"index_level_catch_up:{index.storage_name}"
+            with connection.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO feed_poll_state (feed, last_attempt_at) VALUES (%s, now())
+                       ON CONFLICT (feed) DO UPDATE SET last_attempt_at = now()
+                       WHERE feed_poll_state.last_attempt_at IS NULL
+                          OR feed_poll_state.last_attempt_at < now() - %s::interval
+                       RETURNING feed""",
+                    (feed, INDEX_RETRY_INTERVAL),
+                )
+                due = cur.fetchone() is not None
+            connection.commit()
+            if not due:
+                continue
             start = (newest - timedelta(days=5)) if newest else NSE_BHAVCOPY_EARLIEST
-            if start <= target:
-                fetch_and_store(connection, start, target, index=index)
+            fetch_and_store(connection, start, target, index=index)
+            with connection.cursor() as cur:
+                cur.execute(
+                    "UPDATE feed_poll_state SET last_success_at = now(), consecutive_failures = 0 "
+                    "WHERE feed = %s",
+                    (feed,),
+                )
         except (IndexSourceFetchFailed, IndexSourceFormatError):
             logger.warning("index refresh skipped for %s", index.storage_name, exc_info=True)
     connection.commit()
 
+
+#: While an index level stays missing, the catch-up asks the source at most this often.
+INDEX_RETRY_INTERVAL = "30 minutes"
 
 #: Interior holes queued per catch-up run; the rest wait for the next run.
 HOLE_REPAIR_BATCH = 500
@@ -1393,7 +1441,8 @@ def enqueue_interior_holes(connection: Any, limit: int = HOLE_REPAIR_BATCH) -> i
         for investor_id, on, advised in holes:
             cur.execute(
                 """INSERT INTO reference_sync_task (kind, task_key, payload)
-                   VALUES ('SNAPSHOT', %s, %s::jsonb)
+                   VALUES ('SNAPSHOT', %s, %s::jsonb
+                           || jsonb_build_object('queued_xid', pg_current_xact_id()::text))
                    ON CONFLICT (kind, task_key) DO UPDATE SET
                        payload = EXCLUDED.payload, state = 'pending', available_at = now()
                    WHERE reference_sync_task.state = 'done'

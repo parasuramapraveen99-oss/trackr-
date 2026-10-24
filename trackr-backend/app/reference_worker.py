@@ -395,8 +395,12 @@ def process(conn, kind: str, key: str, payload: dict, settings: Settings) -> dic
         changed = payload.get("snapshot_fingerprint") != fingerprint
         if changed:
             previous = payload.get("snapshot_inputs")
-            dirty_from = None
-            if previous is not None and payload.get("snapshot_scope") == scope:
+            if previous is None or payload.get("snapshot_scope") == scope:
+                # Only days on or after the earliest added, changed or removed row can see
+                # the change. With no baseline (a new account, or a task recorded before
+                # baselines were kept) every row counts as added, so the days before this
+                # account's first row stay valid -- not the investor's whole history.
+                previous = previous or {}
                 affected = [
                     value[0]
                     for key in previous.keys() | inputs.keys()
@@ -405,8 +409,12 @@ def process(conn, kind: str, key: str, payload: dict, settings: Settings) -> dic
                     if value
                 ]
                 if affected:
-                    dirty_from = date.fromisoformat(min(affected))
-            _invalidate_snapshots(conn, payload["account_id"], dirty_from)
+                    _invalidate_snapshots(
+                        conn, payload["account_id"], date.fromisoformat(min(affected))
+                    )
+            else:
+                # The account moved investor or advised scope: everything it touched moves.
+                _invalidate_snapshots(conn, payload["account_id"], None)
         payload["snapshot_fingerprint"] = fingerprint
         payload["snapshot_inputs"] = inputs
         payload["snapshot_scope"] = scope
@@ -593,9 +601,13 @@ def _invalidate_snapshots(conn, account_id, dirty_from=None):
             for on, advised in dates
         ]
         if tasks:
+            # queued_xid: this transaction. A writer whose inputs were read after it
+            # committed may close the task instead of the worker re-valuing the day
+            # (app.db.snapshots.settle_rebuild_tasks).
             cur.execute(
                 """INSERT INTO reference_sync_task(kind,task_key,payload)
-                   SELECT 'SNAPSHOT',item->>'key',item->'payload'
+                   SELECT 'SNAPSHOT',item->>'key',
+                     item->'payload'||jsonb_build_object('queued_xid',pg_current_xact_id()::text)
                    FROM jsonb_array_elements(%s::jsonb) item
                    ON CONFLICT(kind,task_key) DO UPDATE SET payload=EXCLUDED.payload,
                      state='pending',available_at=now()""",

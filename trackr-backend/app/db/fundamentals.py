@@ -29,6 +29,7 @@ _RATIO_COLUMNS = (
     "sales_growth_1y",
     "profit_growth_1y",
     "market_cap",
+    "roce",
 )
 
 #: Full column order for both the INSERT and the SELECT.
@@ -57,6 +58,7 @@ class Fundamentals:
     sales_growth_1y: Decimal | None = None
     profit_growth_1y: Decimal | None = None
     market_cap: Decimal | None = None
+    roce: Decimal | None = None
     #: 'vendor' when the feed supplied ROE directly, 'derived_statements' when we computed
     #: it from net income and shareholders' equity. Two different claims, so two labels.
     roe_basis: str | None = None
@@ -100,7 +102,7 @@ def latest(conn: Any, isins: list[str], as_of: date | None = None) -> dict[str, 
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT DISTINCT ON (isin) {', '.join(columns)}
+            SELECT DISTINCT ON (isin) {", ".join(columns)}
             FROM security_fundamentals
             WHERE isin = ANY(%s) AND as_of <= %s
             ORDER BY isin, as_of DESC
@@ -108,8 +110,7 @@ def latest(conn: Any, isins: list[str], as_of: date | None = None) -> dict[str, 
             (list(isins), cutoff),
         )
         return {
-            row[0]: Fundamentals(**dict(zip(columns, row, strict=True)))
-            for row in cur.fetchall()
+            row[0]: Fundamentals(**dict(zip(columns, row, strict=True))) for row in cur.fetchall()
         }
 
 

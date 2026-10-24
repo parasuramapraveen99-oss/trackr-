@@ -86,7 +86,7 @@ export function explain(reason: string, data: AnalyticsResponse): string {
 export const explainAll = (reasons: string[] | undefined, data: AnalyticsResponse) =>
   [...new Set((reasons ?? []).filter((r) => !r.startsWith("MISSING_COMPONENT:")).map((r) => explain(r, data)))].join(" · ");
 
-function rawComponents(data: AnalyticsResponse): AdvisorHealthComponentRaw[] {
+export function rawComponents(data: AnalyticsResponse): AdvisorHealthComponentRaw[] {
   const health = data.advisor?.sections.overview.health as unknown as { components?: AdvisorHealthComponentRaw[] } | undefined;
   return health?.components ?? [];
 }

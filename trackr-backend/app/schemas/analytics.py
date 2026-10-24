@@ -71,6 +71,12 @@ class HealthComponentOut(BaseModel):
     reasons: list[str] = []
 
 
+class HealthExclusionOut(BaseModel):
+    isin: str
+    name: str | None = None
+    reason: str
+
+
 class HealthOut(BaseModel):
     score: int | None
     grade: str | None
@@ -91,6 +97,8 @@ class HealthOut(BaseModel):
     profile_status: dict[str, str] = {}
     #: Covariance, recovery and sensitivity diagnostics, projected to plain numbers.
     evidence: dict[str, Any] = {}
+    #: Holdings the score could not include (unpriced or unreconciled), with the reason.
+    excluded: list[HealthExclusionOut] = []
 
 
 class FactorOut(BaseModel):
@@ -393,6 +401,10 @@ class PerformanceWindowOut(BaseModel):
     benchmark_missing_dates: list[date]
     basis: str
     annualised: bool
+    #: The window's own money-weighted return (XIRR de-annualised, ACT/365). The headline
+    #: for windows under a year, where ``annualised`` is false.
+    period_return: str | None = None
+    benchmark_period_return: str | None = None
 
 
 class CashFlowPerformanceOut(BaseModel):
@@ -485,6 +497,13 @@ class AnalyticsResponse(BaseModel):
     unresolved: list[UnresolvedOut] = []
     integration: AdvisorIntegrationOut | None = None
     advisor: MilestoneReportOut | None = None
+    #: Basic-view findings (app.analytics.basic_slots): rule_version, facts, and per tab
+    #: the fired candidates and the findings that could not be measured.
+    basic: dict[str, Any] = {}
+    #: Figures the revamped page adds (app.analytics.revamp): header cards, betas, 1Y
+    #: correlation, concentration impact, index shock, liquidity, fundamentals cards and
+    #: the Valuation Map against the Nifty 500 median, holding-return reasons, coverage.
+    revamp: dict[str, Any] = {}
 
 
 class FundamentalsRefreshResponse(BaseModel):

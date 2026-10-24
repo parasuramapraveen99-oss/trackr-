@@ -1,7 +1,7 @@
 """Recorded investor returns and a cash-flow-matched index, using cached inputs only."""
 
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Any
 
 from app import securities
@@ -32,6 +32,7 @@ def build_performance(
     benchmark: str,
     advised_only: bool,
     excluded_isins: set[str],
+    requested_windows: list[tuple[str, date]] | None = None,
 ) -> dict:
     """The same ledger and price scope as headline money, independently for each period.
 
@@ -52,7 +53,12 @@ def build_performance(
     full_value = total_market_value(current_holdings, prices)
     earliest = min(t.txn_date for t in kept)
     out = {}
-    for label, start in [("all", earliest), *[(f"{n}y", years_before(on, n)) for n in (1, 3, 5)]]:
+    windows = requested_windows if requested_windows is not None else [
+        ("all", earliest),
+        ("6m", months_before(on, 6)),
+        *[(f"{n}y", years_before(on, n)) for n in (1, 3, 5)],
+    ]
+    for label, start in windows:
         if start < earliest:
             continue
         local = kept
@@ -130,7 +136,15 @@ def build_performance(
             ],
             "benchmark_missing_dates": missing_dates,
             "basis": "recorded_cash_flow_xirr",
-            "annualised": True,
+            # Under a year the headline is the period's own money-weighted return, not an
+            # annualised rate (review comment 20). Both are kept: xirr stays the engine's
+            # annualised solution, period_return de-annualises it on the same ACT/365 day
+            # count the XIRR was solved with, so the two are exact inverses.
+            "annualised": (on - start).days >= 365,
+            "period_return": _period_return(actual, start, on),
+            "benchmark_period_return": _period_return(
+                comparison.xirr if comparison else None, start, on
+            ),
         }
     return {
         "windows": out,
@@ -144,6 +158,25 @@ def build_performance(
         "basis": ("Recorded security cash flows including charges; "
                   "excludes idle cash and unrecorded dividends."),
     }
+
+
+def months_before(on: date, months: int) -> date:
+    """Same day ``months`` calendar months earlier, clamped at month end (31 Mar -> 30 Sep)."""
+    from calendar import monthrange
+
+    total = on.year * 12 + (on.month - 1) - months
+    year, month = divmod(total, 12)
+    return date(year, month + 1, min(on.day, monthrange(year, month + 1)[1]))
+
+
+def _period_return(rate: Decimal | None, start: date, end: date) -> str | None:
+    """(1 + annualised XIRR) ^ (days / 365) - 1, in Decimal. None when undefined."""
+    if rate is None or rate <= -1 or end <= start:
+        return None
+    with localcontext() as ctx:
+        ctx.prec = 34
+        value = (Decimal(1) + Decimal(rate)) ** (Decimal((end - start).days) / Decimal(365)) - 1
+    return str(value)
 
 
 def _rate(value: Decimal | None) -> str | None:

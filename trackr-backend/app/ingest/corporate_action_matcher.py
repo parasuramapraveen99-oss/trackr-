@@ -65,6 +65,8 @@ def stage_corporate_actions(
         # A DEMERGER's discrepancy is on the RESULTING isin, filed under the parent
         # action's own isin -- so candidates come from actions on this isin directly,
         # plus any action elsewhere whose resulting_isin is this isin.
+        if d.isin not in declared_holdings and d.status != "UNCOMPUTABLE":
+            continue  # saved observations do not establish absent securities as zero
         candidates = list(by_isin.get(d.isin, [])) + [
             a
             for isin, group in by_isin.items()
@@ -75,6 +77,8 @@ def stage_corporate_actions(
 
         matched = None
         for a in candidates:
+            if as_of is not None and a.ex_date > as_of:
+                continue
             # Each candidate carries its OWN ex_date -- recomputed per action, not
             # once for the whole discrepancy, since two candidates for the same ISIN
             # (e.g. a bonus and a later demerger) are not held-as-of the same day.
@@ -91,7 +95,7 @@ def stage_corporate_actions(
                     {
                         "isin": d.isin,
                         "ratio": str(d.ratio) if d.ratio is not None else None,
-                        "difference": str(d.difference),
+                        "difference": str(d.difference) if d.difference is not None else None,
                     },
                 )
             )

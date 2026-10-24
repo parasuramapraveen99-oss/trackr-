@@ -892,6 +892,9 @@ def _refresh_fundamentals(connection: Any, limit: int) -> dict[str, Any]:
     exchanges = {i: exchanges.get(i) or observed.get(i) for i in candidates}
     names = {i: m.get("name") for i, m in meta.items()}
     result = refresh_stale(connection, candidates, symbols, exchanges, limit=limit, names=names)
+    # Commit before the optional refreshes below: their failure handlers roll back, and
+    # must not take the fundamentals just stored with them.
+    connection.commit()
     from app.db.index_valuation import upsert as store_valuation
     from app.db.risk_free import upsert as store_rate
     from app.prices.index_sources import TRI_INDICES

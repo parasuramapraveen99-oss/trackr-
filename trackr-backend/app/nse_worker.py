@@ -70,9 +70,11 @@ def reopen(conn: Any) -> None:
 
 
 def daily_feeds(conn: Any, settings: Settings, days: int) -> dict[str, Any]:
+    from app.db import exchange_financials
     from app.db.dividend_reconcile import reconcile_pending_dividends
     from app.db.prices import held_isins
     from app.db.sectors import refresh_sectors
+    from app.db.universe import current_universe_isins
     from app.routers import corporate_actions, demerger_watch, dividends_ops, security_alias
 
     end = date.today()
@@ -88,6 +90,13 @@ def daily_feeds(conn: Any, settings: Settings, days: int) -> dict[str, Any]:
         # Same job as the fundamentals cron's sector step. Its BSE fallback is an
         # api.bseindia.com call a blocked deployment may not reach either.
         "sectors": lambda: refresh_sectors(conn, held_isins(conn)),
+        # Year-end results (XBRL) for the health rubric: held stocks and ranking peers.
+        "exchange_financials": lambda: exchange_financials.refresh(
+            conn,
+            exchange_financials.stale_symbols(
+                conn, sorted({*held_isins(conn), *current_universe_isins(conn)})
+            ),
+        ),
     }
     out: dict[str, Any] = {}
     for name, step in steps.items():
@@ -102,9 +111,7 @@ def daily_feeds(conn: Any, settings: Settings, days: int) -> dict[str, Any]:
     return out
 
 
-def drain(
-    connect: Callable[[], Any], settings: Settings, max_minutes: float
-) -> dict[str, int]:
+def drain(connect: Callable[[], Any], settings: Settings, max_minutes: float) -> dict[str, int]:
     """Run the reference queue, one fresh connection per batch. A long NSE task (one
     month: up to 10 circular PDFs plus two notice feeds) can outlive a hosted database's
     connection -- measured 12 Oct 2026, Neon closed one mid-run -- so a lost connection
@@ -124,9 +131,7 @@ def drain(
                 # Every batch, not once per run: a deployment still calling NSE (its
                 # NSE_API_ENABLED not yet false) re-trips the breaker within minutes.
                 reopen(conn)
-                result = run_once(
-                    conn, settings, limit=500, time_budget_seconds=min(240.0, left)
-                )
+                result = run_once(conn, settings, limit=500, time_budget_seconds=min(240.0, left))
         except psycopg.OperationalError as exc:
             reconnects += 1
             print(f"  connection lost ({str(exc).splitlines()[0]}); reconnecting", flush=True)

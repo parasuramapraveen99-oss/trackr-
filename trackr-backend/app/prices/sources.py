@@ -168,6 +168,8 @@ class _LegacyLayout:
     #: look almost identical to their equity siblings.
     instrument_column: str
     equity_values: frozenset[str]
+    #: Rupee turnover column, carried through as UDiFF's TtlTrfVal for liquidity.
+    traded_value: str = ""
 
 
 #: NSE's ``cmDDMMMYYYYbhav`` -- SERIES EQ (normal) and BE (trade-to-trade), both equity.
@@ -178,6 +180,7 @@ NSE_LEGACY_LAYOUT = _LegacyLayout(
     symbol="SYMBOL",
     instrument_column="SERIES",
     equity_values=frozenset({"EQ", "BE"}),
+    traded_value="TOTTRDVAL",
 )
 
 #: BSE's ``EQ_ISINCODE_DDMMYY`` -- SC_TYPE 'Q' is equity; the same file also carries 'P'
@@ -193,6 +196,7 @@ BSE_LEGACY_LAYOUT = _LegacyLayout(
     symbol="SC_NAME",
     instrument_column="SC_TYPE",
     equity_values=frozenset({"Q"}),
+    traded_value="NET_TURNOV",
 )
 
 _LEGACY_MONTH_ABBREVIATIONS = (
@@ -241,7 +245,7 @@ def _to_udiff_csv(legacy_text: str, layout: _LegacyLayout = NSE_LEGACY_LAYOUT) -
     out = io.StringIO()
     writer = csv.DictWriter(
         out,
-        fieldnames=["ISIN", "TckrSymb", "SctySrs", "ClsPric", "TradDt", "FinInstrmTp"],
+        fieldnames=["ISIN", "TckrSymb", "SctySrs", "ClsPric", "TradDt", "FinInstrmTp", "TtlTrfVal"],
     )
     writer.writeheader()
     for raw in reader:
@@ -259,6 +263,9 @@ def _to_udiff_csv(legacy_text: str, layout: _LegacyLayout = NSE_LEGACY_LAYOUT) -
                 "ClsPric": (raw.get(layout.close) or "").strip(),
                 "TradDt": trad_dt.isoformat(),
                 "FinInstrmTp": "EQ",
+                "TtlTrfVal": (
+                    (raw.get(layout.traded_value) or "").strip() if layout.traded_value else ""
+                ),
             }
         )
     return out.getvalue().encode("utf-8")

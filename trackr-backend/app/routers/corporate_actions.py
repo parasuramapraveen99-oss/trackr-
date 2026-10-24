@@ -244,9 +244,15 @@ def match_corporate_actions(
             status.HTTP_404_NOT_FOUND,
             f"no such account for this investor: {body.account_id}",
         )
-    declared = {h.isin: h.quantity for h in body.holdings} or db_holdings.latest_snapshot(
-        conn, body.account_id
-    )
+    as_of = body.as_of
+    declared = {h.isin: h.quantity for h in body.holdings}
+    if not declared:
+        on = db_holdings.snapshot_date(conn, body.account_id, as_of)
+        declared = db_holdings.snapshot_at(conn, body.account_id, on) if on else {}
+        as_of = on
+    else:
+        if len(declared) != len(body.holdings):
+            raise HTTPException(422, "Duplicate ISINs are ambiguous")
     if not declared:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -259,7 +265,7 @@ def match_corporate_actions(
         account_id=body.account_id,
         declared_holdings=declared,
         actor_uid=current_user["id"],
-        as_of=body.as_of,
+        as_of=as_of,
     )
 
 

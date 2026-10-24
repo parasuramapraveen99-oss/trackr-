@@ -1,23 +1,35 @@
-# Mailgun setup for ingest.meicapital.in
+# Mailgun setup for mail.meicapital.in
 
-Updated 17 October 2026. Trackr already has a signed inbound-email endpoint, durable
+Updated 21 October 2026. Trackr already has a signed inbound-email endpoint, durable
 PostgreSQL queue, document processing worker, Gmail confirmation-code handling, and
-per-investor forwarding settings. Mailgun still needs account/domain/DNS configuration.
-The saved production environment currently has forwarding disabled and no signing key.
+per-investor forwarding settings. The existing Mailgun domain is `mail.meicapital.in`;
+its US-region MX, SPF, DKIM, and tracking records are published. Use this domain instead
+of the old `ingest.meicapital.in` test addresses, whose domain has no receiving DNS.
+Production forwarding is enabled and a signing key is configured. The receiving route
+must match `mail.meicapital.in` and forward to the endpoint below.
 Frontend: `https://trackrplus.vercel.app`. Backend: `https://trackr-ebon.vercel.app`.
+
+Production was redeployed on 21 October 2026 with `INGEST_DOMAIN=mail.meicapital.in`.
+A signed, attachment-free MIME test to
+`tp-hzk2d4-zerodha-contractnote@mail.meicapital.in` returned 200 and queued delivery
+`b339729a-cf35-405f-91d3-ecbd769d3f04`. The old `@ingest.meicapital.in` address
+returned 406. This verifies backend receipt only: the Mailgun route was not inspected
+because no Mailgun API credential was available, and outbound SMTP connections from
+the test machine to both Mailgun MX servers timed out. Real email delivery and document
+processing still require verification.
 
 The connection is:
 
 ```text
-Broker → your Gmail attachment filter → mail-<inbox-token>@ingest.meicapital.in
+Broker → your Gmail attachment filter → mail-<inbox-token>@mail.meicapital.in
        → Mailgun MX → Mailgun receiving route → production backend /ingest/email/mime
        → encrypted Neon queue → worker → import results in Trackr
 ```
 
 ## 1. Add the receiving domain
 
-In Mailgun, add the custom domain `ingest.meicapital.in`. Choose a region and use that
-region consistently for the domain, receiving routes, and MX records. Confirm that your
+In Mailgun, select the existing custom domain `mail.meicapital.in`. Use its region
+consistently for the domain, receiving routes, and MX records. Confirm that your
 Mailgun account/plan enables receiving routes. Use the custom domain, not a sandbox.
 
 At the DNS provider for `meicapital.in`, add the two MX records Mailgun shows for this
@@ -25,8 +37,8 @@ subdomain. For a US-region Mailgun domain the usual records are:
 
 | Type | Name | Priority | Target |
 | --- | --- | --- | --- |
-| MX | `ingest` | 10 | `mxa.mailgun.org` |
-| MX | `ingest` | 10 | `mxb.mailgun.org` |
+| MX | `mail` | 10 | `mxa.mailgun.org` |
+| MX | `mail` | 10 | `mxb.mailgun.org` |
 
 EU-region domains use `mxa.eu.mailgun.org` and `mxb.eu.mailgun.org`. The Mailgun dashboard
 is the authority for the exact records. Leave the apex domain's existing MX records in
@@ -53,7 +65,7 @@ In the backend project's production environment variables set:
 ```dotenv
 SELF_BASE_URL=https://trackr-ebon.vercel.app
 EMAIL_FORWARDING_ENABLED=true
-INGEST_DOMAIN=ingest.meicapital.in
+INGEST_DOMAIN=mail.meicapital.in
 INGEST_WEBHOOK_PROVIDER=mailgun
 INGEST_MAILGUN_SIGNING_KEY=<your HTTP webhook signing key>
 EMAIL_AUTO_PROMOTE_ENABLED=true
@@ -78,7 +90,7 @@ In Mailgun Receiving → Routes, create a route in the same region as your domai
 ```text
 Priority: 0
 Description: Trackr portfolio imports
-Expression: match_recipient("^.*@ingest[.]meicapital[.]in$")
+Expression: match_recipient("^.*@mail[.]meicapital[.]in$")
 Action 1: forward("https://trackr-ebon.vercel.app/ingest/email/mime")
 Action 2: stop()
 ```
@@ -131,7 +143,7 @@ key, not a Mailgun key. Do not configure this cron inside a browser or frontend 
 1. Sign in and select the correct portfolio. Set its PAN and each broker's exact client
    code/UCC, accept statement-processing consent, and save necessary file passwords.
 2. Open Trackr's Gmail forwarding setup. Copy the backend-generated address
-   `mail-<32-character-token>@ingest.meicapital.in`; do not invent an inbox token.
+   `mail-<32-character-token>@mail.meicapital.in`; do not invent an inbox token.
 3. In Gmail Settings → See all settings → Forwarding and POP/IMAP, add that address.
    Gmail sends a confirmation message. Retrieve its code from Trackr's setup panel and
    verify the address in Gmail.

@@ -13,10 +13,13 @@
     "@trackr/core": "*",
     "@trackr/portfolio": "*",
     "@trackr/ui": "*",
+    "gray-matter": "^4.0.3",
     "next": "^14.2.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "recharts": "^3.10.1"
+    "react-markdown": "^10.1.0",
+    "recharts": "^3.10.1",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

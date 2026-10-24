@@ -36,6 +36,8 @@ class SnapshotBatch:
         self._existing = {}
         self._inputs = {}
         self._references = None
+        # pg_current_snapshot() taken before the first input read; see prefetch.
+        self.read_snapshot = None
         self.ledger_loads = self.state_replays = 0
 
     @property
@@ -83,6 +85,12 @@ class SnapshotBatch:
         missing = set(scopes) - self._inputs.keys()
         if not missing:
             return
+        if self.read_snapshot is None:
+            # Every input below (and every later prefetch until clear()) is read after
+            # this point, so a transaction visible here is visible to all of them
+            # (app.db.snapshots.settle_rebuild_tasks).
+            row = self.conn.execute("SELECT pg_current_snapshot()::text").fetchone()
+            self.read_snapshot = row[0]
         if self._references is None:
             self._references = (
                 list_aliases(self.conn, Verification.VERIFIED),

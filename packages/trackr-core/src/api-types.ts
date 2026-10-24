@@ -234,6 +234,9 @@ export interface ContributionResponse {
   total_gain: string;
   // Sorted by gain, descending -- best contributor first, worst last.
   contributions: ContributionOut[];
+  excluded?: { isin: string; symbol: string | null; message: string }[];
+  benchmark?: string | null;
+  performance?: CashFlowWindow | null;
 }
 
 export interface PriceRefreshResponse {
@@ -638,6 +641,7 @@ export interface DeclaredHoldingIn {
 }
 
 export interface ReconcileRequest {
+  account_id?: string | null;
   as_of?: string | null;
   source?: string | null;
   holdings: DeclaredHoldingIn[];
@@ -645,11 +649,16 @@ export interface ReconcileRequest {
 
 export interface DiscrepancyOut {
   isin: string;
-  computed_qty: string;
-  declared_qty: string;
-  difference: string;
+  computed_qty: string | null;
+  declared_qty: string | null;
+  difference: string | null;
   ratio: string | null;
   likely_cause: string | null;
+  status: string;
+  error: string | null;
+  error_date: string | null;
+  deficit: string | null;
+  reason_code: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,6 +1187,8 @@ export interface AnalyticsHealth {
   /** ISIN -> "bank" | "non_financial" | the named reason no rubric applies. */
   profile_status?: Record<string, string>;
   evidence?: Partial<AdvisorHealthEvidence>;
+  /** Holdings the score could not include (unpriced or unreconciled), with the reason. */
+  excluded?: { isin: string; name: string | null; reason: string }[];
 }
 
 export interface FactorScore {
@@ -1413,6 +1424,32 @@ export interface NarrativeResponse {
   compared_with: string | null;
 }
 
+/** One Analytics Basic-view line (app/narrative/basic.py). Tone is set by code
+ * (app/analytics/basic_slots.py), never by the model. */
+export type BasicTone = "needs_attention" | "watch" | "positive" | "neutral" | "insufficient_data";
+
+export interface BasicLine {
+  slot: string;
+  tone: BasicTone;
+  lead: NarrativeToken[];
+  body: NarrativeToken[];
+  cites: string[];
+}
+
+export type BasicTab = "overview" | "risk" | "diversification" | "fundamentals" | "performance" | "insights";
+
+/** GET /investors/{id}/narrative/basic and POST .../generate. */
+export interface BasicNarrativeResponse {
+  as_of: string;
+  tab: BasicTab;
+  template_version: string;
+  /** `consent_required`: no live ANALYTICS_INSIGHTS consent, so nothing was read or sent. */
+  state: "ready" | "disabled" | "consent_required" | "not_generated";
+  lines?: BasicLine[];
+  /** Verifier rules that refused lines on this render (V1-V13). */
+  rejected?: string[];
+}
+
 export interface ValuationLensDerived {
   excluded?: Record<string, string>;
   method_version?: string | null;
@@ -1465,6 +1502,10 @@ export interface CashFlowWindow {
   benchmark_missing_dates: string[];
   basis: string;
   annualised: boolean;
+  /** The window's own money-weighted return (XIRR de-annualised, ACT/365); the headline
+   * when `annualised` is false (the 6M window). */
+  period_return?: string | null;
+  benchmark_period_return?: string | null;
 }
 
 export interface AnalyticsExposure {
@@ -1596,6 +1637,120 @@ export interface AnalyticsResponse {
   positions: AnalyticsPosition[];
   insights: AnalyticsInsight[];
   unresolved: UnresolvedHolding[];
+  /** app/analytics/basic_slots.py: per tab, fired findings and those not measured. */
+  basic?: BasicFindings;
+  /** app/analytics/revamp.py: figures the revamped page adds. */
+  revamp?: RevampBlock;
+}
+
+export interface BasicRule { label: string; threshold: string; method: string; period: string }
+
+export interface BasicCandidate {
+  slot: string;
+  tone: BasicTone;
+  direction: string | null;
+  magnitude_word: string | null;
+  /** Role -> fact id; the value is in `BasicFindings.facts`. */
+  facts: Record<string, string>;
+  must_cite: string[];
+  subjects: string[];
+  implication: string;
+  coverage_fact: string | null;
+  rule: BasicRule | null;
+}
+
+export interface BasicInsufficient {
+  slot: string;
+  rule?: BasicRule | null;
+  tone: "insufficient_data";
+  reason: string;
+  facts: Record<string, string>;
+  detail: string[];
+}
+
+export interface BasicFindings {
+  rule_version: string;
+  facts: Record<string, string | number | boolean | null>;
+  tabs: Partial<Record<BasicTab, { candidates: BasicCandidate[]; insufficient: BasicInsufficient[] }>>;
+}
+
+export interface RevampDrawdown { max_drawdown: number | null; peak?: string | null; trough?: string | null; recovered?: string | null; reason?: string }
+
+export interface RevampImpactOption {
+  requested: number;
+  count: number;
+  holdings: { isin: string; symbol: string; market_value: string; weight_pct: number }[];
+  combined_value: string;
+  combined_weight_pct: number | null;
+  falls: Record<"10" | "20" | "30", { loss: string; portfolio_decline_pct: number | null }>;
+}
+
+export interface RevampCorrelationCell { value: number | null; observations: number; start?: string; end?: string; reason?: string }
+
+export interface RevampLensRow {
+  isin: string; symbol: string | null; weight: number | null; weight_flag: boolean;
+  status: string | null; reason: string | null; [metric: string]: unknown;
+}
+
+export interface RevampLens {
+  x: string; y: string; x_higher_is_better: boolean; y_higher_is_better: boolean;
+  statuses: [string, string, string]; counts: Record<string, number>; rows: RevampLensRow[];
+  reference: Record<string, number | null>; reference_label: string;
+}
+
+export interface RevampCard {
+  value: number | null; method: string; coverage_pct: number;
+  loss_making: { symbol: string | null; weight: number | null }[];
+  loss_making_weight_pct: number;
+  missing: { symbol: string | null; weight: number | null }[];
+}
+
+export interface RevampBlock {
+  version: string;
+  header: {
+    invested: string | null; worth: string | null; unrealised: string | null; unrealised_pct: number | null;
+    realised: string | null; dividends_received: string | null; overall_gain: string | null; overall_gain_missing: string[];
+    xirr_all: string | null; xirr_all_start: string | null; xirr_all_coverage_pct?: number | null;
+    day_change: string | null; day_change_pct: number | null; previous_value: string | null;
+    bench_day: { value_pct: number | null; date?: string; previous_date?: string; reason?: string } | null;
+    day_check: { status: "matches" | "mismatch" | "not_checked"; reason?: string; snapshot_move?: string; gap?: string } | null;
+    health: { score: number | null; grade: string | null; bounds: { lower: number; upper: number } | null };
+  };
+  risk: {
+    betas: Record<string, { beta: number | null; observations: number; reason?: string; start?: string; end?: string }>;
+    risk_shares: { shares: Record<string, number>; excluded: string[]; covered_weight_pct?: number; annual_volatility?: number; reason?: string };
+    portfolio_beta: number | null;
+    benchmark_drawdown: RevampDrawdown;
+    window_sessions: number;
+    concentration_impact: { total_value: string; options: Record<"3" | "5", RevampImpactOption> };
+    index_shock: {
+      rows: { isin: string; symbol: string; market_value: string; beta: number | null; reason: string | null; moves?: Record<string, string> }[];
+      summed: Record<string, string>; summed_pct: Record<string, number | null>; covered_weight_pct: number;
+      portfolio_beta: number | null; portfolio_beta_moves_pct: Record<string, number> | null;
+      worst_real_fall: RevampDrawdown & { window: string | null; period?: { start?: string; end?: string } };
+    };
+    liquidity: {
+      rows: { isin: string; symbol: string; market_value: string; weight_pct: number | null; status: "measured" | "not_measured" | "not_exchange_traded";
+        median_traded_value?: string; days_to_exit?: string; tier?: "easy" | "watch" | "slow"; sessions?: number; sessions_needed?: number;
+        first_session?: string; last_session?: string }[];
+      slow_weight_pct: number | null; measured_weight_pct: number; participation: string; sessions: number;
+      thresholds_days: { watch: string; slow: string };
+    };
+  };
+  diversification: {
+    correlation: { isins: string[]; symbols: string[]; cells: (RevampCorrelationCell | null)[][]; weighted_average: number | null;
+      covered_weight_pct: number; holdings_total: number; method: string; min_paired_returns: number };
+    sector: { named: { label: string; pct: number; value?: string }[]; others: { label: string; pct: number }[]; others_pct: number; unclassified_pct: number; others_rule_pct: number };
+    amfi_list_period: string;
+    return_reasons: Record<string, Record<string, string | null>>;
+  };
+  fundamentals: {
+    dataset: string; as_of: string[];
+    cards: { pe: RevampCard; pb: RevampCard; dividend_yield: RevampCard; benchmark: Record<string, number | null>; benchmark_as_of: string | null; benchmark_source: string | null };
+    map: { lenses: Record<"valuation" | "growth" | "profitability" | "quality", RevampLens>; universe_size: number | null; weight_flag_pct: number };
+    positions: Record<string, unknown>[];
+  };
+  coverage: { priced_count: number | null; total_count: number | null; priced_pct: number | null; basis: string | null; not_valued: string[]; as_of: string };
 }
 
 /** GET /investors/{id}/forwarding-code -- app/schemas/investors.py ForwardingCodeOut.
@@ -1920,4 +2075,61 @@ export interface CapitalGainsOut {
   unresolved: CapitalGainsUnresolvedOut[];
   excluded: { isin: string; message: string }[];
   notes: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Mutual fund statement preview -- POST /investors/{id}/funds/statement-preview
+// (trackr-backend/app/routers/funds.py, app/ingest/mf_cas_pdf.py). Figures are exact
+// decimal text, like the rest of the wire. Nothing in this response is saved.
+// ---------------------------------------------------------------------------
+
+export type MfIssue = "NO_ISIN" | "UNITS_DO_NOT_ADD_UP" | "HISTORY_GAP" | "NEEDS_EVIDENCE" | "NO_VALUATION"
+  | "VALUE_MISMATCH" | "AMOUNT_MISMATCH" | "MISSING_BALANCE" | "DATE_OUTSIDE_PERIOD";
+
+export interface MfTransactionOut {
+  date: string;
+  kind: string;
+  description: string;
+  units: string | null;
+  nav: string | null;
+  amount: string | null;
+  balance: string | null;
+}
+
+export interface MfSchemeOut {
+  /** Masked to the last four characters, like /funds/statements. */
+  folio_label: string;
+  amc: string;
+  scheme: string;
+  isin: string | null;
+  registrar: string;
+  opening_units: string;
+  closing_units: string;
+  calculated_units: string;
+  nav: string | null;
+  nav_date: string | null;
+  value: string | null;
+  checks_passed: boolean;
+  issues: MfIssue[];
+  evidence_rows: number;
+  transactions: MfTransactionOut[];
+}
+
+export interface MfStatementPreviewOut {
+  saved: false;
+  issuer: string;
+  period_from: string;
+  period_to: string;
+  investor_name: string;
+  folio_count: number;
+  scheme_count: number;
+  transaction_count: number;
+  schemes_needing_attention: number;
+  /** False when the reader skipped or doubted part of the statement (see `warnings`). */
+  complete: boolean;
+  /** Funds with no NAV/value printed; left out of `total_value`, never counted as 0. */
+  unvalued_count: number;
+  total_value: string;
+  warnings: string[];
+  schemes: MfSchemeOut[];
 }

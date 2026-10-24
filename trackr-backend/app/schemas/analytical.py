@@ -7,6 +7,8 @@ from datetime import date
 
 from pydantic import BaseModel, Field
 
+from app.schemas.analytics import PerformanceWindowOut
+
 
 class BenchmarkOut(BaseModel):
     name: str
@@ -93,6 +95,8 @@ class ContributionResponse(BaseModel):
     total_gain: str
     contributions: list[ContributionOut]
     excluded: list[ExcludedOut] = Field(default_factory=list)
+    benchmark: str | None = None
+    performance: PerformanceWindowOut | None = None
 
 
 class SymbolChangeOut(BaseModel):
