@@ -161,7 +161,8 @@ def _live(
     from app.routers.analytics_advisor import cached_analytics
 
     payload = cached_analytics(
-        connection, investor_id, on, NIFTY_TRI_INDEX_NAME, advised_only, DEFAULT_UNIVERSE
+        connection, investor_id, on, NIFTY_TRI_INDEX_NAME, advised_only, DEFAULT_UNIVERSE,
+        detail="screen",
     )
     if not payload.get("basic"):
         raise HTTPException(

@@ -13,7 +13,7 @@ export function LedgerFiguresCard() {
   const { investorId, token, asOf, advisedOnly } = useAuth();
   const analytics = useFetch<AnalyticsResponse>(
     investorId ? `/investors/${investorId}/analytics` : null,
-    { as_of: asOf, advised_only: advisedOnly || undefined, calculation_method: "advisor_v2" },
+    { as_of: asOf, advised_only: advisedOnly || undefined, calculation_method: "advisor_v2", detail: "screen" },
     token,
   );
   if (analytics.error) return <Card title="Ledger figures"><p style={{ color: "var(--negative)", fontSize: "var(--text-sm)" }}>Ledger figures unavailable: {analytics.error}</p></Card>;

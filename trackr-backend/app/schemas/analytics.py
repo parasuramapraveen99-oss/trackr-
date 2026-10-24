@@ -469,6 +469,8 @@ class MilestoneReportOut(BaseModel):
 
 
 class AnalyticsResponse(BaseModel):
+    # Screen transport shares exact metric observation dates by coverage.intervals_ref.
+    interval_sets: dict[str, list[list[str]]] = {}
     as_of: date
     generated_at: datetime
     benchmark: str

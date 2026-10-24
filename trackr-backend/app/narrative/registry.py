@@ -96,6 +96,10 @@ SPECS: dict[str, Spec] = {
     "pct": Spec(PERCENT, 1),
     "score": Spec(PERCENT, 0),
     "points": Spec(PERCENT, 1),
+    # Advisor health evidence: the scorecard publishes these on a 0–100 scale.
+    "largest_holding_score": Spec(PERCENT, 0),
+    "effective_sectors_score": Spec(PERCENT, 0),
+    "effective_holdings_score": Spec(PERCENT, 0),
     "coverage_pct": Spec(PERCENT, 1),
     "excluded_weight_pct": Spec(PERCENT, 1),
     "plottable_pct": Spec(PERCENT, 1),
@@ -154,6 +158,9 @@ SPECS: dict[str, Spec] = {
     "bench_dividend_yield": Spec(FRACTION, 2),
     "bench_max_drawdown_magnitude": Spec(FRACTION, 1),
     "coverage": Spec(FRACTION, 1),
+    "sector_coverage": Spec(FRACTION, 1),
+    "largest_holding_weight": Spec(FRACTION, 1),
+    "weight_fraction": Spec(FRACTION, 1),
 
     # --- ratios ----------------------------------------------------------------------
     "sharpe": Spec(RATIO, 2),
@@ -179,12 +186,15 @@ SPECS: dict[str, Spec] = {
     "information_ratio": Spec(RATIO, 2),
     "unknown_weight": Spec(RATIO, 2),
     "weighted_average": Spec(RATIO, 2),
+    "effective_sectors": Spec(RATIO, 2),
     "bench_pe": Spec(RATIO, 2),
     "bench_pb": Spec(RATIO, 2),
 
     # --- counts ----------------------------------------------------------------------
     "position_count": Spec(COUNT, 0),
     "pair_count": Spec(COUNT, 0),
+    "sector_count": Spec(COUNT, 0),
+    "eligible_count": Spec(COUNT, 0),
     "priced_count": Spec(COUNT, 0),
     "total_count": Spec(COUNT, 0),
     "observations": Spec(COUNT, 0),

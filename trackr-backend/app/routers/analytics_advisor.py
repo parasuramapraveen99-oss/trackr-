@@ -10,7 +10,7 @@ import hashlib
 import json
 import logging
 from bisect import bisect_right
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 from typing import Any
@@ -34,7 +34,7 @@ from app.engine.dividends import compute_dividends
 from app.engine.holdings import MAX_PRICE_STALENESS_DAYS, compute_holdings_partitioned
 from app.engine.realised import compute_realised
 from app.engine.returns import compute_net_invested
-from app.engine.snapshot import compute_snapshot
+from app.engine.snapshot import prepare_snapshot, value_prepared_snapshot
 from app.engine.twrr import _period_flow
 from app.engine.types import Snapshot, Transaction
 from app.engine.xirr import years_before
@@ -117,10 +117,19 @@ def company_snapshots(connection, transactions, existing, start, on):
         for i, points in values.items()
     }
     date_index = {i: [d for d, _ in points] for i, points in by_isin.items()}
+    event_days = sorted({t.txn_date for t in transactions})
+    generation = -1
+    prepared = None
     snapshots = []
     for old in existing:
         day = old.as_of
-        held, skipped = compute_holdings_partitioned(transactions, day)
+        current_generation = bisect_right(event_days, day)
+        # Between ledger events only the prices change. Reuse the engine's prepared
+        # replay in this request; never persist a second holdings ledger.
+        if prepared is None or generation != current_generation:
+            prepared = prepare_snapshot(transactions, day)
+            generation = current_generation
+        held = prepared.holdings
         prices = {}
         for holding in held:
             points = by_isin.get(holding.isin, [])
@@ -131,12 +140,10 @@ def company_snapshots(connection, transactions, existing, start, on):
                 and points[index][1] > 0
             ):
                 prices[holding.isin] = points[index][1]
-        excluded = {s.isin for s in skipped} | {
+        excluded = set(prepared.excluded_isins) | {
             h.isin for h in held if h.quantity > 0 and h.isin not in prices
         }
-        kept = [t for t in transactions if t.isin not in excluded]
-        calculated = compute_snapshot(kept, prices, day)
-        snapshots.append(replace(calculated, excluded_isins=tuple(sorted(excluded))))
+        snapshots.append(value_prepared_snapshot(prepared, prices, day, excluded))
     return snapshots
 
 
@@ -255,6 +262,7 @@ def materialize(
         else dict(sessions=[], members=[], member_since=None, risk_free={}, benchmark={})
     )
     sessions = refs["sessions"]
+    session_set = set(sessions)
     all_isins = sorted(allowed | set(refs["members"])) if allowed else []
     history = adjusted_price_series(connection, all_isins, start, on)
     reference_meta = securities.lookup(connection, refs["members"]) if allowed else {}
@@ -402,7 +410,9 @@ def materialize(
                 isin=i,
                 basis="split_adjusted_price",
                 adjustment_version="verified-corporate-actions-and-aliases-v1",
-                levels=[dict(date=d.isoformat(), value=str(v)) for d, v in points if d in sessions],
+                levels=[
+                    dict(date=d.isoformat(), value=str(v)) for d, v in points if d in session_set
+                ],
                 source_refs=["prices"],
                 quality="available",
             )
@@ -814,7 +824,8 @@ def _correlations(report: dict, positions: list[dict], data: dict) -> dict:
 
 
 def cached_analytics(
-    connection: Any, investor_id: str, on: date, benchmark: str, advised_only: bool, universe: str
+    connection: Any, investor_id: str, on: date, benchmark: str, advised_only: bool, universe: str,
+    *, detail: str = "full",
 ) -> dict:
     """Serve a stored response only on an exact input fingerprint match; else compute.
 
@@ -824,31 +835,36 @@ def cached_analytics(
     """
     from time import perf_counter
 
+    from app.analytics.transport import compact_report, expand_report
     from app.db import analytics_cache
     from app.schemas.analytics import AnalyticsResponse
 
     key = analytics_cache.CacheKey(investor_id, on, advised_only, benchmark, universe)
     version = analytics_cache.data_version(connection, investor_id)
-    hit = analytics_cache.get(connection, key, version)
+    hit = (analytics_cache.get(connection, key, version, compact=True) if detail == "screen"
+           else analytics_cache.get(connection, key, version))
     if hit is not None and _derived_current(hit):
         return hit
     if hit is not None:
+        hit = expand_report(hit)
         # Same inputs, but cached before (or under an older) revamp/Basic rule set. The
         # rest of the payload is still exact; only the derived blocks are recomputed.
         hit["revamp"] = revamp_block(connection, investor_id, on, advised_only, hit)
         hit["basic"] = basic_block(connection, investor_id, on, advised_only, hit)
         _put(connection, key, version, hit, 0, investor_id, on)
-        return hit
+        return compact_report(hit) if detail == "screen" else hit
     started = perf_counter()
     report = build_analytics(connection, investor_id, on, benchmark, advised_only, universe)
-    payload = AnalyticsResponse.model_validate(report).model_dump(mode="json")
+    payload = AnalyticsResponse.model_validate(report).model_dump(
+        mode="json", exclude={"interval_sets"}
+    )
     # Evaluated on the exact wire payload, so a Basic finding can only cite a figure the
     # page itself shows (docs/ANALYTICS_BASIC_NARRATIVE.md).
     payload["revamp"] = revamp_block(connection, investor_id, on, advised_only, payload)
     payload["basic"] = basic_block(connection, investor_id, on, advised_only, payload)
     elapsed = round((perf_counter() - started) * 1000)
     _put(connection, key, version, payload, elapsed, investor_id, on)
-    return payload
+    return compact_report(payload) if detail == "screen" else payload
 
 
 def basic_slots_version() -> str:
@@ -1028,15 +1044,16 @@ def basic_block(
     """
     from app.analytics import basic_slots
     from app.engine.errors import MissingPriceError
-    from app.routers.analytical import contribution
+    from app.routers.analytical import build_contribution
 
     try:
-        rows = contribution(
+        rows = build_contribution(
+            connection,
             investor_id,
             period_start=on - timedelta(days=365),
             as_of=on,
             advised_only=advised_only,
-            connection=connection,
+            cached_prices_only=True,
         )
         contrib = {
             "period_start": str(rows["period_start"]),

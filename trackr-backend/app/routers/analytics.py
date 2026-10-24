@@ -90,6 +90,7 @@ def analytics(
     universe: str = DEFAULT_UNIVERSE,
     connection: Any = Depends(get_conn),
     calculation_method: Literal["current", "advisor_v1", "advisor_v2"] = "current",
+    detail: Literal["full", "screen"] = "full",
 ) -> dict[str, Any]:
     """Everything the analytics screen renders, from one replay of the ledger."""
     on = as_of or date.today()
@@ -99,7 +100,9 @@ def analytics(
         # Indian-market sessions: "today" is the IST date, the same date the warm job and
         # the current-classification rules use, so a default request can hit the cache.
         on = as_of or datetime.now(IST).date()
-        return cached_analytics(connection, investor_id, on, benchmark, advised_only, universe)
+        return cached_analytics(
+            connection, investor_id, on, benchmark, advised_only, universe, detail=detail
+        )
     transactions = load_transactions(connection, investor_id, advised_only=advised_only, date_to=on)
 
     # Partitioned, not raw: a segment that does not reconcile is carried out as a named

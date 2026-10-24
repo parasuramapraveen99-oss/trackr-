@@ -28,7 +28,7 @@ export function useAnalyticsDataQuestions() {
   const reviews = useIdentityReviews();
   const analytics = useFetch<AnalyticsResponse>(
     investorId ? `/investors/${investorId}/analytics` : null,
-    { as_of: asOf, advised_only: advisedOnly || undefined, calculation_method: "advisor_v2" },
+    { as_of: asOf, advised_only: advisedOnly || undefined, calculation_method: "advisor_v2", detail: "screen" },
     token,
   );
   const items = reviews.data?.items ?? [];

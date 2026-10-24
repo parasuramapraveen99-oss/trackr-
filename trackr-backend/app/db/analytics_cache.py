@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from app.analytics._vendor.advisor.service import METHOD_VERSION
+from app.analytics.transport import compact_report, expand_report
 
 #: Bump when the projection in app/routers/analytics_advisor.py changes shape or meaning.
 PROJECTION_VERSION = "advisor-v2-projection-2026-10-22"
@@ -137,7 +138,7 @@ def is_excluded(table: str) -> bool:
     return table in EXCLUDED_TABLES or table.startswith(EXCLUDED_PREFIXES)
 
 
-def get(conn: Any, key: CacheKey, version: str) -> dict | None:
+def get(conn: Any, key: CacheKey, version: str, *, compact: bool = False) -> dict | None:
     """The stored response for ``key`` only if computed under exactly ``version``."""
     with conn.cursor() as cur:
         cur.execute(
@@ -155,7 +156,9 @@ def get(conn: Any, key: CacheKey, version: str) -> dict | None:
             ),
         )
         row = cur.fetchone()
-    return row[0] if row else None
+    if row is None:
+        return None
+    return compact_report(row[0]) if compact else expand_report(row[0])
 
 
 def put(conn: Any, key: CacheKey, version: str, report: dict, compute_ms: int) -> None:
@@ -177,7 +180,7 @@ def put(conn: Any, key: CacheKey, version: str, report: dict, compute_ms: int) -
                 key.universe,
                 CACHE_METHOD,
                 version,
-                Jsonb(report),
+                Jsonb(compact_report(report)),
                 compute_ms,
             ),
         )

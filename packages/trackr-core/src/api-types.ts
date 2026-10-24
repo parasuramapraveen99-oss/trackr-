@@ -1605,6 +1605,8 @@ export interface MilestoneReport {
 }
 
 export interface AnalyticsResponse {
+  /** Exact observation dates shared by metric coverage.intervals_ref in screen detail. */
+  interval_sets?: Record<string, [string, string][]>;
   advisor?: MilestoneReport | null;
   integration?: AdvisorIntegration | null;
   as_of: string;

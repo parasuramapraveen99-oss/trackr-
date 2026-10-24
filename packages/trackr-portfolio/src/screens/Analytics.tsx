@@ -90,7 +90,7 @@ export function AnalyticsScreen({ chrome }: PortfolioScreenProps) {
   const isToday = asOf === new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
   const analytics = useFetch<AnalyticsResponse>(
     investorId ? `/investors/${investorId}/analytics` : null,
-    { as_of: asOf, advised_only: advisedOnly || undefined, calculation_method: "advisor_v2", benchmark },
+    { as_of: asOf, advised_only: advisedOnly || undefined, calculation_method: "advisor_v2", detail: "screen", benchmark },
     token,
     { refreshMs: isToday ? 120_000 : 0 },
   );
@@ -98,7 +98,7 @@ export function AnalyticsScreen({ chrome }: PortfolioScreenProps) {
   const end = asOf ?? data?.as_of;
   const contribution = useFetch<ContributionResponse>(
     investorId && end && view === "performance" && mode === "advanced" ? `/investors/${investorId}/contribution` : null,
-    { period_start: end ? oneYearBefore(end) : undefined, as_of: asOf, advised_only: advisedOnly || undefined },
+    { period_start: end ? oneYearBefore(end) : undefined, as_of: asOf, advised_only: advisedOnly || undefined, price_basis: "stored_close" },
     token,
   );
   const reviews = useIdentityReviews();

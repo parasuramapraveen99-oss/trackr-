@@ -840,6 +840,24 @@ def contribution(
     advised_only: bool = False,
     connection: Any = Depends(get_conn),
     benchmark: Literal["NIFTY50_TRI", "NIFTY500_TRI"] | None = None,
+    price_basis: Literal["current", "stored_close"] = "current",
+) -> dict[str, Any]:
+    """Per-security gain attribution over (period_start, as_of], using current prices."""
+    return build_contribution(
+        connection, investor_id, period_start, as_of, advised_only, benchmark,
+        cached_prices_only=price_basis == "stored_close",
+    )
+
+
+def build_contribution(
+    connection: Any,
+    investor_id: str,
+    period_start: date,
+    as_of: date | None,
+    advised_only: bool,
+    benchmark: str | None = None,
+    *,
+    cached_prices_only: bool = False,
 ) -> dict[str, Any]:
     """Per-ISIN rupee attribution of the portfolio's gain over
     ``(period_start, as_of]`` -- docs/ENGINE_SPEC.md section 10, the first
@@ -883,7 +901,11 @@ def contribution(
         transactions, start_isins, start_prices, period_start, skipped
     )
     end_isins = [h.isin for h in compute_holdings(transactions, resolved_as_of)]
-    end_prices = resolve_current_prices(connection, end_isins, resolved_as_of).prices
+    end_prices = (
+        latest_prices(connection, end_isins, resolved_as_of)
+        if cached_prices_only
+        else resolve_current_prices(connection, end_isins, resolved_as_of).prices
+    )
     transactions, end_isins, skipped = exclusions.drop_unpriced(
         transactions, end_isins, end_prices, resolved_as_of, skipped
     )

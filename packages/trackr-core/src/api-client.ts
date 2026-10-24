@@ -248,15 +248,43 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return (await res.json()) as T;
 }
 
+// Share only simultaneous reads. No completed portfolio response is retained: every
+// navigation/refetch still checks live authorisation and the server's input version.
+const pendingGets = new Map<string, Promise<unknown>>();
+
+async function get<T>(path: string, opts?: Omit<RequestOptions, "method">): Promise<T> {
+  if (!opts?.token || path.startsWith("/auth/") || opts.json !== undefined || opts.formData) {
+    return request<T>(path, { ...opts, method: "GET" });
+  }
+  const url = new URL(buildUrl(path, opts.query));
+  url.searchParams.sort();
+  const key = JSON.stringify([
+    url.toString(), opts.token, browserSession,
+    Object.entries(opts.headers ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+  ]);
+  const existing = pendingGets.get(key);
+  if (existing) return existing as Promise<T>;
+  const pending = request<T>(path, { ...opts, method: "GET" }).finally(() => {
+    if (pendingGets.get(key) === pending) pendingGets.delete(key);
+  });
+  pendingGets.set(key, pending);
+  return pending;
+}
+
+function mutate<T>(path: string, opts: RequestOptions): Promise<T> {
+  // A read begun before a write cannot satisfy a refresh after that write finishes.
+  pendingGets.clear();
+  return request<T>(path, opts).finally(() => pendingGets.clear());
+}
+
 export const api = {
-  get: <T>(path: string, opts?: Omit<RequestOptions, "method">) =>
-    request<T>(path, { ...opts, method: "GET" }),
+  get,
   post: <T>(path: string, opts?: Omit<RequestOptions, "method">) =>
-    request<T>(path, { ...opts, method: "POST" }),
+    mutate<T>(path, { ...opts, method: "POST" }),
   put: <T>(path: string, opts?: Omit<RequestOptions, "method">) =>
-    request<T>(path, { ...opts, method: "PUT" }),
+    mutate<T>(path, { ...opts, method: "PUT" }),
   patch: <T>(path: string, opts?: Omit<RequestOptions, "method">) =>
-    request<T>(path, { ...opts, method: "PATCH" }),
+    mutate<T>(path, { ...opts, method: "PATCH" }),
   delete: <T>(path: string, opts?: Omit<RequestOptions, "method">) =>
-    request<T>(path, { ...opts, method: "DELETE" }),
+    mutate<T>(path, { ...opts, method: "DELETE" }),
 };
