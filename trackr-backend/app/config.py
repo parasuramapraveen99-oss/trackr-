@@ -12,6 +12,7 @@ in ``.env``, same as production.
 
 from __future__ import annotations
 
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -181,12 +182,9 @@ class Settings(BaseSettings):
     # the daily crons and the import screen's /sync still advance the work.
     self_base_url: str | None = None
     vercel_project_production_url: str | None = None
-    # Whether THIS deployment may call nseindia.com/api (corporate actions, dividend
-    # notices, ISIN-change circulars, IPO/further-issue lists). NSE answers 403 to cloud
-    # data-centre IPs -- Vercel's included (measured 12 Oct 2026) -- and every 403 counts
-    # toward the ISIN-change feed's week-long circuit breaker. Set false there; the NSE work
-    # then waits for `python -m app.nse_worker` on a machine NSE does not block. Bhavcopy
-    # archives and NSDL are unaffected and keep running here.
+    # Select whether NSE discovery tasks are claimed. Hosted GAP/replay remain enabled
+    # and use stored evidence. This flag alone NEVER grants exchange network access:
+    # app.exchange_reference grants it only inside the explicit local collector context.
     nse_api_enabled: bool = True
 
     # --- mutual funds / ETFs (docs/MF_ETF_PLAN.md section 10) -------------------------
@@ -747,4 +745,4 @@ def get_settings() -> Settings:
     """Cached: ``Settings()`` re-reads the environment on every call otherwise, and a
     request-scoped dependency calling this on every request should not re-parse .env
     each time."""
-    return Settings()
+    return Settings(_env_file=os.environ.get("TRACKR_ENV_FILE", ".env"))

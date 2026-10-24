@@ -19,11 +19,14 @@ of another stock in the same account (it did: one 429 on one stock failed the wh
 2026-10-10). A research outage is ``deferred``, not a refusal: the task is retried later.
 
 Two or more fitting candidates resolve nothing (rule 20c): both are reported and the gap
-stays open. A source outage is not a refusal; the task retries.
+stays open. Hosted resolution uses PostgreSQL evidence only: missing, insufficient or
+ambiguous evidence ends that evaluation explicitly until evidence or ledger inputs change.
+Only the explicit local collector may use source fetching or research.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import replace
@@ -39,6 +42,7 @@ from app.engine.gap_resolution import (
     ipo_fits,
     rights_fits,
 )
+from app.exchange_reference import InvalidExchangeReference, MissingExchangeReference
 
 logger = logging.getLogger(__name__)
 
@@ -53,30 +57,19 @@ class ResearchDeferred(Exception):
 #: ex 27 Feb 2024, allotted 27 Mar, listed in the 1 Apr circular -- 34 days.
 RIGHTS_LISTING_WINDOW_DAYS = 75
 
-#: Published NSE circulars never change, so what they say is kept for the life of the
-#: process: every account holding the same stock reuses one download instead of fetching
-#: the same PDFs again (~40 s per account, 2026-10-10). A listing is kept only for a
-#: window wholly in the past -- a window reaching today can still gain circulars.
-_LISTING_CACHE: dict[tuple[date, date], Any] = {}
-_ISSUES_CACHE: dict[str, list] = {}
-
 
 def _listing(circulars: Any, start: date, end: date) -> Any:
-    if (start, end) in _LISTING_CACHE:
-        return _LISTING_CACHE[(start, end)]
-    listing = json.loads(circulars.list_circulars(start, end))
-    if end < date.today():
-        _LISTING_CACHE[(start, end)] = listing
-    return listing
+    # Shared source bytes live in PostgreSQL. A process-lifetime cache here would
+    # ignore a corrected response after its dependent GAP task was awakened.
+    return json.loads(circulars.list_circulars(start, end))
 
 
-def _further_issues(circulars: Any, url: str) -> list:
+def _further_issues(circulars: Any, url: str) -> tuple[list, str]:
     from app.ingest.isin_change_feed import extract_pdf_text
     from app.ingest.nse_further_issue import parse_further_issues
 
-    if url not in _ISSUES_CACHE:
-        _ISSUES_CACHE[url] = parse_further_issues(extract_pdf_text(circulars.fetch_pdf(url)))
-    return _ISSUES_CACHE[url]
+    body = circulars.fetch_pdf(url)
+    return parse_further_issues(extract_pdf_text(body)), hashlib.sha256(body).hexdigest()
 
 
 def _rights_candidates(conn: Any, gap: Gap, symbol: str, circulars: Any) -> list[RightsTerms]:
@@ -102,7 +95,7 @@ def _rights_candidates(conn: Any, gap: Gap, symbol: str, circulars: Any) -> list
                 continue
             if str(row.get("fileExt", "")).lower() != "pdf":
                 continue
-            entries = _further_issues(circulars, row["circFilelink"])
+            entries, digest = _further_issues(circulars, row["circFilelink"])
             hit = [e for e in entries if e.symbol == symbol and e.is_rights and e.issue_price]
             if not hit:
                 continue
@@ -120,6 +113,7 @@ def _rights_candidates(conn: Any, gap: Gap, symbol: str, circulars: Any) -> list
                         "listing_circular": {
                             "url": row["circFilelink"],
                             "number": row.get("circDisplayNo"),
+                            "sha256": digest,
                         },
                     },
                 )
@@ -144,6 +138,7 @@ def resolve_account_gaps(
     from app.db.auto_reversal import check_auto_rows, reversed_refs
     from app.db.repository import load_transactions, save_transactions
     from app.ingest.exa_search import ExaUnavailable
+    from app.ingest.isin_change_feed import IsinChangeCircularFormatError, IsinChangeFeedFetchFailed
     from app.ingest.nse_ipo import NseIpoFormatError
 
     # PASS 0 -- rule 20(f): the investor's own documents may now confirm an earlier
@@ -176,24 +171,46 @@ def resolve_account_gaps(
         symbol, company = info.get("symbol"), info.get("name")
         fits: list[Resolution] = []
         refusals: list[str] = []
-        if symbol:
-            for terms in _rights_candidates(conn, gap, symbol, circulars):
-                result = rights_fits(gap, terms, transactions)
-                if isinstance(result, Resolution):
-                    fits.append(_with_evidence(result, terms.evidence))
-                else:
-                    refusals.append(result.reason)
-            if company:
-                try:
-                    ipo = ipo_source.terms(symbol, company)
-                except NseIpoFormatError as exc:
-                    refusals.append(f"no NSE IPO record: {exc}")
-                else:
-                    result = ipo_fits(gap, ipo, transactions)
+        try:
+            if symbol:
+                for terms in _rights_candidates(conn, gap, symbol, circulars):
+                    result = rights_fits(gap, terms, transactions)
                     if isinstance(result, Resolution):
-                        fits.append(_with_evidence(result, ipo.evidence))
+                        fits.append(_with_evidence(result, terms.evidence))
                     else:
                         refusals.append(result.reason)
+                if company:
+                    try:
+                        ipo = ipo_source.terms(symbol, company)
+                    except NseIpoFormatError as exc:
+                        refusals.append(f"no NSE IPO record: {exc}")
+                    else:
+                        result = ipo_fits(gap, ipo, transactions)
+                        if isinstance(result, Resolution):
+                            fits.append(_with_evidence(result, ipo.evidence))
+                        else:
+                            refusals.append(result.reason)
+        except (
+            MissingExchangeReference,
+            InvalidExchangeReference,
+            IsinChangeFeedFetchFailed,
+            IsinChangeCircularFormatError,
+            json.JSONDecodeError,
+        ) as exc:
+            # Stop this security once. Other securities retain their real successes;
+            # no network retry, external research or guessed acquisition replaces it.
+            still_open.append(
+                {
+                    "isin": gap.isin,
+                    "symbol": symbol,
+                    "shortfall": str(gap.shortfall),
+                    "reason_code": getattr(exc, "reason_code", "REFERENCE_DATA_INVALID"),
+                    "reason": str(exc),
+                    "request_key": getattr(exc, "request_key", None),
+                }
+            )
+            logger.warning("gap_reference_unavailable", extra={"isin": gap.isin}, exc_info=True)
+            continue
         # A resolution the investor's documents already reversed is never written again:
         # the gap stays open and named, rather than looping add -> reverse -> add.
         undone = [f for f in fits if f.row.source_ref in refused]
@@ -228,6 +245,7 @@ def resolve_account_gaps(
                     "isin": gap.isin,
                     "symbol": symbol,
                     "shortfall": str(gap.shortfall),
+                    "reason_code": "REFERENCE_DATA_AMBIGUOUS",
                     "reason": "several public events fit -- left open (rule 20c): "
                     + ", ".join(f.kind for f in fits),
                 }
@@ -240,8 +258,11 @@ def resolve_account_gaps(
     # evidence that arrived since the checkpoint.
     if defer_research and researcher is not None:
         return {
-            "gaps": len(gaps), "resolved": resolved, "open": still_open,
-            "deferred": [], "research_pending": [gap.isin for gap, _, _ in leftovers],
+            "gaps": len(gaps),
+            "resolved": resolved,
+            "open": still_open,
+            "deferred": [],
+            "research_pending": [gap.isin for gap, _, _ in leftovers],
             **checked,
         }
 
@@ -252,7 +273,11 @@ def resolve_account_gaps(
         open_row = {"isin": gap.isin, "symbol": symbol, "shortfall": str(gap.shortfall)}
         if researcher is None:
             still_open.append(
-                {**open_row, "reason": "; ".join(refusals) or "no public event found yet"}
+                {
+                    **open_row,
+                    "reason_code": "REFERENCE_DATA_INSUFFICIENT",
+                    "reason": "; ".join(refusals) or "no public event found yet",
+                }
             )
             continue
         if paused is None:

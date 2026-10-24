@@ -137,9 +137,25 @@ def operations(conn: Any = Depends(get_conn)) -> dict:
         ]
         cur.execute(
             "SELECT kind,task_key,last_error,available_at FROM reference_sync_task "
-            "WHERE state='retry' ORDER BY updated_at DESC LIMIT 30"
+            "WHERE last_error IS NOT NULL AND state IN ('retry','done') "
+            "ORDER BY updated_at DESC LIMIT 30"
         )
         failures = [
             {"source": r[0], "key": r[1], "error": r[2], "retry_at": r[3]} for r in cur.fetchall()
         ]
-    return {"tasks": counts, "failures": failures}
+        cur.execute(
+            "SELECT request_key,url,state,last_error,last_attempt_at "
+            "FROM exchange_reference_request "
+            "WHERE state <> 'collected' ORDER BY requested_at LIMIT 100"
+        )
+        missing = [
+            {
+                "request_key": r[0],
+                "url": r[1],
+                "state": r[2],
+                "error": r[3],
+                "last_attempt_at": r[4],
+            }
+            for r in cur.fetchall()
+        ]
+    return {"tasks": counts, "failures": failures, "missing_reference": missing}

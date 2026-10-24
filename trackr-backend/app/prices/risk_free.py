@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
+from app.exchange_reference import urlopen
 from app.prices.index_sources import _format_request_date, _parse_response_date
 
 SOURCE_URL = "https://www.niftyindices.com/BackPage/getHistoricaldatatabletoString"
@@ -71,7 +72,7 @@ def _fetch_chunk(start: date, end: date, opener=None) -> list[RateLevel]:
             "Accept": "application/json",
         },
     )
-    with (opener or urllib.request.urlopen)(request, timeout=30) as response:
+    with (opener or urlopen)(request, timeout=30) as response:
         rows = parse_rows(json.loads(response.read()))
     if any(not start <= r.level_date <= end for r in rows):
         raise ValueError("NSE rate index returned dates outside the requested range")

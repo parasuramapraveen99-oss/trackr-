@@ -13,6 +13,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
+from app.exchange_reference import MissingExchangeReference
 from app.prices.alerts import LoggingNotifier, Notifier
 from app.prices.sources import FetchFailed, NotPublished, bse_source, nse_source
 from app.prices.udiff import BhavcopyFormatError, BhavcopyRow, parse
@@ -154,7 +155,7 @@ def fetch_day(
         except NotPublished:
             result.not_published.append(source.exchange)
             continue
-        except (FetchFailed, BhavcopyFormatError) as exc:
+        except (FetchFailed, BhavcopyFormatError, MissingExchangeReference) as exc:
             result.failures[source.exchange] = str(exc)
             notifier.notify(
                 subject=f"{source.exchange} bhavcopy unavailable for {on}",

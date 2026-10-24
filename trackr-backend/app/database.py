@@ -9,10 +9,12 @@ unchanged -- see docs/BACKEND_REUSE_AND_GAP_ANALYSIS.md section 1.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
 from decimal import Decimal
 from typing import Any
+
+from fastapi.concurrency import contextmanager_in_threadpool, run_in_threadpool
 
 from app.config import get_settings
 from app.db.connection import (
@@ -22,6 +24,7 @@ from app.db.connection import (
     connect,
     redact,
 )
+from app.exchange_reference import reference_context
 
 #: Capability -> the ``Settings`` field holding its DSN. The only place the two
 #: vocabularies meet. A new capability requires a row here, a role in
@@ -37,7 +40,7 @@ _WORKSPACE_URL_FIELDS: dict[WorkspaceCapability, str] = {
 }
 
 
-def get_conn() -> Iterator[Any]:
+async def get_conn() -> AsyncIterator[Any]:
     """FastAPI dependency: one connection per request. No pool.
 
     Given the load this serves -- an adviser with tens of clients, refreshed on trade
@@ -45,8 +48,20 @@ def get_conn() -> Iterator[Any]:
     profiling says to, not before.
     """
     settings = get_settings()
-    with connect(settings.database_url) as connection:
-        yield connection
+    # ContextVars must be set/reset in the request's async context. FastAPI enters and
+    # exits sync yield dependencies in separate copied worker contexts, which both loses
+    # the exchange scope in the route and raises on token.reset() at request cleanup.
+    # Keep blocking database work in the worker pool; sync routes inherit this scope.
+    async with contextmanager_in_threadpool(connect(settings.database_url)) as connection:
+        with reference_context(connection) as references:
+            try:
+                yield connection
+            except Exception:
+                await run_in_threadpool(connection.rollback)
+                await run_in_threadpool(references.persist)
+                await run_in_threadpool(connection.commit)
+                raise
+            await run_in_threadpool(references.persist)
 
 
 def workspace_url(capability: WorkspaceCapability) -> str:

@@ -76,8 +76,10 @@ def settle_rebuild_tasks(conn: Any, rows: list[tuple[str, bool, Snapshot]], read
     keys = [f"{investor}:{point.as_of.isoformat()}:{advised}" for investor, advised, point in rows]
     conn.execute(
         """UPDATE reference_sync_task SET state='done',last_error=NULL,attempts=0,
+             payload=payload-'reference_missing',
              updated_at=clock_timestamp(),last_success_at=clock_timestamp()
-           WHERE kind='SNAPSHOT' AND state IN ('pending','retry') AND task_key=ANY(%s)
+           WHERE kind='SNAPSHOT' AND (state IN ('pending','retry')
+               OR (state='done' AND payload ? 'reference_missing')) AND task_key=ANY(%s)
              AND payload ? 'queued_xid'
              AND pg_visible_in_snapshot((payload->>'queued_xid')::xid8, %s::pg_snapshot)""",
         (keys, read_snapshot),

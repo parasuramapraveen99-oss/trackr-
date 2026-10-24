@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Protocol, runtime_checkable
 
+from app.exchange_reference import InvalidExchangeReference, MissingExchangeReference, needs_warmup
 from app.ingest.nse_session import cookie_session
 from app.prices.sources import BROWSER_HEADERS, TIMEOUT_SECONDS
 
@@ -170,6 +171,8 @@ class NseCircularListSource:
             try:
                 return make_request()
             except Exception as exc:  # noqa: BLE001 -- reclassified immediately below
+                if isinstance(exc, (MissingExchangeReference, InvalidExchangeReference)):
+                    raise
                 if not _is_transient(exc) or attempt == _MAX_RETRIES:
                     raise IsinChangeFeedFetchFailed(
                         f"{description}: {type(exc).__name__}"
@@ -186,7 +189,8 @@ class NseCircularListSource:
             self._opener(warmup, timeout=self._timeout).close()
             return b""
 
-        self._retrying(_warmup, "NSE session warm-up")
+        if needs_warmup(self._opener):
+            self._retrying(_warmup, "NSE session warm-up")
 
         def _list() -> bytes:
             request = urllib.request.Request(

@@ -18,6 +18,8 @@ from datetime import date
 from functools import lru_cache
 from typing import Protocol, runtime_checkable
 
+from app.exchange_reference import ReferenceOpener, needs_warmup, urlopen
+
 NSE_URL = (
     "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{d:%Y%m%d}_F_0000.csv.zip"
 )
@@ -117,7 +119,7 @@ class HttpBhavcopySource:
     def __init__(self, exchange: str, url_template: str, opener=None):
         self.exchange = exchange
         self.url_template = url_template
-        self._opener = opener or urllib.request.urlopen
+        self._opener = opener or urlopen
 
     def url_for(self, on: date) -> str:
         return self.url_template.format(d=on)
@@ -277,10 +279,10 @@ def _legacy_opener():
     every call) 403s/503s against archives.nseindia.com even with LEGACY_BROWSER_HEADERS;
     only a warmed session cookie, carried across the warmup and the real request via the
     SAME opener, got a real 200. Confirmed live."""
-    return urllib.request.build_opener(
+    return ReferenceOpener(urllib.request.build_opener(
         urllib.request.HTTPSHandler(context=_ssl_context()),
         urllib.request.HTTPCookieProcessor(),
-    )
+    ))
 
 
 class LegacyBhavcopySource:
@@ -336,7 +338,7 @@ def fetch_legacy_archive_text(
     """
     opener = (opener_factory or _legacy_opener)()
     try:
-        if warmup_url:
+        if warmup_url and needs_warmup(opener):
             warmup = urllib.request.Request(warmup_url, headers=LEGACY_BROWSER_HEADERS)
             opener.open(warmup, timeout=TIMEOUT_SECONDS).close()
 

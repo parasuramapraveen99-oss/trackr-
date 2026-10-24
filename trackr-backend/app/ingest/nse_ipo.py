@@ -31,6 +31,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.engine.gap_resolution import IpoTerms
+from app.exchange_reference import needs_warmup
 
 NSE_PAST_ISSUES_URL = "https://www.nseindia.com/api/public-past-issues"
 NSE_IPO_DETAIL_URL = "https://www.nseindia.com/api/ipo-detail?symbol={symbol}&series={series}"
@@ -132,7 +133,7 @@ class NseIpoSource:
     def _get(self, url: str) -> bytes:
         from app.ingest.corporate_action_feed import BROWSER_HEADERS, NSE_HOMEPAGE_URL
 
-        if not self._warm:
+        if not self._warm and needs_warmup(self._opener):
             self._opener.open(urllib.request.Request(NSE_HOMEPAGE_URL, headers=BROWSER_HEADERS),
                               timeout=30).read()
             self._warm = True

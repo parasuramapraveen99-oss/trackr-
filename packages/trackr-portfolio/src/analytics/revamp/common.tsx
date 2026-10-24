@@ -10,6 +10,7 @@
 
 import { useState, type CSSProperties, type ReactNode } from "react";
 import { Figure } from "@trackr/core";
+import { cardTitle } from "@trackr/ui";
 import type { AnalyticsResponse, BasicCandidate, BasicTone } from "@trackr/core";
 import { EMPTY, money } from "../format";
 
@@ -44,6 +45,7 @@ export function reasonText(code: string | null | undefined): string {
     MARKET_REFERENCE_MISSING: "market reference unavailable",
     NO_RETURN_HISTORY: "no return history",
     MISSING_UNIVERSE: "Nifty 500 membership not recorded for this date",
+    VENDOR_STATEMENTS_NO_EXCHANGE_FILING: "company figures are vendor-reported, not yet from exchange filings",
     INDEX_LEVELS_MISSING: "index levels missing",
     SNAPSHOT_MISSING: "no stored snapshot to check against",
     TRADES_ON_THIS_DATE: "trades on this date, so not cross-checked",
@@ -102,14 +104,19 @@ export function RuleCalc({ candidate }: { candidate: BasicCandidate }) {
 }
 
 /** A card with a label row (label + ⓘ + optional right-hand control) and a body. */
+/** The dashboard Card's shell (@trackr/ui Card): square corner, ledger rule on top, slip ring. */
+export const CARD_SHELL: CSSProperties = {
+  padding: "var(--card-padding)", background: "var(--surface)", borderTop: "1px solid var(--ledger-rule)",
+  borderRadius: 0, boxShadow: "var(--shadow-slip)",
+};
+
 export function Panel({ label, info, right, span = 12, children, style }: {
   label: ReactNode; info?: ReactNode; right?: ReactNode; span?: number; children: ReactNode; style?: CSSProperties;
 }) {
   return (
-    <section style={{ gridColumn: `span ${span}`, minWidth: 0, display: "flex", flexDirection: "column", gap: 10, padding: "14px 16px",
-      border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)", ...style }}>
+    <section style={{ gridColumn: `span ${span}`, minWidth: 0, display: "flex", flexDirection: "column", gap: 10, ...CARD_SHELL, ...style }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 4, font: "600 13px var(--font-label)" }}>{label}{info}</div>
+        <div style={{ ...cardTitle, display: "flex", alignItems: "center", gap: 4 }}>{label}{info}</div>
         {right}
       </div>
       {children}
@@ -134,6 +141,8 @@ export function CoverageFooter({ data, extra }: { data: AnalyticsResponse; extra
   const c = data.revamp?.coverage;
   if (!c) return null;
   const pct = c.priced_pct;
+  // Everything priced and included: nothing to name, so no line. A gap is always named.
+  if (!extra && c.not_valued.length === 0 && c.priced_count != null && c.priced_count === c.total_count) return null;
   return <div style={{ ...faint, gridColumn: "1 / -1", paddingTop: 4 }}>
     Covers {c.priced_count ?? "—"} of {c.total_count ?? "—"} holdings
     {pct != null ? ` · ${pct.toFixed(0)}% of value` : " · share of value unknown (some holdings unpriced)"}
@@ -176,7 +185,7 @@ export const RESPONSIVE_CSS = `
 @media (max-width: 1200px) { .rv-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 620px) { .rv-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 380px) { .rv-kpis { grid-template-columns: minmax(0, 1fr); } }
-@media (max-width: 900px) { .rv-grid > section { grid-column: span 12 !important; } }
+@media (max-width: 900px) { .rv-grid > section, .rv-factor-cards { grid-column: span 12 !important; } }
 .rv-table { width: 100%; border-collapse: collapse; font: 500 12.5px var(--font-body); font-variant-numeric: tabular-nums; }
 .rv-table th { text-align: left; font: 600 11px var(--font-label); color: var(--text-tertiary); padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .rv-table td { padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }

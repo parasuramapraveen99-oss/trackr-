@@ -77,7 +77,13 @@ def run_cycle(
     from app.db.connection import session_connection
 
     with session_connection(conn, settings) as direct:
-        return _run_cycle(direct, settings, budget_seconds, clock, include_sectors)
+        from app.exchange_reference import reference_context
+
+        with reference_context(direct) as references:
+            result = _run_cycle(direct, settings, budget_seconds, clock, include_sectors)
+            references.persist()
+            direct.commit()
+            return result
 
 
 def _run_cycle(conn, settings, budget_seconds, clock, include_sectors):

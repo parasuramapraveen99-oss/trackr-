@@ -145,7 +145,7 @@ export function AnalyticsScreen({ chrome }: PortfolioScreenProps) {
         <TipProvider>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             {data && <Greeting data={data} />}
-            {data && <KpiStrip data={data} onHealth={() => { setView("overview"); setMode("basic"); }} />}
+            {data && <KpiStrip data={data} onHealth={() => { setView("overview"); setMode("advanced"); }} />}
             {data?.coverage.basis === "priced_subset" && <div role="status" style={{ font: "500 12px var(--font-label)", color: "var(--warning)" }}>
               Priced subtotal · {data.coverage.priced_count}/{data.coverage.total_count} positions. Not valued: {data.unresolved.map((p) => p.symbol ?? p.isin).join(", ")}.
             </div>}
@@ -159,10 +159,6 @@ export function AnalyticsScreen({ chrome }: PortfolioScreenProps) {
             {asset === "funds" ? <FundsCard /> : <>
               <TabBar tabs={VIEWS.map((v) => ({ key: v.key, label: v.label }))} active={view} onChange={(k) => isView(k) && setView(k)} style={{ alignSelf: "flex-start" }} />
               {body()}
-              {mode === "basic" && view !== "factor" && <button type="button" onClick={() => setMode("advanced")}
-                style={{ alignSelf: "flex-start", border: 0, background: "none", padding: 0, cursor: "pointer", font: "600 12px var(--font-label)", color: "var(--text-link)" }}>
-                Want the charts and tables? Switch to Advanced →
-              </button>}
             </>}
           </div>
         </TipProvider>

@@ -190,7 +190,7 @@ export function ValueChartCard() {
   // chart is showing today it refreshes on the same two-minute cadence as the summary.
   const isToday = asOf === new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
   const [historyPending, setHistoryPending] = useState(true);
-  const progress = useFetch<{ version: string; pending: boolean; points: number }>(
+  const progress = useFetch<{ version: string; pending: boolean; points: number; missing_reference?: { kind: string }[] }>(
     investorId ? `/investors/${investorId}/snapshots/status` : null,
     undefined,
     token,
@@ -552,6 +552,16 @@ export function ValueChartCard() {
       >
         {body()}
       </div>
+      {!!progress.data?.missing_reference?.length && (
+        <p role="status" style={{ font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>
+          Some history needs exchange evidence. Available portfolio points remain visible.
+        </p>
+      )}
+      {benchmark.error && (
+        <p role="status" style={{ font: "var(--type-body-sm)", color: "var(--text-secondary)" }}>
+          Benchmark unavailable. The chart shows the available portfolio history.
+        </p>
+      )}
     </Card>
   );
 }

@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from app.exchange_reference import urlopen
 from app.prices.sources import BROWSER_HEADERS
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ HEADERS = {
 
 def _get(url: str, opener: Any = None) -> Any:
     request = urllib.request.Request(url, headers=HEADERS)
-    with (opener or urllib.request.urlopen)(request, timeout=60) as response:
+    with (opener or urlopen)(request, timeout=60) as response:
         return json.loads(response.read())
 
 

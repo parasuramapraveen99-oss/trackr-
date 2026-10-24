@@ -15,8 +15,9 @@
 import { useState, type CSSProperties, type ReactNode } from "react";
 import { Figure, api, useAuth, useFetch, CONSENT_NOTICE_VERSION } from "@trackr/core";
 import type { BasicLine, BasicNarrativeResponse, BasicTab, BasicTone, NarrativeToken } from "@trackr/core";
-import { Skeleton } from "@trackr/ui";
+import { Skeleton, cardTitle } from "@trackr/ui";
 import { EMPTY, money, pct, pp, ratio } from "../analytics/format";
+import { CARD_SHELL } from "../analytics/revamp/common";
 
 const TONE: Record<BasicTone, { color: string; label: string }> = {
   needs_attention: { color: "var(--negative)", label: "Needs attention" },
@@ -158,20 +159,20 @@ export function NarrativeState({ narrative }: { narrative: ReturnType<typeof use
   return null;
 }
 
-export function BasicInsights({ tab, feature = false, children, className, style }: {
-  tab: BasicTab; feature?: boolean; children?: ReactNode; className?: string; style?: CSSProperties;
+export function BasicInsights({ tab, feature = false, header = true, label, children, className, style }: {
+  tab: BasicTab; feature?: boolean; header?: boolean; label?: string; children?: ReactNode; className?: string; style?: CSSProperties;
 }) {
   const narrative = useBasicNarrative(tab);
-  const [title, subtitle] = BASIC_TITLES[tab];
+  const [title] = BASIC_TITLES[tab];
   const state = NarrativeState({ narrative });
   const lines = narrative.data?.lines ?? [];
 
   return (
-    <section aria-label={title} className={className} style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8, padding: "14px 16px", border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)", ...style }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+    <section aria-label={label ?? title} className={className} style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8, ...CARD_SHELL, ...style }}>
+      {!header && label && <div style={cardTitle}>{label}</div>}
+      {header && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
         <div>
-          <div style={{ font: "600 16px var(--font-display, Georgia, serif)" }}>{title}</div>
-          <div style={{ ...muted, fontSize: 12 }}>{subtitle}</div>
+          <div style={cardTitle}>{title}</div>
         </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", font: "500 11px var(--font-label)", color: "var(--text-tertiary)" }}>
           {(["needs_attention", "watch", "positive", "neutral"] as BasicTone[]).map((key) => (
@@ -180,7 +181,7 @@ export function BasicInsights({ tab, feature = false, children, className, style
             </span>
           ))}
         </div>
-      </div>
+      </div>}
       {state ?? <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
         {lines.map((line, i) => <Line key={line.slot} line={line} large={feature && i === 0} />)}
       </ul>}

@@ -14,6 +14,8 @@ class BenchmarkOut(BaseModel):
     name: str
     xirr: str | None = None
     terminal_value: str | None = None
+    reason_code: str | None = None
+    warning: str | None = None
 
 
 class ExcludedOut(BaseModel):

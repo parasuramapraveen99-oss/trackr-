@@ -24,6 +24,7 @@ interface ReferenceStatus {
   retrying: number;
   last_success_at: string | null;
   unresolved: UnresolvedItem[];
+  missing_reference?: { kind: string; details: { isin?: string; symbol?: string }[] }[];
 }
 
 type Answer = "NOT_PARTICIPATED" | "PARTICIPATED" | "UNSURE";
@@ -186,10 +187,18 @@ export function ReferenceSyncBanner() {
       </Banner>
     );
   }
-  if (questions.length === 0) return null;
+  const missing = data?.missing_reference ?? [];
+  if (questions.length === 0 && missing.length === 0) return null;
   const n = questions.length;
   return (
     <div style={{ marginBottom: "var(--space-6)" }}>
+      {missing.length > 0 && (
+        <Banner tone="warning" title="Some exchange evidence is unavailable">
+          Calculations that need this evidence remain incomplete. Available holdings and charts continue updating.
+          This will be checked again when new evidence is available.
+        </Banner>
+      )}
+      {questions.length > 0 && (
       <Card
         title={`${n} quick check${n > 1 ? "s" : ""}`}
       >
@@ -205,6 +214,7 @@ export function ReferenceSyncBanner() {
           ))}
         </ul>
       </Card>
+      )}
     </div>
   );
 }

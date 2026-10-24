@@ -4,32 +4,16 @@
  * Overview (review §4, comments 3–6).
  *
  * Basic: grade gauge (letter, score, band range; no verdict word), the core insight (the
- * first written line), one chip per fired rule, and Price Trend.
- * Advanced: two columns, Insights | Explanation, every fired finding from every tab, with
+ * first written line) and Price Trend. The per-rule tags live in Advanced only.
+ * Advanced: the five health parts, then two columns, Insights | Explanation, every fired finding from every tab, with
  * an ⓘ that shows the situation first and then Calculation / Why flagged.
  */
 
-import { useState } from "react";
 import { parseDecimal } from "@trackr/core";
 import type { AnalyticsResponse, BasicCandidate, BasicTone } from "@trackr/core";
 import { BasicInsights, NarrativeState, Tokens, useBasicNarrative } from "../../widgets/BasicInsights";
-import { HealthParts, HealthScale, rawComponents } from "../HealthBoard";
+import { HealthParts } from "../HealthBoard";
 import { CandidateFigures, CoverageFooter, Grid, Info, Panel, Rs, RuleCalc, TONE, ToneLegend, faint, findingLabel, fmtShare, muted } from "./common";
-
-/** The only chips the review allows (§4 SWOT chips), and which finding each comes from. */
-function chipLabel(c: BasicCandidate): string | null {
-  switch (c.slot) {
-    case "OV.SINGLE_NAME": return "Concentrated";
-    case "DV.SECTOR": return "Sector-heavy";
-    case "OV.VS_INDEX": return c.direction === "behind" ? "Behind index" : "Ahead of index";
-    case "RR.SWINGS": return c.direction === "more_volatile" ? "High swings" : null;
-    case "OV.QUALITY_CORE": return "Quality core";
-    case "FD.PE": return c.direction === "cheaper" ? "Cheaper than index" : null;
-    case "RR.LIQUIDITY": return "Hard to exit";
-    case "FD.LOSS_MAKERS": return "Loss-making holdings";
-    default: return null;
-  }
-}
 
 const ORDER: Record<BasicTone, number> = { needs_attention: 0, watch: 1, positive: 2, neutral: 3, insufficient_data: 4 };
 
@@ -38,73 +22,52 @@ export function allCandidates(data: AnalyticsResponse): BasicCandidate[] {
     .sort((a, b) => ORDER[a.tone] - ORDER[b.tone]);
 }
 
+/** Three-quarter ring, as in the review mockup: the grade arc when scored, otherwise the
+ * possible range shaded with no letter. Band colours: A–B positive, C watch, D–F negative. */
+function Ring({ score, grade, bounds }: { score: number | null; grade: string | null; bounds?: { lower: number; upper: number } | null }) {
+  const C = 2 * Math.PI * 70 * 0.75;
+  const arc = (from: number, to: number, stroke: string, opacity = 1) => <circle cx={100} cy={100} r={70} fill="none"
+    style={{ stroke, strokeOpacity: opacity }} strokeWidth={14} strokeLinecap={from === 0 ? "round" : "butt"}
+    strokeDasharray={`0 ${C * from / 100} ${C * (to - from) / 100} 999`} transform="rotate(135 100 100)" />;
+  const color = score == null ? "var(--text-secondary)" : score >= 65 ? "var(--positive)" : score >= 50 ? "var(--warning)" : "var(--negative)";
+  return <svg viewBox="0 0 200 175" width={210} style={{ maxWidth: "100%", display: "block", margin: "0 auto" }} role="img"
+    aria-label={score != null ? `Grade ${grade}, ${score} out of 100` : "Grade withheld"}>
+    {arc(0, 100, "var(--border)")}
+    {score != null ? <>
+      {arc(0, score, color)}
+      <text x={100} y={104} textAnchor="middle" style={{ fill: color, font: "600 50px var(--font-figure)" }}>{grade}</text>
+      <text x={100} y={130} textAnchor="middle" style={{ fill: "var(--text-secondary)", font: "500 14px var(--font-label)" }}>{score}/100</text>
+    </> : <>
+      {bounds && arc(bounds.lower, bounds.upper, "var(--warning)", 0.45)}
+      <text x={100} y={100} textAnchor="middle" style={{ fill: "var(--text-primary)", font: "500 40px var(--font-figure)" }}>—</text>
+      {bounds && <text x={100} y={126} textAnchor="middle" style={{ fill: "var(--text-secondary)", font: "500 12px var(--font-label)" }}>
+        range {bounds.lower.toFixed(0)}–{bounds.upper.toFixed(0)}</text>}
+    </>}
+  </svg>;
+}
+
 function Gauge({ data }: { data: AnalyticsResponse }) {
-  const [open, setOpen] = useState(false);
   const h = data.health;
   const bands = h.bands.length ? h.bands : [["A", 80], ["B", 65], ["C", 50], ["D", 35], ["E", 20], ["F", 0]] as [string, number][];
   const band = h.grade ? bands.find(([g]) => g === h.grade) : undefined;
   const upper = band ? (bands[bands.indexOf(band) - 1]?.[1] ?? 101) - 1 : null;
   const measured = h.components.filter((c) => c.score != null).length;
-  const raw = rawComponents(data);
-  const missingQuality = raw.find((component) => component.key === "quality")?.evidence.input_errors;
-  const missingQualityNotes = Array.isArray(missingQuality) ? missingQuality.filter((item): item is string => typeof item === "string").map((item) => {
-    const [, isin, field] = item.split(":");
-    const name = data.positions.find((position) => position.isin === isin)?.symbol ?? isin;
-    if (!name) return "Some company inputs are unavailable.";
-    const label = field ? field.replaceAll("_", " ") : "company classification";
-    return `${name}: ${label} unavailable`;
-  }) : [];
-  return <Panel label="Portfolio health" span={5} info={<Info title="Portfolio health" calc={<>
+  return <Panel label="Portfolio health analysis" span={5} info={<Info title="Portfolio health" calc={<>
     Five parts, weighted: {h.components.map((c) => `${c.label} ${Math.round(c.weight * 100)}%`).join(", ")}. Rule {h.rule_version}.
     {" "}Provisional: the rubric is not yet calibrated.</>}>
     A score out of 100 from five parts of the portfolio. It describes the portfolio, not the investor.
   </Info>}>
     <div style={{ textAlign: "center" }}>
+      <Ring score={h.grade != null ? h.score : null} grade={h.grade} bounds={h.score_bounds} />
       {h.grade != null
-        ? <>
-          <div style={{ font: "600 44px var(--font-figure)", lineHeight: 1 }}>{h.grade}</div>
-          <div style={muted}>{h.score}/100 · {h.grade} band: {band?.[1]}–{upper}</div>
-        </>
+        ? <div style={muted}>{h.grade} band: {band?.[1]}–{upper}</div>
         : <>
-          <div style={{ font: "600 30px var(--font-figure)", lineHeight: 1.1, color: "var(--text-secondary)" }}>Withheld</div>
-          <div style={muted}>{measured} of {h.components.length} parts measured
-            {h.score_bounds && <> · possible range {h.score_bounds.lower.toFixed(0)}–{h.score_bounds.upper.toFixed(0)}</>}.
-            {" "}Missing parts are never filled with an average.</div>
+          <div style={{ fontWeight: 600 }}>Grade withheld</div>
+          <div style={muted}>{measured} of {h.components.length} parts measured. Missing parts are never filled with an average.</div>
         </>}
     </div>
-    <HealthScale data={data} />
-    <div style={faint}>Bands {bands.map(([g, f]) => `${g} ≥${f}`).join(" · ")}</div>
-    <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
-      style={{ alignSelf: "flex-start", border: 0, background: "none", padding: 0, cursor: "pointer", ...faint, color: "var(--text-link)" }}>
-      {open ? "Hide the five parts" : "Show the five parts →"}
-    </button>
-    {open && <HealthParts data={data} />}
-    <details style={faint}><summary>Coverage of each part</summary>
-      <p>A part needs inputs for at least 80% of included portfolio value. A grade stays provisional; missing parts are not filled.</p>
-      {data.health.components.map((component) => <div key={component.key}>
-        <b>{component.label}:</b> {component.evidence.coverage != null
-          ? `${(component.evidence.coverage * 100).toFixed(1)}% of included value`
-          : component.score == null ? "Not measured" : "Measured"}
-      </div>)}
-      {missingQualityNotes.length > 0 && <p>Company quality leaves out: {missingQualityNotes.join("; ")}.</p>}
-    </details>
     {(h.excluded?.length ?? 0) > 0 && <p style={faint}>Health covers the priced, reconciled subset. Left out: {h.excluded!.map((item) => item.name ?? item.isin).join(", ")}.</p>}
   </Panel>;
-}
-
-function Chips({ data }: { data: AnalyticsResponse }) {
-  const facts = data.basic?.facts ?? {};
-  const chips = allCandidates(data).map((c) => [c, chipLabel(c)] as const).filter(([, l]) => l);
-  if (!chips.length) return null;
-  return <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-    {chips.map(([c, label]) => <span key={c.slot} style={{
-      display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 9px", borderRadius: 999,
-      border: `1px solid ${TONE[c.tone].color}`, color: TONE[c.tone].color, font: "600 11.5px var(--font-label)",
-    }}>● {label}<Info title={label ?? ""} calc={<RuleCalc candidate={c} />}>
-      <CandidateFigures candidate={c} facts={facts} />
-      <div style={{ ...faint, marginTop: 4 }}>Rule {data.basic?.rule_version}</div>
-    </Info></span>)}
-  </div>;
 }
 
 const STATES: [string, string, BasicTone, string][] = [
@@ -146,9 +109,7 @@ function PriceTrend({ data }: { data: AnalyticsResponse }) {
 export function OverviewBasic({ data }: { data: AnalyticsResponse }) {
   return <div className="rv-grid rv-overview" style={{ display: "grid", gridTemplateColumns: "repeat(12, minmax(0, 1fr))", gap: 12 }}>
     <Gauge data={data} />
-    <BasicInsights tab="overview" feature className="rv-overview-insights" style={{ gridColumn: "span 7", minWidth: 0 }}>
-      <Chips data={data} />
-    </BasicInsights>
+    <BasicInsights tab="overview" feature header={false} label="Portfolio highlights" className="rv-overview-insights" style={{ gridColumn: "span 7", minWidth: 0 }} />
     <PriceTrend data={data} />
     <CoverageFooter data={data} />
   </div>;
@@ -162,6 +123,12 @@ export function OverviewAdvanced({ data }: { data: AnalyticsResponse }) {
   const rows = allCandidates(data);
   const missing = Object.values(data.basic?.tabs ?? {}).flatMap((t) => t?.insufficient ?? []);
   return <Grid>
+    <Panel label="Portfolio health · the five parts" info={<Info title="The five parts">
+      Each bar is one part&apos;s score out of 100, weighted as shown. A hatched bar is a part that could not be measured;
+      it is left out, never filled with an average.
+    </Info>}>
+      <HealthParts data={data} />
+    </Panel>
     <Panel label="Every fired insight" right={<ToneLegend />}>
       {state}
       <div className="rv-scroll"><table className="rv-table">

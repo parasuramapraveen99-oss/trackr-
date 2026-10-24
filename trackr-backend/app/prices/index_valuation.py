@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from app.exchange_reference import urlopen
 from app.prices.index_sources import TRI_INDICES, _format_request_date, _parse_response_date
 
 SOURCE_URL = "https://www.niftyindices.com/BackPage/getpepbHistoricaldataDBtoString"
@@ -82,7 +83,7 @@ def fetch(index_name: str, start: date, end: date, opener=None) -> list[IndexVal
             "Accept": "application/json",
         },
     )
-    with (opener or urllib.request.urlopen)(request, timeout=20) as response:
+    with (opener or urlopen)(request, timeout=20) as response:
         rows = parse_rows(json.loads(response.read()), index_name)
     if any(not start <= row.valuation_date <= end for row in rows):
         raise ValueError("NSE valuation returned dates outside the requested range")

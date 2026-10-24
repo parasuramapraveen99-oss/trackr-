@@ -195,7 +195,7 @@ def status(conn, investor_id: str) -> dict[str, Any]:
                FROM reference_sync_task t JOIN (
                    SELECT DISTINCT d.kind, d.task_key FROM reference_sync_dependency d
                    JOIN account a ON a.id=d.account_id WHERE a.investor_id=%s
-               ) d USING(kind, task_key) GROUP BY t.state""",
+               ) d USING(kind, task_key) WHERE t.kind <> 'NSE' GROUP BY t.state""",
             (investor_id,),
         )
         states = cur.fetchall()
@@ -275,13 +275,34 @@ def status(conn, investor_id: str) -> dict[str, Any]:
             (investor_id,),
         )
         aliases.extend({"isin": r[0], "related_isin": None, "reason": r[1]} for r in cur.fetchall())
+    missing_reference = [
+        {
+            "kind": kind,
+            "reason_code": "REFERENCE_DATA_MISSING",
+            "details": payload.get("reference_missing", []),
+        }
+        for kind, payload in conn.execute(
+            "SELECT DISTINCT t.kind,t.payload FROM reference_sync_task t "
+            "JOIN reference_sync_dependency d USING(kind,task_key) "
+            "JOIN account a ON a.id=d.account_id "
+            "WHERE a.investor_id=%s AND (t.payload ? 'reference_missing' "
+            "OR (t.kind='NSE' AND t.state <> 'done'))",
+            (investor_id,),
+        ).fetchall()
+    ]
     counts = {row[0]: row[1] for row in states}
     active = counts.get("pending", 0) + counts.get("running", 0) + unscheduled
     retry = counts.get("retry", 0)
     last_success = max((row[2] for row in states if row[2]), default=None)
     latest = max((row[3] for row in states if row[3]), default=None)
     phase = (
-        "retrying" if retry else "processing" if active else "needs_evidence" if aliases else "idle"
+        "retrying"
+        if retry
+        else "processing"
+        if active
+        else "needs_evidence"
+        if aliases or missing_reference
+        else "idle"
     )
     return {
         "state": phase,
@@ -292,4 +313,5 @@ def status(conn, investor_id: str) -> dict[str, Any]:
         "updated_at": latest,
         "unresolved": aliases,
         "checking_gaps": checking_gaps,
+        "missing_reference": missing_reference,
     }

@@ -26,6 +26,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from app.exchange_reference import urlopen
 from app.prices.sources import BROWSER_HEADERS, TIMEOUT_SECONDS, _ssl_context
 
 NSE_SECTOR_URL = "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv"
@@ -61,7 +62,7 @@ class SectorSourceFormatError(Exception):
 
 class NseSectorSource:
     def __init__(self, opener: Any = None):
-        self._opener = opener or urllib.request.urlopen
+        self._opener = opener or urlopen
         self._url = NSE_SECTOR_URL
 
     def fetch(self) -> bytes:

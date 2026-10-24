@@ -47,6 +47,7 @@ from app.db.privacy import LegalHoldError
 from app.db.repository import DuplicateInvestorCodeError
 from app.engine.action_replay import CorporateActionEvidenceError
 from app.engine.errors import MissingPriceError, NegativeHoldingError, UnparseableRowError
+from app.exchange_reference import InvalidExchangeReference, MissingExchangeReference
 from app.ingest.action_source import (
     ActionBatchFailed,
     ActionConflictError,
@@ -118,6 +119,33 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.exception_handler(MissingExchangeReference)
+async def missing_exchange_reference_handler(request: Request, exc: MissingExchangeReference):
+    logger.warning(
+        "request_missing_reference",
+        extra={"path": request.url.path, "request_key": exc.request_key},
+    )
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": {
+                "code": exc.reason_code,
+                "message": str(exc),
+                "request_key": exc.request_key,
+            }
+        },
+    )
+
+
+@app.exception_handler(InvalidExchangeReference)
+async def invalid_exchange_reference_handler(request: Request, exc: InvalidExchangeReference):
+    logger.error("request_invalid_reference", extra={"path": request.url.path}, exc_info=exc)
+    return JSONResponse(
+        status_code=503, content={"detail": {"code": exc.reason_code, "message": str(exc)}}
+    )
+
 
 
 class CatchAllExceptionMiddleware:

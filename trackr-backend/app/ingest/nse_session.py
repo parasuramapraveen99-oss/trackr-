@@ -2,12 +2,15 @@
 
 import urllib.request
 
+from app.exchange_reference import ReferenceOpener
 from app.prices.sources import _ssl_context
 
 
-def cookie_session() -> urllib.request.OpenerDirector:
+def cookie_session() -> ReferenceOpener:
     # Installing a global opener would share cookies between unrelated feed runs.
-    return urllib.request.build_opener(
-        urllib.request.HTTPSHandler(context=_ssl_context()),
-        urllib.request.HTTPCookieProcessor(),
+    return ReferenceOpener(
+        urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=_ssl_context()),
+            urllib.request.HTTPCookieProcessor(),
+        )
     )

@@ -21,6 +21,13 @@ from app.db.index_levels import weekend_sessions
 from app.db.isin_change_circulars import refresh_isin_change_feed
 from app.db.security_alias import promote_draft_aliases
 from app.engine.corporate_actions import Verification, check_price_consistency
+from app.exchange_reference import (
+    InvalidExchangeReference,
+    MissingExchangeReference,
+    collecting,
+    reference_context,
+    reference_task,
+)
 from app.ingest.action_source import ActionSourceError
 from app.ingest.corporate_action_feed import (
     NSE_CORP_ACTIONS_URL,
@@ -429,7 +436,8 @@ def process(conn, kind: str, key: str, payload: dict, settings: Settings) -> dic
                 # or bypass its source-outage backoff.
                 cur.execute(
                     """UPDATE reference_sync_task SET state='pending', available_at=now(),
-                           payload=%s::jsonb WHERE kind='GAP' AND task_key=%s AND state='done'""",
+                           payload=%s::jsonb WHERE kind='GAP' AND task_key=%s AND state='done'
+                           AND NOT (payload ? 'reference_missing')""",
                     (json.dumps(gap_payload), payload["account_id"]),
                 )
         with conn.cursor() as cur:
@@ -440,15 +448,38 @@ def process(conn, kind: str, key: str, payload: dict, settings: Settings) -> dic
     elif kind == "GAP":
         from app.db.gap_resolution import resolve_account_gaps
 
-        remaining = payload.get("research_isins")
+        remaining = payload.get("research_isins") if collecting() else None
+        if not collecting():
+            # Old deployments checkpointed live research one security at a time.
+            # Hosted work now checks the whole account once against stored evidence.
+            payload.pop("research_isins", None)
         researching = remaining is not None
+        payload["rights_reference_signature"] = _rights_reference_signature(
+            conn, payload["account_id"]
+        )
         result = resolve_account_gaps(
             conn,
             payload["account_id"],
-            researcher=_researcher(settings),
+            researcher=_researcher(settings) if collecting() else None,
             defer_research=not researching,
             research_isins=remaining[:1] if researching else None,
         )
+        payload["gap_result"] = result
+        missing = [
+            row
+            for row in result["open"]
+            if row.get("reason_code")
+            in {
+                "REFERENCE_DATA_MISSING",
+                "REFERENCE_DATA_INVALID",
+                "REFERENCE_DATA_INSUFFICIENT",
+                "REFERENCE_DATA_AMBIGUOUS",
+            }
+        ]
+        if missing:
+            payload["reference_missing"] = missing
+        else:
+            payload.pop("reference_missing", None)
         if result["resolved"]:
             # New ledger rows: replay so snapshots and every derived figure catch up.
             # Terminates: a replay re-queues GAP, which resolves nothing new the second
@@ -684,6 +715,17 @@ def _process_snapshot_claim(conn, rows):
                     points.append((investor, advised, point))
                     payload.pop("unrepairable", None)
                 except (MissingPriceError, NegativeHoldingError) as exc:
+                    if isinstance(exc, MissingPriceError):
+                        payload["reference_missing"] = [
+                            {
+                                "reason_code": "PRICE_DATA_MISSING",
+                                "as_of": on.isoformat(),
+                                "isins": list(exc.isins),
+                                "reason": str(exc),
+                            }
+                        ]
+                        done.append({"key": key, "payload": payload})
+                        continue
                     if not payload.get("repair"):
                         failed.append((key, attempts, exc))
                         continue
@@ -697,8 +739,12 @@ def _process_snapshot_claim(conn, rows):
         if done:
             conn.execute(
                 """UPDATE reference_sync_task t SET state='done',payload=item->'payload',
-                   last_error=NULL,updated_at=clock_timestamp(),attempts=0,
-                   last_success_at=clock_timestamp(),available_at=now()+interval '1 second'
+                   last_error=CASE WHEN item->'payload' ? 'reference_missing'
+                     THEN 'PRICE_DATA_MISSING' ELSE NULL END,
+                   updated_at=clock_timestamp(),attempts=0,
+                   last_success_at=CASE WHEN item->'payload' ? 'reference_missing'
+                     THEN last_success_at ELSE clock_timestamp() END,
+                   available_at=now()+interval '1 second'
                    FROM jsonb_array_elements(%s::jsonb) item
                    WHERE t.kind='SNAPSHOT' AND t.task_key=item->>'key'""",
                 (json.dumps(done),),
@@ -711,7 +757,7 @@ def _process_snapshot_claim(conn, rows):
 
 #: Task kinds that call nseindia.com/api. Left pending on a deployment with
 #: ``nse_api_enabled`` false, for ``app.nse_worker`` to run where NSE is reachable.
-NSE_TASK_KINDS = ("NSE", "GAP")
+NSE_TASK_KINDS = ("NSE",)
 
 
 def run_once(
@@ -723,7 +769,67 @@ def run_once(
     from app.db.connection import session_connection
 
     with session_connection(conn, settings) as direct:
-        return _run_once(direct, settings, limit, time_budget_seconds)
+        with reference_context(direct) as references:
+            try:
+                result = _run_once(direct, settings, limit, time_budget_seconds)
+            except Exception:
+                direct.rollback()
+                references.persist()
+                direct.commit()
+                raise
+            references.persist()
+            direct.commit()
+            return result
+
+
+_RIGHTS_SIGNATURE = """SELECT md5(COALESCE(string_agg(DISTINCT o.payload_sha256, ','
+                             ORDER BY o.payload_sha256), ''))
+    FROM corporate_action_observation o
+    WHERE o.provider='NSE' AND o.classification='RIGHTS' AND EXISTS (
+        SELECT 1 FROM transaction t WHERE t.account_id::text={account}
+        AND left(t.isin,7)=left(o.isin,7))"""
+
+
+def _rights_reference_signature(conn, account):
+    # Actual payload identity, never fetched_at: unchanged daily observations cannot
+    # restart a stopped account. Issuer prefixes discover candidates only.
+    with conn.cursor() as cur:
+        cur.execute(_RIGHTS_SIGNATURE.format(account="%s"), (account,))
+        return cur.fetchone()[0]
+
+
+def _wake_changed_gap_rights(conn):
+    # Raw HTTP dependencies cannot see the addition of the first normalized rights
+    # notice. Detect that addition/correction for affected accounts in one SQL request.
+    signature = _RIGHTS_SIGNATURE.format(account="g.task_key")
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE reference_sync_task g SET state='pending',available_at=clock_timestamp(),"
+            "last_error=NULL,payload=payload-'reference_missing' "
+            "WHERE kind='GAP' AND state='done' AND payload ? 'reference_missing' "
+            "AND payload ? 'rights_reference_signature' "
+            f"AND payload->>'rights_reference_signature' IS DISTINCT FROM ({signature})"
+        )
+
+
+def _replay_affected_accounts(conn, kind, key):
+    """Reference discovery can select broadly within an issuer, never across all users."""
+    if kind == "ACTION":
+        row = conn.execute(
+            "SELECT isin,resulting_isin FROM corporate_action WHERE id=%s", (key,)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT new_isin FROM isin_change_circular WHERE circular_number=%s", (key,)
+        ).fetchone()
+    identifiers = [isin for isin in (row or ()) if isin]
+    if identifiers:
+        conn.execute(
+            "UPDATE reference_sync_task SET state='pending',available_at=clock_timestamp() "
+            "WHERE kind='REPLAY' AND task_key IN (SELECT DISTINCT account_id::text "
+            "FROM transaction WHERE left(isin,7)=ANY(%s))",
+            (sorted({isin[:7] for isin in identifiers}),),
+        )
 
 
 def _run_once(conn, settings, limit=None, time_budget_seconds=None):
@@ -753,6 +859,7 @@ def _run_once(conn, settings, limit=None, time_budget_seconds=None):
         queue.schedule(conn)
         identity.schedule_identity(conn)
         _schedule_actions(conn)
+        _wake_changed_gap_rights(conn)
         conn.commit()
         timings["scheduling"] = (time.monotonic() - began) * 1000
         preparing = time.monotonic()
@@ -874,33 +981,55 @@ def _run_once(conn, settings, limit=None, time_budget_seconds=None):
                         (time.monotonic() - started) * 1000,
                     )
                     continue
-                checkpoint = process(conn, kind, key, payload, settings)
+                with reference_task(kind, key):
+                    checkpoint = process(conn, kind, key, payload, settings)
                 with conn.cursor() as cur:
                     cur.execute(
                         """UPDATE reference_sync_task SET state=%s, payload=%s::jsonb,
-                           last_error=NULL, updated_at=now(), attempts=0,
+                           last_error=%s, updated_at=now(), attempts=0,
                            last_success_at=CASE WHEN %s THEN now() ELSE last_success_at END,
                            available_at=now()+interval '1 second' WHERE kind=%s AND task_key=%s""",
                         (
                             "pending" if checkpoint else "done",
                             json.dumps(checkpoint or payload),
-                            checkpoint is None,
+                            "REFERENCE_DATA_MISSING" if payload.get("reference_missing") else None,
+                            checkpoint is None and not payload.get("reference_missing"),
                             kind,
                             key,
                         ),
                     )
                     if kind in ("ACTION", "IDENTITY") and checkpoint is None:
-                        # Apply newly verified facts to accounts already imported.
-                        cur.execute(
-                            "UPDATE reference_sync_task SET state='pending',available_at=now() "
-                            "WHERE kind='REPLAY'"
-                        )
+                        _replay_affected_accounts(conn, kind, key)
                 conn.commit()
                 if kind in ("REPLAY", "GAP", "ACTION", "IDENTITY", "NSE"):
                     from app.db.snapshot_batch import invalidate_batch
 
                     invalidate_batch()
                 processed += 1
+            except (MissingExchangeReference, InvalidExchangeReference) as exc:
+                conn.rollback()
+                payload["reference_missing"] = [
+                    {
+                        "reason_code": exc.reason_code,
+                        "request_key": getattr(exc, "request_key", None),
+                        "reason": str(exc),
+                    }
+                ]
+                conn.execute(
+                    "UPDATE reference_sync_task SET state='done',payload=%s::jsonb,"
+                    "last_error=%s,updated_at=clock_timestamp() WHERE kind=%s AND task_key=%s",
+                    (json.dumps(payload), str(exc), kind, key),
+                )
+                conn.commit()
+                waiting += 1
+                logger.warning(
+                    "reference_task_missing_database_evidence",
+                    extra={
+                        "kind": kind,
+                        "task_key": key,
+                        "request_key": getattr(exc, "request_key", None),
+                    },
+                )
             except ResearchDeferred as exc:
                 # Not a failure: the structured fixes are committed and research resumes
                 # once the quota can take it. A fixed floor, not exponential backoff from
@@ -1073,7 +1202,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--once", action="store_true")
     parser.add_argument(
-        "--probe-isin", help="Check live free sources for this ISIN; no database writes"
+        "--probe-isin", help="Check stored source evidence and record misses; no exchange network"
     )
     args = parser.parse_args()
     if args.probe_isin:
@@ -1097,19 +1226,24 @@ def main() -> None:
                 )
             },
         }
-        for name, probe in probes.items():
-            try:
-                print(json.dumps({"source": name, "ok": True, **probe()}), flush=True)
-            except Exception as exc:
-                failed = True
-                print(json.dumps({"source": name, "ok": False, "error": str(exc)}), flush=True)
+        from app.exchange_reference import reference_transaction
+
+        with connect(get_settings().database_url) as conn, reference_transaction(conn):
+            for name, probe in probes.items():
+                try:
+                    print(json.dumps({"source": name, "ok": True, **probe()}), flush=True)
+                except Exception as exc:
+                    failed = True
+                    print(json.dumps({"source": name, "ok": False, "error": str(exc)}), flush=True)
         raise SystemExit(1 if failed else 0)
+    from app.exchange_reference import reference_transaction
+
     settings = get_settings()
     logging.basicConfig(level=logging.INFO)
     while True:
         busy = False
         try:
-            with connect(settings.database_url) as conn:
+            with connect(settings.database_url) as conn, reference_transaction(conn):
                 result = run_once(
                     conn,
                     settings,

@@ -27,6 +27,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from app.exchange_reference import needs_warmup
 from app.ingest.corporate_action_feed import BROWSER_HEADERS, NSE_HOMEPAGE_URL
 from app.ingest.nse_session import cookie_session
 
@@ -174,7 +175,8 @@ class NseFinancialsSource:
     def _get(self, url: str, referer: str) -> bytes:
         if not self._warm:
             warmup = urllib.request.Request(NSE_HOMEPAGE_URL, headers=BROWSER_HEADERS)
-            self._opener(warmup, timeout=TIMEOUT_SECONDS).close()
+            if needs_warmup(self._opener):
+                self._opener(warmup, timeout=TIMEOUT_SECONDS).close()
             self._warm = True
         request = urllib.request.Request(url, headers={**BROWSER_HEADERS, "Referer": referer})
         with self._opener(request, timeout=TIMEOUT_SECONDS) as response:

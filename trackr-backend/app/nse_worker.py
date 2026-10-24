@@ -33,6 +33,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from app.config import Settings
+from app.exchange_reference import collect_requests, reference_context
 
 logger = logging.getLogger("nse_worker")
 
@@ -64,12 +65,14 @@ def reopen(conn: Any) -> None:
         cur.execute(
             "UPDATE reference_sync_task SET available_at = now() "
             "WHERE kind = ANY(%s) AND state IN ('pending','retry')",
-            (list(NSE_TASK_KINDS),),
+            (list({*NSE_TASK_KINDS, "GAP"}),),
         )
     conn.commit()
 
 
-def daily_feeds(conn: Any, settings: Settings, days: int) -> dict[str, Any]:
+def daily_feeds(
+    conn: Any, settings: Settings, days: int, *, include_financials: bool = True
+) -> dict[str, Any]:
     from app.db import exchange_financials
     from app.db.dividend_reconcile import reconcile_pending_dividends
     from app.db.prices import held_isins
@@ -98,6 +101,10 @@ def daily_feeds(conn: Any, settings: Settings, days: int) -> dict[str, Any]:
             ),
         ),
     }
+    if not include_financials:
+        # The comprehensive daily runner gives this independent, slower source its
+        # own bounded stage after portfolio history has had a turn.
+        steps.pop("exchange_financials")
     out: dict[str, Any] = {}
     for name, step in steps.items():
         try:
@@ -119,7 +126,7 @@ def drain(connect: Callable[[], Any], settings: Settings, max_minutes: float) ->
     caught mid-run stays 'running' and is reset to pending by the next batch."""
     import psycopg
 
-    from app.reference_worker import run_once
+    from app.reference_worker import ReferenceBatchFailed, run_once
 
     deadline = time.monotonic() + max_minutes * 60
     totals = {"processed": 0, "failed": 0, "waiting": 0}
@@ -131,7 +138,17 @@ def drain(connect: Callable[[], Any], settings: Settings, max_minutes: float) ->
                 # Every batch, not once per run: a deployment still calling NSE (its
                 # NSE_API_ENABLED not yet false) re-trips the breaker within minutes.
                 reopen(conn)
-                result = run_once(conn, settings, limit=500, time_budget_seconds=min(240.0, left))
+                try:
+                    result = run_once(
+                        conn, settings, limit=500, time_budget_seconds=min(240.0, left)
+                    )
+                except ReferenceBatchFailed as exc:
+                    # Individual failures already have durable outcomes/backoff. Keep
+                    # unrelated source and account work moving during this daily run.
+                    result = exc.result
+                    logger.warning(
+                        "collector_reference_batch_partial", extra={"failed": result.get("failed")}
+                    )
         except psycopg.OperationalError as exc:
             reconnects += 1
             print(f"  connection lost ({str(exc).splitlines()[0]}); reconnecting", flush=True)
@@ -177,19 +194,37 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING)
 
     from app.db.connection import connect
+    from app.exchange_reference import reference_transaction
 
     settings = load_settings(args.env_file)
-    with connect(settings.database_url) as conn:
-        print("1/3 re-opening NSE work shut by the blocked deployment", flush=True)
-        reopen(conn)
-        print(f"2/3 daily NSE feeds, last {args.days} days", flush=True)
-        daily_feeds(conn, settings, args.days)
-    print(f"3/3 reference queue (up to {args.max_minutes:g} min)", flush=True)
-    totals = drain(lambda: connect(settings.database_url), settings, args.max_minutes)
+    with reference_context(None, collect=True):
+        with connect(settings.database_url) as conn, reference_transaction(conn):
+            print("1/4 collecting public reference requests left by hosted work", flush=True)
+            collected = collect_requests(conn)
+            print(f"  collection: {collected}", flush=True)
+            reopen(conn)
+            print(f"2/4 daily exchange feeds, last {args.days} days", flush=True)
+            feeds = daily_feeds(conn, settings, args.days)
+        print(f"3/4 reference queue (up to {args.max_minutes:g} min)", flush=True)
+        totals = drain(lambda: connect(settings.database_url), settings, args.max_minutes)
+        # Prices, historical snapshot inputs, TRI and F&O are shared exchange facts too.
+        # The same bounded cycle records its real source bytes in the archive.
+        from app.post_import import run_cycle
+
+        print("4/4 prices, F&O and snapshot catch-up", flush=True)
+        with connect(settings.database_url) as conn, reference_transaction(conn):
+            cycle = run_cycle(conn, settings, include_sectors=True)
+            print(f"  cycle: {cycle}", flush=True)
     print(f"done: {totals}")
-    with connect(settings.database_url) as conn:
+    with connect(settings.database_url) as conn, reference_transaction(conn):
         summary(conn)
-    return 0
+    return (
+        1
+        if collected["failed"]
+        or totals.get("failed")
+        or any("error" in step for step in feeds.values())
+        else 0
+    )
 
 
 if __name__ == "__main__":

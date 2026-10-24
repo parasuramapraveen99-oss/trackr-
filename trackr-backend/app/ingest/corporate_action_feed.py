@@ -39,6 +39,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from app.ai.jev import JevResponseError, JevUnavailable
 from app.engine.corporate_actions import CorpActionType
+from app.exchange_reference import needs_warmup
 from app.ingest.action_source import ActionSourceError
 from app.ingest.nse_session import cookie_session
 from app.prices.sources import BROWSER_HEADERS, TIMEOUT_SECONDS
@@ -87,7 +88,8 @@ class NseCorporateActionFeedSource:
         # the warm-up response's Set-Cookie headers for the API request.
         try:
             warmup = urllib.request.Request(NSE_HOMEPAGE_URL, headers=BROWSER_HEADERS)
-            self._opener(warmup, timeout=TIMEOUT_SECONDS).close()
+            if needs_warmup(self._opener):
+                self._opener(warmup, timeout=TIMEOUT_SECONDS).close()
 
             request = urllib.request.Request(
                 NSE_CORP_ACTIONS_URL.format(start=start, end=end),

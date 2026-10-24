@@ -75,6 +75,7 @@ from app.engine.xirr import (
     period_warning,
     years_before,
 )
+from app.exchange_reference import MissingExchangeReference
 from app.prices.alerts import Notifier, get_notifier
 from app.prices.current import resolve_current_prices
 from app.prices.history import backfill_price_history, store_backfilled_days
@@ -362,7 +363,10 @@ def _benchmark(
     _reject_unsourced_benchmark(name)
     request_id = getattr(getattr(request, "state", None), "request_id", None)
     dates_needed = required_index_dates(transactions, as_of)
-    levels = _index_levels(connection, name, dates_needed, investor_id, request_id)
+    try:
+        levels = _index_levels(connection, name, dates_needed, investor_id, request_id)
+    except MissingExchangeReference as exc:
+        return {"name": name, "reason_code": exc.reason_code, "warning": str(exc)}
     if levels is None:
         return None
 
@@ -625,6 +629,7 @@ def _snapshot_row(snapshot: Snapshot) -> dict[str, Any]:
         "market_value": money(snapshot.market_value),
         "unrealised": money(snapshot.unrealised),
         "realised_to_date": money(snapshot.realised_to_date),
+        "excluded_isins": list(snapshot.excluded_isins),
     }
 
 
@@ -702,10 +707,19 @@ def snapshot_status(
             (investor_id, investor_id),
         )
         pending = bool(cur.fetchone()[0])
+        cur.execute(
+            "SELECT DISTINCT t.kind,t.payload->'reference_missing' "
+            "FROM reference_sync_task t JOIN reference_sync_dependency d USING(kind,task_key) "
+            "JOIN account a ON a.id=d.account_id WHERE a.investor_id=%s "
+            "AND t.kind IN ('REPLAY','GAP','SNAPSHOT') AND t.payload ? 'reference_missing'",
+            (investor_id,),
+        )
+        missing = [{"kind": kind, "details": details} for kind, details in cur.fetchall()]
     return {
         "version": f"{count}:{computed.isoformat() if computed else ''}",
         "pending": pending,
         "points": count,
+        "missing_reference": missing,
     }
 
 

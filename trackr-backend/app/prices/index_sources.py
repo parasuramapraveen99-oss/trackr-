@@ -35,6 +35,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.exchange_reference import urlopen
 from app.prices.sources import BROWSER_HEADERS, TIMEOUT_SECONDS, _ssl_context
 
 #: The ASP.NET ``[WebMethod]`` behind niftyindices' own historical-data report.
@@ -143,7 +144,7 @@ class NiftyTriSource:
     """
 
     def __init__(self, opener: Any = None, index: TriIndex = NIFTY_50_TRI):
-        self._opener = opener or urllib.request.urlopen
+        self._opener = opener or urlopen
         self.index = index
 
     @property
