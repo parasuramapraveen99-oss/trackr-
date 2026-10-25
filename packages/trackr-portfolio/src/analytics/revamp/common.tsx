@@ -187,7 +187,7 @@ export const RESPONSIVE_CSS = `
 @media (max-width: 380px) { .rv-kpis { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 900px) { .rv-grid > section, .rv-factor-cards { grid-column: span 12 !important; } }
 .rv-table { width: 100%; border-collapse: collapse; font: 500 12.5px var(--font-body); font-variant-numeric: tabular-nums; }
-.rv-table th { text-align: left; font: 600 11px var(--font-label); color: var(--text-tertiary); padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.rv-table th { text-align: left; font: 600 13px var(--font-label); text-transform: uppercase; letter-spacing: .04em; color: var(--text-primary); padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .rv-table td { padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .rv-table td.num, .rv-table th.num { text-align: right; }
 .rv-scroll { overflow-x: auto; }

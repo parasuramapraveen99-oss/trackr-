@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { api, ApiError, useAuth, useFetch } from "@trackr/core";
 import type { AccountOut, DeclaredHoldingIn } from "@trackr/core";
-import { Banner, Button, Card, Field, Input } from "@trackr/ui";
+import { Banner, Button, Card, Field, Input, ledgerHead } from "@trackr/ui";
 import { NoInvestorState } from "../widgets/PageState";
 import type { PortfolioScreenProps } from "../chrome";
 import { readEvidenceCsv } from "../reconciliation/evidence";
@@ -207,7 +207,7 @@ function ReconcileForm({ investorId, token }: { investorId: string; token: strin
         : `Matched records: ${report.matched} · Missing from ledger: ${report.missing_from_ledger} · Missing from evidence: ${report.missing_from_evidence}`}</p>
       {report.rows.length === 0 && <p>No rows compared. This does not verify historical activity.</p>}
       <div style={{ overflowX: "auto" }}><table><thead><tr>
-        {(report.mode === "HOLDINGS" ? ["Status", "ISIN", "Trackr+", "Statement", "Difference", "Details"] : ["Status", "ISIN", "Date", "Type", "Quantity", "Price", "Charges", "STT", "Count"]).map(h => <th key={h} style={{ padding: 8, textAlign: "left" }}>{h}</th>)}
+        {(report.mode === "HOLDINGS" ? ["Status", "ISIN", "Trackr+", "Statement", "Difference", "Details"] : ["Status", "ISIN", "Date", "Type", "Quantity", "Price", "Charges", "STT", "Count"]).map(h => <th key={h} style={{ ...ledgerHead, padding: 8, textAlign: "left" }}>{h}</th>)}
       </tr></thead><tbody>{report.rows.map((r, i) => <tr key={i}>
         {(report.mode === "HOLDINGS" ? [r.status, r.isin, r.computed_qty, r.declared_qty, r.difference,
           [r.likely_cause, r.error_date, r.deficit ? `Shortfall: ${r.deficit}` : ""].filter(Boolean).join(" · ")]

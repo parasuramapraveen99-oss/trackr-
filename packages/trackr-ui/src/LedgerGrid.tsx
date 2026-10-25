@@ -136,7 +136,7 @@ export function LedgerGrid<R extends LedgerRow>({
           <span
             key={`h-${c.key}`}
             role={stickyHeader ? "columnheader" : undefined}
-            style={{ ...ledgerHead, paddingBottom: 8, textAlign: c.align || "left", alignSelf: "end", ...(stickyHeader ? { position: "sticky", top: 0, zIndex: 2, background: "var(--surface)", boxShadow: "0 1px 0 var(--border-strong)", paddingBlock: 14, fontSize: 13, fontWeight: 600, letterSpacing: ".04em", color: "var(--text-primary)", alignSelf: "stretch", display: "flex", alignItems: "center", justifyContent: c.align === "right" ? "flex-end" : "flex-start" } : null) }}
+            style={{ ...ledgerHead, paddingBottom: 8, textAlign: c.align || "left", alignSelf: "end", ...(stickyHeader ? { position: "sticky", top: 0, zIndex: 2, background: "var(--surface)", boxShadow: "0 1px 0 var(--border-strong)", paddingBlock: 14, alignSelf: "stretch", display: "flex", alignItems: "center", justifyContent: c.align === "right" ? "flex-end" : "flex-start" } : null) }}
           >
             {c.label}
           </span>

@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
-import { CHART_COLORS } from "./tokens";
+import { CHART_COLORS, ledgerHead } from "./tokens";
+import { PLOT_FRAME } from "./VintageLinePlot";
 
 /**
  * The loading placeholders.
@@ -150,13 +151,7 @@ export function LedgerGridSkeleton({
           <span
             key={`h-${c.key}`}
             style={{
-              fontFamily: "var(--font-label)",
-              fontSize: 9.5,
-              fontWeight: 600,
-              textTransform: "uppercase",
-              letterSpacing: ".14em",
-              color: "var(--ledger-ink-soft)",
-              whiteSpace: "nowrap",
+              ...ledgerHead,
               paddingBottom: 8,
               textAlign: c.align || "left",
               alignSelf: "end",
@@ -223,11 +218,7 @@ function ItemRow({
  * placeholder is replaced by lines.
  */
 export function LinePlotSkeleton({ height = 300 }: { height?: number }) {
-  const W = 860;
-  const PL = 46;
-  const PR = 108;
-  const PT = 18;
-  const PB = 34;
+  const { W, PL, PR, PT, PB } = PLOT_FRAME;
   const rows = 5;
   const cols = 7;
 
@@ -252,7 +243,7 @@ export function LinePlotSkeleton({ height = 300 }: { height?: number }) {
               opacity={0.11}
               strokeDasharray="1 3"
             />
-            <rect x={PL - 34} y={y - 5} width="25" height="10" fill="var(--skeleton)" rx="2" />
+            <rect x={0} y={y - 5} width="25" height="10" fill="var(--skeleton)" rx="2" />
           </g>
         );
       })}
@@ -260,18 +251,7 @@ export function LinePlotSkeleton({ height = 300 }: { height?: number }) {
       {Array.from({ length: cols }, (_, i) => {
         const x = PL + (i * (W - PL - PR)) / (cols - 1);
         return (
-          <g key={i}>
-            <line
-              x1={x}
-              y1={height - PB}
-              x2={x}
-              y2={height - PB + 5}
-              stroke="var(--ledger-ink)"
-              strokeWidth="0.7"
-              opacity=".55"
-            />
-            <rect x={x - 16} y={height - PB + 10} width="32" height="9" fill="var(--skeleton)" rx="2" />
-          </g>
+          <rect key={i} x={i === 0 ? x : i === cols - 1 ? x - 32 : x - 16} y={height - PB + 10} width="32" height="9" fill="var(--skeleton)" rx="2" />
         );
       })}
       <g className="trackr-skeleton" style={{ background: "none" }}>

@@ -143,13 +143,20 @@ export const slipFootValue = (neg?: boolean): CSSProperties => ({
 
 /* ---- The ruled grid: header small-caps, body figures ---- */
 
+/**
+ * Every table's column names -- the ledger grids, the analytics tables, holding detail.
+ *
+ * 13px in primary ink, the size the Holdings screen's headers were already set at. The
+ * old 9.5px soft-ink caps were the faintest text on a card and read as a footnote above
+ * the figures rather than as the names of the columns.
+ */
 export const ledgerHead: CSSProperties = {
   fontFamily: ARCHIVO,
-  fontSize: 9.5,
+  fontSize: 13,
   fontWeight: 600,
   textTransform: "uppercase",
-  letterSpacing: ".14em",
-  color: "var(--ledger-ink-soft)",
+  letterSpacing: ".04em",
+  color: "var(--text-primary)",
   whiteSpace: "nowrap",
 };
 

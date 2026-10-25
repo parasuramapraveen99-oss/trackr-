@@ -22,7 +22,7 @@ export interface PlotSeries {
   opacity?: number;
   marker?: "dot" | "square";
   labelColor?: string;
-  /** Fill from this line down to the axis with a fading gradient of its own colour.
+  /** Fill from this line down to the axis with a flat 10% wash of its own colour.
    *  Opt-in, and per run: a snapshot gap breaks the fill exactly as it breaks the line,
    *  so the shading never spans a value the ledger does not have. */
   area?: boolean;
@@ -42,6 +42,14 @@ export interface PlotSeries {
  * picture, which is a different and much worse fix.
  */
 const MAX_X_LABELS = 9;
+
+/**
+ * The plot frame in viewBox units, shared with `LinePlotSkeleton` so the loading frame
+ * and the real plot cannot drift apart and resize the card when the series arrive.
+ *
+ * The right margin holds the in-place series labels.
+ */
+export const PLOT_FRAME = { W: 860, PL: 44, PR: 108, PT: 18, PB: 34 } as const;
 
 /**
  * The engraved value plot — portfolio value against invested cost and a rebased
@@ -102,14 +110,10 @@ export function VintageLinePlot({
   /** Horizontal gridlines: the engraved dotted rule, or a faint solid rule. */
   gridStyle?: "dotted" | "solid";
 }) {
-  // Gradient ids must be unique per plot on a page; two charts sharing one id would
+  // Pattern ids must be unique per plot on a page; two charts sharing one id would
   // paint each other's fills.
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
-  const W = 860;
-  const PL = 46;
-  const PR = 108;
-  const PT = 18;
-  const PB = 34;
+  const { W, PL, PR, PT, PB } = PLOT_FRAME;
 
   const drawable = series.flatMap((s) => s.points).filter((v): v is string => v != null);
   if (drawable.length === 0 || labels.length < 2) return null;
@@ -126,10 +130,11 @@ export function VintageLinePlot({
   const scale = decimalScale(extent);
   const ticks = scale.ticks;
 
-  // Inner breathing room: the first and last points sit a little inside the axes instead
-  // of on the corner, where they crowded the bottom y label and the first date.
+  // The first point sits ON the plot's left edge, so the shading meets the axis in the
+  // corner; the y labels are kept clear of it by the left margin, not by insetting the
+  // data. The last point keeps a little room before the in-place series labels.
   const XPAD = 14;
-  const x = (i: number) => PL + XPAD + (i * (W - PL - PR - 2 * XPAD)) / (labels.length - 1);
+  const x = (i: number) => PL + (i * (W - PL - PR - XPAD)) / (labels.length - 1);
 
   /**
    * Exact value -> a y PIXEL. Null for anything the scale cannot place.
@@ -215,15 +220,7 @@ export function VintageLinePlot({
       aria-label={series.map((s) => s.label).join(", ")}
     >
       <defs>
-        {series.map((s, k) =>
-          s.area ? (
-            <linearGradient key={s.label} id={`${uid}-area-${k}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={s.color} stopOpacity={0.32} />
-              <stop offset="100%" stopColor={s.color} stopOpacity={0} />
-            </linearGradient>
-          ) : null
-        )}
-        <pattern id="ledger-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <pattern id={`${uid}-hatch`} width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
           <line x1="0" y1="0" x2="0" y2="6" stroke="var(--ledger-ink)" strokeWidth="0.6" opacity="0.15" />
         </pattern>
       </defs>
@@ -244,9 +241,9 @@ export function VintageLinePlot({
             strokeDasharray={gridStyle === "solid" ? undefined : "1 3"}
           />
           <text
-            x={PL - 9}
-            y={ty + 3.5}
-            textAnchor="end"
+            x={0}
+            y={ty + 4}
+            textAnchor="start"
             style={{ fontFamily: "var(--font-slip)", fontSize: 13, fill: "var(--ledger-ink)", opacity: 0.6 }}
           >
             {/* The EXACT tick string, already at the step's own precision. */}
@@ -257,10 +254,12 @@ export function VintageLinePlot({
       })}
 
       {band.map((dPath, i) => (
-        <path key={i} d={dPath} fill="url(#ledger-hatch)" />
+        <path key={i} d={dPath} fill={`url(#${uid}-hatch)`} />
       ))}
 
-      {series.map((s, k) =>
+      {/* A flat wash, not a fade: a gradient to nothing never reached the axis, so the
+          shading looked cut off above the rule it is measured from. */}
+      {series.map((s) =>
         s.area
           ? runs(s.points)
               .filter((r) => r.length > 1)
@@ -270,7 +269,7 @@ export function VintageLinePlot({
                   .map((i) => `${x(i).toFixed(1)} ${(y(s.points[i]) as number).toFixed(1)}`)
                   .join("L");
                 const d = `M${x(r[0]!).toFixed(1)} ${floor}L${top}L${x(r[r.length - 1]!).toFixed(1)} ${floor}Z`;
-                return <path key={`${s.label}-area-${j}`} d={d} fill={`url(#${uid}-area-${k})`} />;
+                return <path key={`${s.label}-area-${j}`} d={d} fill={s.color} opacity={0.1} />;
               })
           : null
       )}
@@ -303,16 +302,14 @@ export function VintageLinePlot({
         </g>
       )}
 
-      {/* One soft rule and no tick marks. The full-ink line with a tick under every date was
-          the heaviest stroke on the chart -- near-white on the dark theme -- and out-shouted
-          the series it sits under. The labels alone place the dates. */}
-      <line x1={PL} y1={height - PB} x2={W - PR} y2={height - PB} stroke="var(--ledger-ink-faint)" strokeWidth="1" />
+      {/* One ruled axis and no tick marks: the labels alone place the dates. */}
+      <line x1={PL} y1={height - PB} x2={W - PR} y2={height - PB} stroke="var(--ledger-ink)" strokeWidth="1" />
       {xTicks.map(({ i, text }) => (
         <g key={text + i}>
           <text
             // The end labels grow inward, so neither runs under the y-axis labels nor
-            // off the right edge; the rest stay centred on their tick.
-            x={i === 0 ? x(i) - XPAD : i === labels.length - 1 ? x(i) + XPAD : x(i)}
+            // off the right edge; the rest stay centred on their date.
+            x={i === labels.length - 1 ? x(i) + XPAD : x(i)}
             y={height - PB + 18}
             textAnchor={i === 0 ? "start" : i === labels.length - 1 ? "end" : "middle"}
             style={{

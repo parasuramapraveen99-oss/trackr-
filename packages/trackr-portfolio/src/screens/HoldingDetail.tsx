@@ -7,6 +7,7 @@ import { useFetch } from "@trackr/core";
 import type { DividendSummaryOut, LotOut, RealisedOut, TransactionOut } from "@trackr/core";
 import { EMPTY_VALUE, formatDate, formatMoney, formatQuantity, signClass } from "@trackr/core";
 import { Card, ErrorState, LoadingState, NoInvestorState } from "../widgets/PageState";
+import { ledgerHead } from "@trackr/ui";
 import { CorporateActionTimeline } from "../widgets/CorporateActionTimeline";
 
 export function HoldingDetailScreen({ chrome }: PortfolioScreenProps) {
@@ -57,11 +58,11 @@ export function HoldingDetailScreen({ chrome }: PortfolioScreenProps) {
         ) : (
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-left text-[11px] uppercase tracking-wide text-navy-400">
-                <th className="py-2 pr-3 font-medium">Open date</th>
-                <th className="py-2 pr-3 font-medium">Holding days</th>
-                <th className="py-2 pr-3 font-medium text-right">Qty open</th>
-                <th className="py-2 font-medium text-right">Cost / unit</th>
+              <tr className="text-left" style={ledgerHead}>
+                <th className="py-2 pr-3">Open date</th>
+                <th className="py-2 pr-3">Holding days</th>
+                <th className="py-2 pr-3 text-right">Qty open</th>
+                <th className="py-2 text-right">Cost / unit</th>
               </tr>
             </thead>
             <tbody>
@@ -95,13 +96,13 @@ export function HoldingDetailScreen({ chrome }: PortfolioScreenProps) {
         ) : (
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-left text-[11px] uppercase tracking-wide text-navy-400">
-                <th className="py-2 pr-3 font-medium">Sell date</th>
-                <th className="py-2 pr-3 font-medium">Term</th>
-                <th className="py-2 pr-3 font-medium text-right">Qty</th>
-                <th className="py-2 pr-3 font-medium text-right">Proceeds</th>
-                <th className="py-2 pr-3 font-medium text-right">Cost</th>
-                <th className="py-2 font-medium text-right">Gain</th>
+              <tr className="text-left" style={ledgerHead}>
+                <th className="py-2 pr-3">Sell date</th>
+                <th className="py-2 pr-3">Term</th>
+                <th className="py-2 pr-3 text-right">Qty</th>
+                <th className="py-2 pr-3 text-right">Proceeds</th>
+                <th className="py-2 pr-3 text-right">Cost</th>
+                <th className="py-2 text-right">Gain</th>
               </tr>
             </thead>
             <tbody>
@@ -133,9 +134,9 @@ export function HoldingDetailScreen({ chrome }: PortfolioScreenProps) {
           <>
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wide text-navy-400">
-                  <th className="py-2 pr-3 font-medium">Financial year</th>
-                  <th className="py-2 font-medium text-right">Amount</th>
+                <tr className="text-left" style={ledgerHead}>
+                  <th className="py-2 pr-3">Financial year</th>
+                  <th className="py-2 text-right">Amount</th>
                 </tr>
               </thead>
               <tbody>
@@ -162,11 +163,11 @@ export function HoldingDetailScreen({ chrome }: PortfolioScreenProps) {
         ) : (
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-left text-[11px] uppercase tracking-wide text-navy-400">
-                <th className="py-2 pr-3 font-medium">Date</th>
-                <th className="py-2 pr-3 font-medium">Type</th>
-                <th className="py-2 pr-3 font-medium text-right">Qty</th>
-                <th className="py-2 font-medium text-right">Price</th>
+              <tr className="text-left" style={ledgerHead}>
+                <th className="py-2 pr-3">Date</th>
+                <th className="py-2 pr-3">Type</th>
+                <th className="py-2 pr-3 text-right">Qty</th>
+                <th className="py-2 text-right">Price</th>
               </tr>
             </thead>
             <tbody>
