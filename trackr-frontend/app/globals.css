@@ -36,50 +36,55 @@
  * The upshot: no screen is left half-migrated. Revamped screens are exact; screens not
  * yet touched are at least coherent.
  * ------------------------------------------------------------------------------- */
+/* The light theme is "Ivory" (owner decision, 25 October 2026): a warm paper page with
+   cream slips standing on it. The page and the surface are deliberately two different
+   values -- on the old all-white set the slips were told apart from the page by their
+   1px ring alone, and the screen read as one flat sheet. Every text and sign colour
+   below is checked at 4.5:1 or better against --page, --surface and --surface-sunken. */
 :root {
   /* ---- Neutral ramp: a warm grey off near-black, not a blue-grey ---- */
   --white: #ffffff;
-  --black: #191918;
+  --black: #1c1a16;
 
-  --ink-900: #2c2c2b;
-  --ink-700: #454440;
-  --ink-600: #5f5d59;
-  --ink-400: #8e8b86;
-  --ink-300: #ada9a3;
-  --ink-200: #c7c6c4;
-  --ink-100: #e3e2e0;
-  --ink-50: #f1f0ee;
+  --ink-900: #24221d;
+  --ink-700: #45413a;
+  --ink-600: #57524a;
+  --ink-400: #8a8475;
+  --ink-300: #aaa391;
+  --ink-200: #cdc5b3;
+  --ink-100: #e5dfd2;
+  --ink-50: #f1ede4;
 
   /* ---- Semantic surfaces ---- */
-  --page: #ffffff;
-  --surface: #ffffff;
-  --surface-raised: #ffffff;
-  --surface-sunken: #f7f7f5;
-  --surface-hover: #f1f0ee;
-  --surface-active: #e3e2e0;
-  --overlay-scrim: rgb(25 25 24 / 0.32);
+  --page: #f4f1e9;
+  --surface: #fffdf9;
+  --surface-raised: #fffdf9;
+  --surface-sunken: #f1ede4;
+  --surface-hover: #f6f2ea;
+  --surface-active: #e9e3d6;
+  --overlay-scrim: rgb(36 34 29 / 0.32);
 
   /* ---- Semantic text ---- */
-  --text-primary: #2c2c2b;
-  --text-secondary: #5f5d59;
-  --text-tertiary: #8e8b86;
-  --text-inverse: #ffffff;
-  --text-link: #2f6fed;
+  --text-primary: #24221d;
+  --text-secondary: #57524a;
+  --text-tertiary: #6b6555;
+  --text-inverse: #fffdf9;
+  --text-link: #2a62d4;
 
   /* ---- Lines ---- */
-  --border: #e3e2e0;
-  --border-strong: #c7c6c4;
-  --border-focus: #2c2c2b;
+  --border: #e5dfd2;
+  --border-strong: #cdc5b3;
+  --border-focus: #24221d;
 
   /* ---- Sign + status ---- */
-  --positive: #1e7a4c;
-  --positive-tint: #e8f3ec;
-  --negative: #b3261e;
-  --negative-tint: #fbeceb;
-  --warning: #a9761c;
-  --warning-tint: #fbf3e3;
-  --info: #2f6fed;
-  --info-tint: #eaf1fe;
+  --positive: #1a7046;
+  --positive-tint: #e6efe4;
+  --negative: #a3301f;
+  --negative-tint: #f7e6df;
+  --warning: #8a5f12;
+  --warning-tint: #f6ecd5;
+  --info: #2a62d4;
+  --info-tint: #e8eefb;
 
   /* ---- Charts: the one place saturated colour is allowed ---- */
   --chart-1: #2f6fed;
@@ -109,8 +114,8 @@
   --chart-mono-5: #c7c6c4;
   --chart-mono-6: #e3e2e0;
 
-  --chart-grid: #e3e2e0;
-  --chart-axis-text: #8e8b86;
+  --chart-grid: #e5dfd2;
+  --chart-axis-text: #6b6555;
 
   /* ---- Allocation ramp — ink to brass. Weight reads as depth, not hue ---- */
   --alloc-1: #2c2c2b;
@@ -126,7 +131,9 @@
   --alloc-8: #d8c193;
   --alloc-9: #e9dcc0;
 
-  --alloc-accent: #a67c31;
+  /* A step darker than --alloc-5: it colours links and the portfolio line, and #a67c31
+     reads at only 3.35:1 on the ivory page. */
+  --alloc-accent: #8a6420;
   --alloc-accent-tint: rgb(207 157 66 / 0.16);
   --alloc-accent-text: #5d4718;
   --alloc-hairline: rgb(166 124 49 / 0.14);
@@ -137,8 +144,8 @@
   --ledger-ink-faint: #6f6858;
   --ledger-ink-negative: #8f2a1c;
   --ledger-ink-positive: #2c6b41;
-  --ledger-rule: #b3ab97;
-  --ledger-chip-text: #ffffff;
+  --ledger-rule: #b8ae96;
+  --ledger-chip-text: #fffdf9;
 
   /* Dividends received — a muted viridian opposite the brass */
   --data-received: #2f5d53;
@@ -220,15 +227,15 @@
   /* ---- Elevation: flat by default; a near-white system gets structure from 1px
           lines, not shadow. Shadow only on things that genuinely float. ---- */
   --shadow-none: none;
-  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.04);
+  --shadow-card: 0 1px 2px rgb(60 48 20 / 0.05);
 
   /* The fill every skeleton placeholder uses -- a shade of the same ink the
    * ruled grid is drawn in, so a loading table reads as the table it will become
    * rather than as a grey foreign object. */
-  --skeleton: #e8e6e0;
+  --skeleton: #ebe5d8;
   /* The ring + lift the KPI slips wear. Card adopts it verbatim so every panel on
    * a screen has one border treatment (see ds/Card.tsx). */
-  --shadow-slip: 0 0 0 1px var(--border), 0 2px 5px rgb(27 26 22 / 0.08);
+  --shadow-slip: 0 0 0 1px var(--border), 0 2px 6px rgb(60 48 20 / 0.07);
   --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.04), 0 8px 24px -8px rgb(0 0 0 / 0.1);
   --shadow-menu: 0 12px 32px -12px rgb(0 0 0 / 0.18);
   --shadow-overlay: 0 20px 40px -16px rgb(0 0 0 / 0.16);
@@ -243,26 +250,26 @@
   --press-scale: 0.97;
 
   /* ---- Legacy Tailwind triplets, repointed at the palette above ---- */
-  --color-navy-900: 44 44 43;
-  --color-navy-700: 69 68 64;
-  --color-navy-600: 95 93 89;
-  --color-navy-400: 142 139 134;
-  --color-navy-100: 227 226 224;
-  --color-navy-50: 241 240 238;
+  --color-navy-900: 36 34 29;
+  --color-navy-700: 69 65 58;
+  --color-navy-600: 87 82 74;
+  --color-navy-400: 107 101 85;
+  --color-navy-100: 229 223 210;
+  --color-navy-50: 241 237 228;
 
-  --color-cream-200: 227 226 224;
-  --color-cream-100: 255 255 255;
-  --color-cream-50: 247 247 245;
+  --color-cream-200: 229 223 210;
+  --color-cream-100: 255 253 249;
+  --color-cream-50: 241 237 228;
 
   --color-brass-600: 93 71 24;
-  --color-brass-500: 166 124 49;
+  --color-brass-500: 138 100 32;
   --color-brass-400: 207 157 66;
-  --color-brass-50: 251 243 227;
+  --color-brass-50: 246 236 213;
 
-  --color-surface: 255 255 255;
-  --color-surface-raised: 255 255 255;
-  --color-positive: 30 122 76;
-  --color-negative: 179 38 30;
+  --color-surface: 255 253 249;
+  --color-surface-raised: 255 253 249;
+  --color-positive: 26 112 70;
+  --color-negative: 163 48 31;
 
   color-scheme: light;
 }

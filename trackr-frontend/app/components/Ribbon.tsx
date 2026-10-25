@@ -10,6 +10,7 @@ import { Icon, IconButton } from "./ds";
 import { PortfolioSwitcher } from "./PortfolioSwitcher";
 import { locate } from "./nav";
 import { SectionMapModal } from "./SectionMapModal";
+import { ThemeToggle } from "./ThemeToggle";
 import { GmailInstructionsModal } from "./GmailInstructionsModal";
 import { useNoticesNeeded } from "./ReferenceSyncBanner";
 import styles from "./Ribbon.module.css";
@@ -162,6 +163,8 @@ export function Ribbon({ pathname }: { pathname: string }) {
 
         <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
           <PortfolioSwitcher open={portfolioOpen} onOpenChange={setPortfolioOpen} blocked={gmailOpen || launcher.open} />
+          {/* Outside `secondaryTool` so it stays on a phone, where the other tools fold away. */}
+          <ThemeToggle />
           <span className={styles.secondaryTool} style={{ position: "relative", display: "inline-flex" }}>
             <IconButton
               name="import"

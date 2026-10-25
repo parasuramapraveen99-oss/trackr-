@@ -6,7 +6,7 @@ import { RANGES } from "@/lib/ranges";
 import { PageHeader } from "../PageHeader";
 import { NAV_GROUPS } from "../nav";
 import {
-  AllocationArcsSkeleton,
+  AllocationDonutSkeleton,
   Card,
   Icon,
   LedgerGrid,
@@ -385,7 +385,7 @@ const PAGES: Record<string, AppPage> = {
         </Card>
 
         <Card title="Portfolio allocation" subtitle={`As on ${SAMPLE.asOf}`}>
-          <AllocationArcsSkeleton size={180} rings={5} />
+          <AllocationDonutSkeleton size={180} thickness={22} rows={5} />
         </Card>
       </>
     ),

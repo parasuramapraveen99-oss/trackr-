@@ -6,7 +6,7 @@
  * an inline distribution marker.
  *
  * All hand-drawn SVG on `var(--chart-*)` / `var(--alloc-*)` tokens, following
- * AllocationArcs and VintageLinePlot rather than reaching for recharts — every token
+ * AllocationDonut and VintageLinePlot rather than reaching for recharts — every token
  * already has a dark-mode value in globals.css, so theming is free and a hardcoded hex
  * would be the one thing that breaks it.
  */

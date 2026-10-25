@@ -42,7 +42,7 @@ export { Field, Input, PasswordInput, Select, CopyField, Checkbox } from "./form
 export { ChartLegend, DonutChart, PieChart, type Slice } from "./charts";
 export { BubbleMenu, SlashMenu, type BubbleItem, type SlashGroup, type SlashItem } from "./editor";
 export { VintageKpi, VintageXirr, type XirrWindow } from "./VintageKpi";
-export { AllocationArcs, type ArcSlice } from "./AllocationArcs";
+export { AllocationDonut, donutColor, type DonutSlice } from "./AllocationDonut";
 export { VintageLinePlot, type PlotSeries } from "./VintageLinePlot";
 export {
   BarSeries,
@@ -56,7 +56,7 @@ export {
   type HeatBand,
 } from "./analytics-charts";
 export {
-  AllocationArcsSkeleton,
+  AllocationDonutSkeleton,
   LedgerGridSkeleton,
   LinePlotSkeleton,
   Skeleton,

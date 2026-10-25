@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react";
-import { ALLOC_RAMP } from "./tokens";
+import { CHART_COLORS } from "./tokens";
 
 /**
  * The loading placeholders.
@@ -289,33 +289,29 @@ export function LinePlotSkeleton({ height = 300 }: { height?: number }) {
 }
 
 /**
- * The allocation rings' frame with unfilled tracks, plus the legend rows beneath.
+ * The allocation donut's frame as an unfilled track, plus the legend rows beneath.
  *
- * The rings are drawn as full grey circles rather than partial arcs: an arc of some
- * arbitrary length would be a made-up allocation, and someone glancing at a loading
- * screen should never be able to read a number off it.
+ * The ring is drawn whole and grey rather than in slices: a slice of some arbitrary
+ * length would be a made-up allocation, and someone glancing at a loading screen should
+ * never be able to read a number off it. Same geometry as `AllocationDonut`, so the card
+ * does not resize when the figures land.
  */
-export function AllocationArcsSkeleton({ size = 216, rings = 5 }: { size?: number; rings?: number }) {
+export function AllocationDonutSkeleton({
+  size = 216,
+  thickness = 26,
+  rows = 5,
+}: {
+  size?: number;
+  thickness?: number;
+  rows?: number;
+}) {
   const c = size / 2;
-  const hole = 66;
-  const w = Math.min(9, (c - hole) / (1 + 1.35 * (rings - 1)));
-  const gap = w * 0.35;
 
   return (
     <div>
       <div style={{ position: "relative", width: size, height: size, margin: "6px auto 2px" }}>
         <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} aria-hidden="true">
-          {Array.from({ length: rings }, (_, i) => (
-            <circle
-              key={i}
-              cx={c}
-              cy={c}
-              r={c - w / 2 - i * (w + gap)}
-              fill="none"
-              stroke="var(--surface-sunken)"
-              strokeWidth={w}
-            />
-          ))}
+          <circle cx={c} cy={c} r={c - thickness / 2 - 1} fill="none" stroke="var(--surface-sunken)" strokeWidth={thickness} />
         </svg>
         <div style={{ position: "absolute", inset: 0, display: "grid", placeContent: "center" }}>
           <Skeleton width={112} height={26} />
@@ -323,7 +319,7 @@ export function AllocationArcsSkeleton({ size = 216, rings = 5 }: { size?: numbe
         </div>
       </div>
       <div style={{ marginTop: 12, borderTop: "1px solid var(--border)" }}>
-        {Array.from({ length: rings }, (_, i) => (
+        {Array.from({ length: rows }, (_, i) => (
           <div
             key={i}
             style={{
@@ -332,10 +328,10 @@ export function AllocationArcsSkeleton({ size = 216, rings = 5 }: { size?: numbe
               alignItems: "center",
               gap: 10,
               padding: "9px 0",
-              borderBottom: i === rings - 1 ? "0" : "1px solid var(--border)",
+              borderBottom: i === rows - 1 ? "0" : "1px solid var(--border)",
             }}
           >
-            <span style={{ height: 10, borderRadius: 2, background: ALLOC_RAMP[i], opacity: 0.25 }} />
+            <span style={{ height: 10, borderRadius: 2, background: CHART_COLORS[i], opacity: 0.25 }} />
             <Skeleton width={`${52 + ((i * 13) % 30)}%`} height={11} />
             <Skeleton width={38} height={11} />
           </div>

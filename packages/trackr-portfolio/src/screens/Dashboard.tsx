@@ -30,9 +30,8 @@ import { FundsCard } from "../widgets/FundsCard";
 import { EmailImportNotification } from "../widgets/EmailAutomation";
 import { CapitalGainsCard } from "../widgets/CapitalGainsCard";
 import {
-  ALLOC_RAMP,
-  AllocationArcs,
-  AllocationArcsSkeleton,
+  AllocationDonut,
+  AllocationDonutSkeleton,
   Card,
   LedgerGrid,
   LedgerGridSkeleton,
@@ -42,7 +41,8 @@ import {
   SegmentedControl,
   VintageKpi,
   VintageKpiSkeleton,
-  type ArcSlice,
+  donutColor,
+  type DonutSlice,
   type LedgerColumn,
 } from "@trackr/ui";
 
@@ -97,11 +97,11 @@ function signedLakh(value: Dec | null): string {
 }
 
 /**
- * A ratio as the bounded 0-100 number `AllocationArcs` draws with.
+ * A ratio as the bounded 0-100 number `AllocationDonut` draws with.
  *
  * Computed in Decimal and converted at the very last step, where it has stopped being
  * money and become a ring's sweep. Null when the ratio is unavailable, so a group with no
- * known weight is left OUT of the chart rather than drawn as a 0% ring -- which would
+ * known weight is left OUT of the chart rather than drawn as a 0% slice -- which would
  * claim it holds nothing.
  */
 /**
@@ -229,7 +229,7 @@ export function DashboardScreen({ chrome }: PortfolioScreenProps) {
   const topHoldings = allHoldings.slice(0, 5);
 
   // One normalised row shape from whichever of the three /summary allocation arrays is
-  // selected, adapted at the call site so the arcs and the table stay grouping-agnostic.
+  // selected, adapted at the call site so the donut and the table stay grouping-agnostic.
   //
   // `invested` is summed from the group's OWN per-security figures, which are already on
   // the wire -- an exact Decimal sum, and null the moment one child's cost is missing.
@@ -281,13 +281,19 @@ export function DashboardScreen({ chrome }: PortfolioScreenProps) {
     return invested.dividedBy(totalInvested);
   };
 
-  // A group with no known share is omitted, not drawn as an empty ring. See `arcPercent`.
-  const arcSlices: ArcSlice[] = groupRows.flatMap((r) => {
+  // A group with no known share is omitted, not drawn as an empty slice. See `arcPercent`.
+  const plotted = groupRows.flatMap((r) => {
     const percent = arcPercent(groupShare(r));
-    return percent === null ? [] : [{ label: r.label, value: percent }];
+    return percent === null ? [] : [{ key: r.key, label: r.label, value: percent }];
   });
+  const arcSlices: DonutSlice[] = plotted.map(({ label, value }) => ({ label, value }));
 
-  const groupTableRows = groupRows.map((r, i) => {
+  // Keyed by group, not by row position: an omitted group would otherwise shift every
+  // later row onto its neighbour's hue. A row with no slice gets a neutral it shares with
+  // nothing on the chart.
+  const sliceColor = new Map(plotted.map((p, i) => [p.key, donutColor(i, plotted.length)]));
+
+  const groupTableRows = groupRows.map((r) => {
     const marketValue = parseDecimal(r.marketValue);
     const invested = parseDecimal(r.invested);
     // Unavailable on either side means the difference is unavailable too -- not a gain of
@@ -297,7 +303,8 @@ export function DashboardScreen({ chrome }: PortfolioScreenProps) {
     return {
       id: r.key,
       label: r.label,
-      color: ALLOC_RAMP[i % ALLOC_RAMP.length] as string,
+      // The same colour as this group's donut slice, so a row is found on the chart by hue.
+      color: sliceColor.get(r.key) ?? "var(--border-strong)",
       invested: lakh(r.invested),
       gain: signedLakh(gain),
       current: lakh(r.marketValue),
@@ -361,7 +368,7 @@ export function DashboardScreen({ chrome }: PortfolioScreenProps) {
     { key: "current", label: "Current", align: "right" },
     // No bar under the figure. It was a 2px rule as wide as the row's share of the largest
     // one, and it read as a stray line under a number rather than as a comparison -- the
-    // arcs beside this table already answer "how big is this slice".
+    // donut beside this table already answers "how big is this slice".
     { key: "weight", label: "Holding", align: "right" },
   ];
 
@@ -571,7 +578,7 @@ export function DashboardScreen({ chrome }: PortfolioScreenProps) {
               gridTemplateColumns: "minmax(300px, 1fr) minmax(0, 1.6fr)",
               gap: "var(--gap-grid)",
               alignItems: "stretch",
-              // The arcs are 216px plus a legend row per category; the table is a header
+              // The donut is 216px plus a legend row per category; the table is a header
               // plus rows plus a total. Both settle around this, so pinning it stops the
               // row growing and shrinking as the grouping changes the category COUNT --
               // asset class has two, sector has a dozen.
@@ -594,9 +601,9 @@ export function DashboardScreen({ chrome }: PortfolioScreenProps) {
               }
             >
               {summary.loading ? (
-                <AllocationArcsSkeleton rings={5} />
+                <AllocationDonutSkeleton rows={5} />
               ) : (
-                <AllocationArcs
+                <AllocationDonut
                   emptyMessage="How your money is split across the market. Needs at least one priced holding."
                   slices={arcSlices}
                   centerValue={formatMoney(basis === "invested" ? s?.invested : s?.market_value)}

@@ -303,18 +303,12 @@ export function VintageLinePlot({
         </g>
       )}
 
-      <line x1={PL} y1={height - PB} x2={W - PR} y2={height - PB} stroke="var(--ledger-ink)" strokeWidth="1" />
+      {/* One soft rule and no tick marks. The full-ink line with a tick under every date was
+          the heaviest stroke on the chart -- near-white on the dark theme -- and out-shouted
+          the series it sits under. The labels alone place the dates. */}
+      <line x1={PL} y1={height - PB} x2={W - PR} y2={height - PB} stroke="var(--ledger-ink-faint)" strokeWidth="1" />
       {xTicks.map(({ i, text }) => (
         <g key={text + i}>
-          <line
-            x1={x(i)}
-            y1={height - PB}
-            x2={x(i)}
-            y2={height - PB + 5}
-            stroke="var(--ledger-ink)"
-            strokeWidth="0.7"
-            opacity=".55"
-          />
           <text
             // The end labels grow inward, so neither runs under the y-axis labels nor
             // off the right edge; the rest stay centred on their tick.
