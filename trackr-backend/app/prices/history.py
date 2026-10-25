@@ -185,6 +185,7 @@ def backfill_universe_prices(
     time_budget_seconds: float = DEFAULT_TIME_BUDGET_SECONDS,
     coverage: float = 0.9,
     sources: list[Any] | None = None,
+    today: date | None = None,
 ) -> dict[str, int]:
     """Fill universe members' price history over ``[start, end]``, newest day first.
 
@@ -192,12 +193,24 @@ def backfill_universe_prices(
     universe loaded after the ledger's history would never get its past. Here a day is
     done only when ``coverage`` of current members already have a close on it. Each day
     goes through ``store_day``, the same held + universe filter the daily pipe uses.
+
+    Known exchange holidays are skipped and newly proven ones recorded, under the same
+    rules as ``backfill_price_history``, so a daily run does not re-request every holiday
+    in the window forever.
     """
     from app.prices.store import store_day
 
+    today = today or date.today()
     members = current_universe_isins(connection)
     if not members:
-        return {"members": 0, "fetched_days": 0, "skipped_days": 0, "failed_days": 0}
+        return {
+            "members": 0,
+            "fetched_days": 0,
+            "skipped_days": 0,
+            "failed_days": 0,
+            "pending": 0,
+            "attempted": 0,
+        }
     with connection.cursor() as cur:
         cur.execute(
             "SELECT price_date, count(*) FROM price WHERE isin = ANY(%s) "
@@ -205,22 +218,32 @@ def backfill_universe_prices(
             (members, start, end),
         )
         done = {d for d, n in cur.fetchall() if n >= coverage * len(members)}
+    closed = _closed_days(connection, start, end)
     sessions = weekend_sessions(connection, start, end)
     pending = [
         d
         for d in reversed(trading_days(max(start, NSE_BHAVCOPY_EARLIEST), end, sessions))
-        if d not in done
+        if d not in done and d not in (closed or set())
     ]
-    fetched = failed = 0
+    fetched = failed = attempted = closed_days = 0
     began = time.monotonic()
     for on in pending:
         if time.monotonic() - began > time_budget_seconds:
             break
+        attempted += 1
         result = backfill_days(on, on, sources=sources, sessions=sessions)[0]
         try:
             if result.prices:
                 store_day(connection, result)
                 fetched += 1
+            elif closed is not None and _is_closed(result, today):
+                with connection.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO price_day_closed (price_date) VALUES (%s) "
+                        "ON CONFLICT DO NOTHING",
+                        (on,),
+                    )
+                closed_days += 1
             if result.failures:
                 failed += 1
             connection.commit()
@@ -232,6 +255,8 @@ def backfill_universe_prices(
         "members": len(members),
         "fetched_days": fetched,
         "skipped_days": len(done),
+        "closed_days": closed_days,
         "failed_days": failed,
         "pending": len(pending),
+        "attempted": attempted,
     }

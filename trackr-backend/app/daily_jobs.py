@@ -238,6 +238,26 @@ def cash_prices(ctx):
     }
 
 
+#: Calendar days of universe price history kept complete. Momentum and low-volatility
+#: factor scores need a close on every one of the last 253 sessions for each ranked
+#: member (app.analytics._vendor.advisor.service); 253 sessions span about 370 days.
+UNIVERSE_HISTORY_DAYS = 400
+
+
+def universe_history(ctx):
+    from app.prices.history import backfill_universe_prices
+
+    end = ctx.today - timedelta(days=1)
+    result = backfill_universe_prices(
+        ctx.conn,
+        end - timedelta(days=UNIVERSE_HISTORY_DAYS),
+        end,
+        time_budget_seconds=ctx.budget(600),
+        today=ctx.today,
+    )
+    return {**result, "complete": result["attempted"] == result["pending"]}
+
+
 def exchange_feeds(ctx):
     from app.nse_worker import daily_feeds, reopen
 
@@ -509,6 +529,7 @@ def phases():
         Phase("jobs_before_imports", jobs),
         Phase("universe", universe),
         Phase("cash_prices", cash_prices),
+        Phase("universe_history", universe_history, 600),
         Phase("exchange_feeds", exchange_feeds),
         Phase("fno_prices", fno_prices),
         *[Phase(f"tri_history:{name}", partial(index_history, name=name)) for name in TRI_INDICES],
