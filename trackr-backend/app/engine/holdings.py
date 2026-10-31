@@ -15,7 +15,7 @@ from app.engine.errors import (
     DemergerAdjustmentError,
     NegativeHoldingError,
 )
-from app.engine.ledger import ordered
+from app.engine.ledger import cash_paid, ordered
 from app.engine.lots import compute_lots, raise_if_evidence_withdrawn
 from app.engine.types import (
     ACQUIRING_TYPES,
@@ -118,7 +118,7 @@ def compute_holdings(transactions: list[Transaction], as_of: date | None = None)
             quantities[isin] = quantity
             # Full precision here; Rule B rounds once at emission. See the docstring for
             # why rounding at each acquisition instead costs two of the golden values.
-            pools[isin] = pool + txn.quantity * txn.price + txn.charges
+            pools[isin] = pool + cash_paid(txn)
             first_buy.setdefault(isin, txn.txn_date)
             # Sticky, and deliberately so: once an estimated cost is averaged into the
             # pool there is no way to separate the estimated rupees from the verified
@@ -211,7 +211,9 @@ class SkippedHolding:
     holding. Carries whatever ``NegativeHoldingError``/``DemergerAdjustmentError``/
     ``CorporateActionEvidenceError`` itself carried, plus ``str(error)`` so a caller
     always has a ready-to-show message even for the fields that don't apply to every
-    error type. ``reason_code`` is set only for withdrawn corporate-action evidence."""
+    error type. ``reason_code`` is a machine-readable cause where one exists: withdrawn
+    corporate-action evidence, ``LEDGER_INCOMPLETE`` (engine/reconcile.py) and
+    ``CAS_HISTORY_MISSING`` (routers/exclusions.missing_cas_history); None otherwise."""
 
     isin: str
     message: str

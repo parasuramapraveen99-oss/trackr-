@@ -14,8 +14,8 @@
  */
 
 import { useId, type ReactNode } from "react";
-import { decimalScale, parseDecimal, sumDecimals, usePrivacy } from "@trackr/core";
-import type { AdvisorCapitalStates, AdvisorHealthComponentRaw, AdvisorUpstreamKpis, AnalyticsResponse, MilestoneMetric } from "@trackr/core";
+import { parseDecimal, sumDecimals, usePrivacy } from "@trackr/core";
+import type { AdvisorCapitalStates, AdvisorHealthComponentRaw, AnalyticsResponse, MilestoneMetric } from "@trackr/core";
 import { MissingVisual } from "./AdvisorVisuals";
 import { RiskButterfly, Small, compactInr, useTip, useWidth } from "./visual";
 import { pct, ratio } from "./format";
@@ -532,49 +532,6 @@ export function QualityProfiles({ data }: { data: AnalyticsResponse }) {
       <text x={(chipW - 6) / 2} y={8} dy=".32em" textAnchor="middle" style={INK2}>{symbolOf(data, isin).slice(0, 11)}</text>
     </g>)}
   </svg>}</div>;
-}
-
-/* ------------------------------------------------------------- ledger figures ---- */
-
-/** Engine-owned ledger amounts on one exact Decimal scale; hover gives basis and period. */
-export function LedgerFigures({ data }: { data: AnalyticsResponse }) {
-  const [ref, w] = useWidth();
-  const tip = useTip();
-  const { masked } = usePrivacy();
-  const kpis = (data.advisor?.sections.overview.upstream_kpis as unknown as AdvisorUpstreamKpis | undefined)?.metrics;
-  if (!kpis) return <Withheld height={140} reason="ledger figures unavailable" />;
-  const rows: [label: string, value: string | null, color: (neg: boolean) => string, basis: string, metric?: MilestoneMetric][] = [
-    ["Contributed", kpis.net_contributions?.value ?? null, () => "var(--ink-300)", "every purchase plus charges, less every sale net of charges", kpis.net_contributions],
-    ["Worth now", data.kpi.market_value ?? null, () => "var(--chart-1)", "current company holdings at the latest close"],
-    ["Realised", kpis.realised_pnl?.value ?? null, (neg) => (neg ? "var(--negative)" : "var(--positive)"), "FIFO gains on every completed sale; dividends not included", kpis.realised_pnl],
-    ["Dividends", kpis.dividends_received?.value ?? null, () => "var(--positive)", "cash dividends present in your ledger; one not imported is not counted", kpis.dividends_received],
-  ];
-  const scale = decimalScale([...rows.map(([, v]) => v), "0"]);
-  const bh = 22, gap = 12, m = { l: 84, r: 58 }, iw = Math.max(1, w - m.l - m.r);
-  const X = (v: string) => m.l + (scale.position(v) ?? 0) * iw;
-  const h = rows.length * (bh + gap) + 4;
-  return <div ref={ref}>{w > 0 && <svg width={w} height={h} role="img" aria-label="Ledger amounts">
-    <line x1={X("0")} x2={X("0")} y1={0} y2={h} style={{ stroke: "var(--ink-400)" }} />
-    {rows.map(([label, value, color, basis, metric], i) => {
-      const y = i * (bh + gap) + 2, neg = parseDecimal(value)?.isNegative() ?? false;
-      const x0 = X("0"), x1 = value == null ? x0 : X(value);
-      return <g key={label} onMouseMove={(e) => tip.show(e, `${label}: ${value == null ? "—" : compactInr(value, masked)} · ${basis}${metric?.period?.start ? ` · ${metric.period.start} – ${metric.period.end}` : ""}${metric ? ` · ${metric.status}` : ""}${metric?.reasons.length ? ` · ${explainAll(metric.reasons, data)}` : ""}`)} onMouseLeave={tip.hide}>
-        <rect x={0} y={y - 4} width={w} height={bh + 8} style={{ fill: "transparent" }} />
-        <text x={0} y={y + bh / 2} dy=".32em" style={INK2}>{label}</text>
-        {value == null
-          ? <rect x={x0} y={y} width={iw * 0.4} height={bh} rx={3} style={{ fill: "var(--surface-sunken)" }} />
-          : <rect x={Math.min(x0, x1)} y={y} width={Math.max(1.5, Math.abs(x1 - x0))} height={bh} rx={3} style={{ fill: color(neg) }} />}
-        <text x={Math.max(x0, x1) + 6} y={y + bh / 2} dy=".32em" style={{ ...INK, fill: value == null ? "var(--text-tertiary)" : neg ? "var(--negative)" : "var(--text-primary)" }}>{value == null ? "—" : compactInr(value, masked)}</text>
-      </g>;
-    })}
-  </svg>}</div>;
-}
-
-/** Tile figure for the ledger tile: all-history XIRR, coloured by sign. */
-export function LedgerFigure({ data }: { data: AnalyticsResponse }) {
-  const n = num((data.advisor?.sections.overview.upstream_kpis as unknown as AdvisorUpstreamKpis | undefined)?.metrics?.xirr?.value);
-  if (n == null) return null;
-  return <><span style={{ color: n < 0 ? "var(--negative)" : "var(--positive)" }}>{pct(n, 1, true)}</span><Small>XIRR · all</Small></>;
 }
 
 /* ------------------------------------------------------------- history gaps ------ */

@@ -122,6 +122,13 @@ def export_investor(
                 "SELECT t.* FROM fno_trade t JOIN account a ON a.id = t.account_id "
                 "WHERE a.investor_id = %s ORDER BY t.trade_date, t.seq",
             ),
+            (
+                # A registrar statement's own facts for each fund ledger row (migration 095):
+                # printed amount, stamp duty, STT, TDS. Part of the same portability right.
+                "mf_transaction_details",
+                "SELECT * FROM mf_transaction_detail WHERE investor_id = %s "
+                "ORDER BY created_at, transaction_id",
+            ),
         ):
             cur.execute(sql, (investor_id,))
             columns = [c.name for c in cur.description]
@@ -195,6 +202,7 @@ def export_investor(
             "include_identifiers": include_identifiers,
             "transactions": len(export["transactions"]),
             "fno_trades": len(export["fno_trades"]),
+            "mf_transaction_details": len(export["mf_transaction_details"]),
             "accounts": len(export["accounts"]),
             # Counts, never content. An audit row recording what an export CONTAINED would be a
             # second copy of it in the one table erasure deliberately does not delete.

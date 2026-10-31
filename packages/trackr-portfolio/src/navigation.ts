@@ -119,9 +119,9 @@ export const PORTFOLIO_GROUPS: PortfolioGroup[] = [
       },
       {
         href: "/import/mutual-funds",
-        label: "Check MF statement",
+        label: "Mutual fund statement",
         icon: "import",
-        summary: "Preview a CAMS or KFintech statement and check its figures",
+        summary: "Preview a CAMS or KFintech statement, then add its funds",
       },
       {
         href: "/reconcile",

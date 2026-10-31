@@ -88,6 +88,10 @@ class Source(StrEnum):
     # (which is the declaration side) and from MANUAL (a human's assertion) because
     # invariant 18 turns on exactly that distinction. See migration 033.
     FUNDS_STATEMENT = "FUNDS_STATEMENT"
+    # A CAMS/KFintech detailed statement: evidence of an allotment or redemption AND of
+    # the rupees that moved (mf_transaction_detail, migration 095). Distinct from CAS,
+    # which is a depository's declared quantities with no price at all.
+    RTA_STATEMENT = "RTA_STATEMENT"
 
 
 class Term(StrEnum):
@@ -181,6 +185,14 @@ class Transaction:
     dedupe_key: str | None = None
     raw_payload: dict[str, Any] | None = None
     created_at: datetime | None = None
+    # AUTHORITATIVE RUPEES MOVED, when a document printed them: today only a registrar
+    # statement (mf_transaction_detail, migration 095). A purchase's cash paid includes
+    # stamp duty; a redemption's is the net credited. None for every other row, whose cash
+    # stays quantity x price +/- charges -- so no existing figure can move. Read through
+    # ``app.engine.ledger.cash_paid`` / ``cash_received``, never directly. Left out of
+    # ``repr`` so the pinned parser-output digests (tests/test_zerodha_contract_note_xlsx.py)
+    # still describe the same rows: no parser sets it.
+    cash_amount: Decimal | None = field(default=None, repr=False)
 
     @property
     def gross_dividend(self) -> Decimal:
@@ -388,6 +400,26 @@ class Contribution:
     gain: Decimal
     pct_of_total: Decimal | None = None
     symbol: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodBridge:
+    """The portfolio's bridge over one window ``(start, end]``. DERIVED, NEVER STORED --
+    ENGINE_SPEC section 16.
+
+    ``gain = closing + proceeds + dividends + transfers_out - opening - purchases -
+    transfers_in``. Opening and closing are market values; transfers are valued at the
+    market close on their own date (GIPS in-kind rule), never at the recorded price.
+    """
+
+    opening: Decimal
+    purchases: Decimal
+    proceeds: Decimal
+    dividends: Decimal
+    transfers_in: Decimal
+    transfers_out: Decimal
+    closing: Decimal
+    gain: Decimal
 
 
 @dataclass(frozen=True, slots=True)

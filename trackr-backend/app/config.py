@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -186,6 +187,9 @@ class Settings(BaseSettings):
     # and use stored evidence. This flag alone NEVER grants exchange network access:
     # app.exchange_reference grants it only inside the explicit local collector context.
     nse_api_enabled: bool = True
+    # Oldest bhavcopy day /ops/cron/market-history keeps in the full-market store
+    # (`market_close`, docs/INSTANT_IMPORT_PLAN.md). Each year is about 130 MB.
+    market_history_start: date = date(2016, 1, 1)
 
     # --- mutual funds / ETFs (docs/MF_ETF_PLAN.md section 10) -------------------------
     # Independent rollout flags, OFF by default; each is turned on only after its gate

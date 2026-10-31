@@ -907,6 +907,18 @@ def promote_stage(
         # while this request waited on it: a hang, holding the worker's advisory lock, with
         # the import never scheduled (seen live 2026-10-08: screen stuck on "processing").
         conn.commit()
+        # Recent closes for this batch's ISINs, copied from the full-market store, so the
+        # next screen values a stock nobody held before (docs/INSTANT_IMPORT_PLAN.md).
+        # Database only. A failure leaves those holdings named as unpriced until the
+        # cycle below answers them; the committed trades are unaffected.
+        try:
+            from app.prices.market import hydrate_batch
+
+            hydrate_batch(conn, batch_id)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.warning("promote_hydrate_failed batch_id=%s", batch_id, exc_info=True)
         # New ledger rows: price their ISINs and sweep their corporate actions now, not at
         # tomorrow's cron (owner decision 2026-10-08) -- and fetch any F&O contract-master
         # day this batch's F&O rows are waiting on. Runs after the response is sent;

@@ -48,7 +48,7 @@ from app.engine.tax_classification import classification_sensitive
 from app.engine.types import Term
 from app.prices.fund_category import InstrumentKind
 from app.prices.routing import Route
-from app.routers.transactions import _financial_year_bounds, _fund_realised
+from app.routers.transactions import _fund_realised, financial_year_bounds
 
 router = APIRouter(tags=["tax"])
 
@@ -146,7 +146,7 @@ def capital_gains(
     connection: Any = Depends(get_conn),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    start, end = _financial_year_bounds(fy)
+    start, end = financial_year_bounds(fy)
     if start < date(2018, 4, 1):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "Capital-gains schedules start at FY 2018-19"

@@ -74,8 +74,13 @@ class CurrentPrices:
         return {isin for isin, quote in self.quotes.items() if quote.source == SOURCE_LIVE}
 
 
-def resolve_current_prices(conn: Any, isins: list[str], as_of: date) -> CurrentPrices:
-    """Price every ISIN in ``isins`` under the single precedence above."""
+def resolve_current_prices(
+    conn: Any, isins: list[str], as_of: date, *, live: bool = True
+) -> CurrentPrices:
+    """Price every ISIN in ``isins`` under the single precedence above.
+
+    ``live=False`` skips the intraday quote step, so a figure built on the result is
+    reproducible from stored closes alone (the investment summary uses this)."""
     from app.config import get_settings
 
     if not isins:
@@ -96,12 +101,12 @@ def resolve_current_prices(conn: Any, isins: list[str], as_of: date) -> CurrentP
         source = SOURCE_SETTLED if row_date == as_of else SOURCE_CARRIED
         quotes[isin] = CurrentQuote(price=price, price_date=row_date, source=source)
 
-    if exchange and as_of == ist_today():
+    if live and exchange and as_of == ist_today():
         settled = prices_on_date(conn, exchange, as_of)
         unsettled = [isin for isin in exchange if isin not in settled]
-        live = refresh_and_get(conn, unsettled) if unsettled else {}
+        live_quotes = refresh_and_get(conn, unsettled) if unsettled else {}
         # Dict order encodes the precedence: later sources overwrite earlier ones.
-        for isin, price in live.items():
+        for isin, price in live_quotes.items():
             if isin not in settled:
                 quotes[isin] = CurrentQuote(price=price, price_date=as_of, source=SOURCE_LIVE)
         for isin, price in settled.items():

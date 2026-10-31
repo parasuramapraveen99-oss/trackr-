@@ -3,7 +3,7 @@
   "crons": [
     {
       "path": "/ops/cron/prices-refresh",
-      "schedule": "30 10 * * *"
+      "schedule": "15 13 * * *"
     },
     {
       "path": "/ops/cron/fno-prices-refresh",
@@ -31,11 +31,11 @@
     },
     {
       "path": "/ops/cron/snapshots-run",
-      "schedule": "30 13 * * *"
+      "schedule": "15 14 * * *"
     },
     {
       "path": "/ops/cron/analytics-warm?slot=after-snapshots",
-      "schedule": "0 14 * * *"
+      "schedule": "15 15 * * *"
     },
     {
       "path": "/ops/cron/analytics-warm?slot=new-ist-day",
@@ -68,6 +68,18 @@
     {
       "path": "/ops/cron/mf-nav-refresh",
       "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/ops/cron/market-reference",
+      "schedule": "45 13 * * *"
+    },
+    {
+      "path": "/ops/cron/market-history",
+      "schedule": "45 15 * * *"
+    },
+    {
+      "path": "/ops/cron/feeds-check",
+      "schedule": "30 3 * * *"
     }
   ]
 }

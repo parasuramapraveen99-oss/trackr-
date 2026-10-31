@@ -129,6 +129,24 @@ def upsert_prices(conn: Any, prices: list[Any]) -> int:
     return len(prices)
 
 
+def nse_listed_isins(conn: Any, isins: Sequence[str]) -> set[str]:
+    """Of ``isins``, those whose newest stored close came from NSE's bhavcopy.
+
+    The merge keeps NSE wherever both exchanges quote a security, so a newest close from
+    NSE means NSE lists it today. An ISIN with no close, or whose newest close is BSE's,
+    is not in the result: it may be BSE-only.
+    """
+    if not isins:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT DISTINCT ON (isin) isin, source FROM price
+               WHERE isin = ANY(%s) ORDER BY isin, price_date DESC""",
+            (list(isins),),
+        )
+        return {isin for isin, source in cur.fetchall() if source == "NSE_BHAVCOPY"}
+
+
 def latest_prices(
     conn: Any,
     isins: list[str],

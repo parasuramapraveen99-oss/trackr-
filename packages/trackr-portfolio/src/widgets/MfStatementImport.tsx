@@ -1,21 +1,39 @@
 "use client";
 
 import { useRef, useState, type CSSProperties, type DragEvent } from "react";
-import { api, ApiError, formatDate, formatMoney, formatQuantity, useAuth } from "@trackr/core";
-import type { MfIssue, MfSchemeOut, MfStatementPreviewOut } from "@trackr/core";
+import Link from "next/link";
+import {
+  api,
+  ApiError,
+  broadcastPortfolioRefresh,
+  formatDate,
+  formatMoney,
+  formatQuantity,
+  useAuth,
+} from "@trackr/core";
+import type {
+  MfIssue,
+  MfSchemeOut,
+  MfStatementImportOut,
+  MfStatementPreviewOut,
+  PromoteResultOut,
+} from "@trackr/core";
 import { Badge, Banner, Button, CopyField, Field, LedgerGrid, PasswordInput, TabBar, type LedgerColumn } from "@trackr/ui";
 
 /**
- * Import Mutual Funds: get a CAMS + KFintech statement, then upload it.
+ * Mutual fund statement: get a CAMS + KFintech statement, then upload it.
  *
  * Two steps, the same shape as Passbook's import (one statement covers every fund house),
- * shown as tabs so either step can be reopened. Used in two places: the setup wizard's
- * "Mutual funds" step (Trackr+) and the `/import/mutual-funds` screen (both apps).
+ * shown as tabs so either step can be reopened. Used in two places: the Import page's
+ * "Mutual fund statement" card and the `/import/mutual-funds` screen (both apps).
  *
- * WHAT THE UPLOAD DOES TODAY. It checks the statement and shows what is in it. It does not
- * add anything to the portfolio yet: docs/MF_ETF_PLAN.md (P5) needs real sample statements
- * and new amount fields before mutual fund transactions can be saved, and the screen says
- * so rather than implying an import happened. See trackr-backend/app/ingest/mf_cas_pdf.py.
+ * WHAT THE UPLOAD DOES. "Check statement" reads it and shows what is in it, writing
+ * nothing. "Add to my portfolio" then sends the same file back with the digest of what was
+ * shown: the server stages exactly that (or refuses if it changed) and the promotion puts
+ * it in the ledger -- the same two explicit steps as every other import. Each fund is added
+ * whole or not at all, with the reason on screen (app/ingest/mf_statement_rows.py).
+ * The password is held in this component's memory between the two calls and dropped after
+ * the second; it is never stored anywhere.
  *
  * CAMS's request form cannot be pre-filled from a website: it documents no link parameters,
  * and a page here cannot fill a form on camsonline.com (Passbook can because it is a desktop
@@ -82,7 +100,14 @@ const listStyle: CSSProperties = {
   font: "var(--type-body)",
 };
 
-export function MfStatementImport({ onChecked }: { onChecked?: (preview: MfStatementPreviewOut) => void }) {
+export function MfStatementImport({
+  onChecked,
+  onAdded,
+}: {
+  onChecked?: (preview: MfStatementPreviewOut) => void;
+  /** After transactions reach the ledger -- e.g. to refresh an import history list. */
+  onAdded?: () => void;
+}) {
   const { investorId, token } = useAuth();
   const period = camsTenYearPeriod();
   const [tab, setTab] = useState<Tab>("get");
@@ -93,6 +118,8 @@ export function MfStatementImport({ onChecked }: { onChecked?: (preview: MfState
   const [dragging, setDragging] = useState(false);
   const [preview, setPreview] = useState<MfStatementPreviewOut | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  // Kept only until "Add to my portfolio" re-sends the file; cleared on success or reset.
+  const heldPassword = useRef("");
 
   function pick(next: File | null | undefined) {
     setError(null);
@@ -118,6 +145,7 @@ export function MfStatementImport({ onChecked }: { onChecked?: (preview: MfState
         { formData: form, token }
       );
       setPreview(result);
+      heldPassword.current = password;
       setPassword("");
       onChecked?.(result);
     } catch (err) {
@@ -127,7 +155,27 @@ export function MfStatementImport({ onChecked }: { onChecked?: (preview: MfState
     }
   }
 
+  async function addToPortfolio(): Promise<PromoteResultOut> {
+    if (!investorId || !file || !preview) throw new Error("Check the statement first.");
+    const form = new FormData();
+    form.set("file", file);
+    form.set("password", heldPassword.current);
+    form.set("preview_digest", preview.preview_digest);
+    const staged = await api.post<MfStatementImportOut>(
+      `/investors/${investorId}/funds/statement-import`,
+      { formData: form, token }
+    );
+    heldPassword.current = "";
+    const promoted = await api.post<PromoteResultOut>(`/ingest/stage/${staged.batch_id}/promote`, {
+      token,
+    });
+    broadcastPortfolioRefresh();
+    onAdded?.();
+    return promoted;
+  }
+
   function reset() {
+    heldPassword.current = "";
     setPreview(null);
     setFile(null);
     setPassword("");
@@ -136,7 +184,7 @@ export function MfStatementImport({ onChecked }: { onChecked?: (preview: MfState
     if (inputRef.current) inputRef.current.value = "";
   }
 
-  if (preview) return <PreviewResult preview={preview} onAnother={reset} />;
+  if (preview) return <PreviewResult preview={preview} onAnother={reset} onAdd={addToPortfolio} />;
 
   return (
     <div style={{ display: "grid", gap: 18 }}>
@@ -267,7 +315,15 @@ export function MfStatementImport({ onChecked }: { onChecked?: (preview: MfState
   );
 }
 
-function PreviewResult({ preview, onAnother }: { preview: MfStatementPreviewOut; onAnother: () => void }) {
+function PreviewResult({
+  preview,
+  onAnother,
+  onAdd,
+}: {
+  preview: MfStatementPreviewOut;
+  onAnother: () => void;
+  onAdd: () => Promise<PromoteResultOut>;
+}) {
   const rows: Row[] = preview.schemes.map((s, i) => ({ ...s, id: `${s.folio_label}|${s.isin ?? s.scheme}|${i}` }));
   // A skipped fund cannot flag itself, so an incomplete read is never "all good".
   const allGood = preview.schemes_needing_attention === 0 && preview.complete;
@@ -305,7 +361,7 @@ function PreviewResult({ preview, onAnother }: { preview: MfStatementPreviewOut;
       key: "checks",
       label: "Checks",
       figure: false,
-      width: "minmax(160px, 1.3fr)",
+      width: "minmax(230px, 1.8fr)",
       render: (r) =>
         r.checks_passed ? (
           <Badge tone="positive">Adds up</Badge>
@@ -318,6 +374,15 @@ function PreviewResult({ preview, onAnother }: { preview: MfStatementPreviewOut;
             ))}
           </span>
         ),
+    },
+    {
+      key: "import",
+      label: "Portfolio",
+      figure: false,
+      width: "minmax(110px, 0.9fr)",
+      // Neutral wording, true both before and after "Add to my portfolio".
+      render: (r) =>
+        r.importable ? <Badge tone="positive">Included</Badge> : <Badge tone="warning">Left out</Badge>,
     },
   ];
 
@@ -334,10 +399,7 @@ function PreviewResult({ preview, onAnother }: { preview: MfStatementPreviewOut;
             : `${preview.schemes_needing_attention} fund${preview.schemes_needing_attention === 1 ? " needs" : "s need"} a look; see Checks.`}
       </Banner>
 
-      <Banner tone="info" title="Not added to your portfolio yet">
-        Trackr+ has checked this statement. This is a preview: nothing from this file has
-        been saved or added to your holdings and returns.
-      </Banner>
+      <AddToPortfolio preview={preview} onAdd={onAdd} />
 
       <div style={{ overflowX: "auto" }}>
         <LedgerGrid
@@ -380,6 +442,91 @@ function PreviewResult({ preview, onAnother }: { preview: MfStatementPreviewOut;
           Check another statement
         </Button>
       </div>
+    </div>
+  );
+}
+
+function AddToPortfolio({
+  preview,
+  onAdd,
+}: {
+  preview: MfStatementPreviewOut;
+  onAdd: () => Promise<PromoteResultOut>;
+}) {
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [result, setResult] = useState<PromoteResultOut | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const importable = preview.schemes.filter((s) => s.importable);
+  const blocked = preview.schemes.filter((s) => !s.importable);
+  const rows = importable.reduce((n, s) => n + s.ledger_rows, 0);
+
+  async function add() {
+    setState("busy");
+    setError(null);
+    try {
+      setResult(await onAdd());
+      setState("done");
+    } catch (err) {
+      setError(
+        err instanceof ApiError && err.status === 409
+          ? err.message
+          : friendly(err)
+      );
+      setState("idle");
+    }
+  }
+
+  if (state === "done" && result) {
+    return (
+      <Banner
+        tone="positive"
+        title="Added to your portfolio"
+        action={<Link href="/holdings">See your holdings</Link>}
+      >
+        {result.inserted} transaction{result.inserted === 1 ? "" : "s"} from {importable.length} fund
+        {importable.length === 1 ? "" : "s"} are now in your ledger
+        {result.skipped_duplicates > 0
+          ? `; ${result.skipped_duplicates} were already there and were not added twice`
+          : ""}
+        .
+      </Banner>
+    );
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      {importable.length > 0 ? (
+        <Banner tone="info" title="Add to your portfolio">
+          {importable.length} fund{importable.length === 1 ? "" : "s"} ({rows} transaction
+          {rows === 1 ? "" : "s"}) will be added, using the amounts printed on the statement.
+          Stamp duty and STT are included with the purchase or redemption they belong to.
+          {blocked.length > 0 &&
+            ` ${blocked.length} fund${blocked.length === 1 ? " is" : "s are"} left out; the reason is below.`}
+        </Banner>
+      ) : (
+        <Banner tone="warning" title="Nothing from this statement can be added yet">
+          Every fund in it needs something fixed first; the reasons are below. Nothing has been saved.
+        </Banner>
+      )}
+      {blocked.length > 0 && (
+        <ul style={{ ...listStyle, margin: 0 }}>
+          {blocked.map((s, i) => (
+            <li key={`${s.folio_label}-${s.isin ?? s.scheme}-${i}`}>
+              <b>{s.scheme}</b> (folio {s.folio_label}): {s.blocked_reason}
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <Banner tone="negative">{error}</Banner>}
+      {importable.length > 0 && (
+        <div>
+          <Button onClick={() => void add()} disabled={state === "busy"}>
+            {state === "busy"
+              ? "Adding…"
+              : `Add ${importable.length} fund${importable.length === 1 ? "" : "s"} to my portfolio`}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

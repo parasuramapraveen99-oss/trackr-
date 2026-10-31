@@ -195,6 +195,11 @@ export interface PerformanceResponse {
   realised_to_date: string | null;
   benchmark: BenchmarkOut | null;
   warning: string | null;
+  /** Which ledger these figures cover: "listed" (default), "all" or "mutual_fund". */
+  scope?: "listed" | "all" | "mutual_fund";
+  /** Only for scope "all": the combined XIRR's two parts. */
+  xirr_listed?: string | null;
+  xirr_funds?: string | null;
   // Securities these LISTED-scope figures leave out, named. reason_code
   // "MUTUAL_FUND_SCOPE" marks a fund unit reported in /funds/performance instead.
   excluded?: ExcludedOut[];
@@ -237,6 +242,86 @@ export interface ContributionResponse {
   excluded?: { isin: string; symbol: string | null; message: string }[];
   benchmark?: string | null;
   performance?: CashFlowWindow | null;
+}
+
+// GET /investors/{id}/ledger-summary -- app/schemas/analytical.py LedgerSummaryResponse,
+// docs/ENGINE_SPEC.md section 16. Every money value is exact decimal text; the client
+// formats it and never adds it up.
+export interface PeriodXirr {
+  value: string | null;
+  status: "ok" | "short_period" | "withheld_transfers" | "undefined" | "incomplete";
+  reason: string | null;
+}
+
+export type LedgerSummaryFigure =
+  | "purchases"
+  | "proceeds"
+  | "dividends"
+  | "transfers_in"
+  | "transfers_out";
+
+export interface LedgerSummaryExclusion {
+  isin: string;
+  symbol: string | null;
+  reason: string;
+  reason_code: string | null;
+  as_of: string | null;
+  // Figures this exclusion leaves incomplete; empty means listed only.
+  affects: string[];
+  periods: string[];
+}
+
+export interface LedgerSummaryRow {
+  date: string;
+  isin: string;
+  symbol: string | null;
+  txn_type: string;
+  quantity: string;
+  amount: string | null;
+  figure: LedgerSummaryFigure | "none";
+  excluded: boolean;
+  auto_resolved: boolean;
+  source_ref: string | null;
+}
+
+export interface LedgerSummaryHolding {
+  isin: string;
+  symbol: string | null;
+  quantity: string;
+  price: string;
+  price_date: string | null;
+  price_source: string;
+  market_value: string;
+}
+
+export interface LedgerSummaryResponse {
+  period: {
+    start: string;
+    end: string;
+    first_day: string;
+    label: string;
+    kind: "all" | "fy" | "custom";
+    valuation_date: string | null;
+  };
+  scope: "all" | "listed" | "mutual_fund";
+  available_fys: { fy: string; label: string; start: string; end: string }[];
+  opening: string;
+  purchases: string;
+  proceeds: string;
+  dividends: string;
+  transfers_in: string;
+  transfers_out: string;
+  closing: string;
+  period_gain: string;
+  sales_and_dividends: string;
+  realised: string;
+  realised_sales: number;
+  xirr: PeriodXirr;
+  xirr_all_time: PeriodXirr;
+  exclusions: LedgerSummaryExclusion[];
+  rows: LedgerSummaryRow[];
+  holdings_end: LedgerSummaryHolding[];
+  auto_resolved_count: number;
 }
 
 export interface PriceRefreshResponse {
@@ -337,6 +422,9 @@ export interface TransactionOut {
   price: string;
   charges: string;
   dividend_amount: string;
+  // The printed statement amount (a registrar statement's cash). Null means the engine
+  // uses quantity x price +/- charges.
+  cash_amount?: string | null;
   source: string | null;
   source_ref: string | null;
   created_at: string | null;
@@ -426,6 +514,171 @@ export interface FundPerformanceOut {
   latest_final_snapshot: string | null;
   holdings: FundHoldingOut[];
   excluded: ExcludedOut[];
+}
+
+// GET /investors/{id}/funds/schemes/{isin}: one scheme. `trailing` and `risk` are the
+// FUND's NAV statistics, not the investor's return; null with a reason when withheld.
+export interface FundTrailingOut {
+  years: number;
+  start_date: string | null;
+  end_date: string | null;
+  cumulative: string | null;
+  annualised: string | null;
+  reason: string | null;
+}
+
+export interface FundRiskOut {
+  months: number;
+  start_date: string | null;
+  end_date: string | null;
+  volatility: string | null;
+  max_drawdown: string | null;
+  drawdown_peak: string | null;
+  drawdown_trough: string | null;
+  reason: string | null;
+}
+
+/** GET /investors/{id}/funds/analytics: the Mutual fund analytics tabs. */
+export interface FundGroupOut {
+  label: string;
+  value: string;
+  share: string | null;
+  count: number;
+}
+
+export interface FundRowOut {
+  isin: string;
+  name: string;
+  amc: string | null;
+  category: string | null;
+  asset_class: string | null;
+  plan: "Direct" | "Regular" | "Not stated";
+  option: string | null;
+  units: string;
+  nav: string | null;
+  nav_date: string | null;
+  invested: string;
+  value: string | null;
+  unrealised: string | null;
+  unrealised_pct: string | null;
+  weight: string | null;
+  /** The scheme's own NAV return, not the investor's. */
+  fund_return_1y: string | null;
+  fund_return_3y: string | null;
+  fund_return_reason: string | null;
+}
+
+export interface FundUnvaluedOut {
+  isin: string;
+  name: string;
+  reason: string;
+}
+
+export interface FundStatsOut {
+  annual_return: string | null;
+  volatility: string | null;
+  sharpe: string | null;
+  sortino: string | null;
+  beta: string | null;
+  alpha: string | null;
+  max_drawdown: string | null;
+}
+
+export interface FundRiskPointOut {
+  isin: string;
+  name: string;
+  weight: string | null;
+  stats: FundStatsOut;
+}
+
+export interface FundLevelOut {
+  date: string;
+  mix: string;
+  benchmark: string | null;
+}
+
+/** One trailing window of the CURRENT MIX: today's funds at today's weights. */
+export interface FundWindowOut {
+  years: number;
+  months: number;
+  start: string | null;
+  end: string | null;
+  reason: string | null;
+  covered_weight: string | null;
+  excluded: FundUnvaluedOut[];
+  risk_free_rate: string | null;
+  benchmark_name: string;
+  benchmark_reason: string | null;
+  mix: FundStatsOut | null;
+  benchmark: FundStatsOut | null;
+  funds: FundRiskPointOut[];
+  levels: FundLevelOut[];
+}
+
+export interface FundContributionOut {
+  isin: string;
+  name: string;
+  gain: string;
+  share_of_total: string | null;
+  held: boolean;
+}
+
+export type FundCheckStatus = "pass" | "warn" | "info" | "not_assessable";
+
+export interface FundCheckOut {
+  key: string;
+  title: string;
+  status: FundCheckStatus;
+  summary: string;
+  rule: string;
+  items: string[];
+}
+
+export interface FundAnalyticsOut {
+  as_of: string;
+  market_value: string;
+  invested: string;
+  unrealised: string;
+  realised_to_date: string;
+  xirr: string | null;
+  xirr_reason: string | null;
+  plan_split: FundGroupOut[];
+  asset_classes: FundGroupOut[];
+  fund_houses: FundGroupOut[];
+  categories: FundGroupOut[];
+  funds: FundRowOut[];
+  unvalued: FundUnvaluedOut[];
+  windows: FundWindowOut[];
+  contributions: FundContributionOut[];
+  checks: FundCheckOut[];
+  rule_version: string;
+  excluded: { isin: string; symbol?: string | null; message: string }[];
+}
+
+export interface FundDetailOut {
+  as_of: string;
+  isin: string;
+  name: string | null;
+  scheme_code: number | null;
+  amc: string | null;
+  asset_class: string | null;
+  category: string | null;
+  plan: string | null;
+  option: string | null;
+  route_reason: string;
+  held: boolean;
+  quantity: string | null;
+  invested: string | null;
+  nav: string | null;
+  nav_date: string | null;
+  market_value: string | null;
+  unrealised: string | null;
+  elss: boolean;
+  lots: { open_date: string; units: string; cost: string; unlock_date: string | null }[];
+  nav_basis_note: string | null;
+  trailing: FundTrailingOut[];
+  risk: FundRiskOut;
+  nav_history: { date: string; nav: string }[];
 }
 
 // GET /investors/{id}/funds/statements: dated CAS evidence, outside return calculations.
@@ -2115,6 +2368,12 @@ export interface MfSchemeOut {
   issues: MfIssue[];
   evidence_rows: number;
   transactions: MfTransactionOut[];
+  /** Whether "Add to your portfolio" would import this fund -- the same decision staging
+   *  makes -- and if not, the plain-English reason. */
+  importable: boolean;
+  blocked_reason: string | null;
+  /** Ledger rows it would become; stamp duty / STT rows fold into their transaction. */
+  ledger_rows: number;
 }
 
 export interface MfStatementPreviewOut {
@@ -2134,4 +2393,26 @@ export interface MfStatementPreviewOut {
   total_value: string;
   warnings: string[];
   schemes: MfSchemeOut[];
+  /** Fingerprint of this preview; the import call sends it back. */
+  preview_digest: string;
+}
+
+// POST /investors/{id}/funds/statement-import: the reviewed statement, STAGED. Nothing is
+// in the ledger until POST /ingest/stage/{batch_id}/promote.
+export interface MfImportSectionOut {
+  folio_label: string;
+  amc: string;
+  scheme: string;
+  isin: string | null;
+  importable: boolean;
+  blocked_reason: string | null;
+  ledger_rows: number;
+}
+
+export interface MfStatementImportOut {
+  batch_id: string;
+  staged_rows: number;
+  funds_importable: number;
+  funds_blocked: number;
+  sections: MfImportSectionOut[];
 }

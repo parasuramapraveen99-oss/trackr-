@@ -116,6 +116,9 @@ class TransactionOut(BaseModel):
     # was withheld. Gross is the sum of the two; it is derived, so it is not sent.
     tds_amount: str | None = None
     cost_transfer: str
+    # The printed statement amount (a registrar statement's cash). Null means the engine
+    # uses quantity x price +/- charges (app.engine.ledger.cash_paid / cash_received).
+    cash_amount: str | None = None
     source: str | None
     source_ref: str | None
     created_at: datetime | None = None

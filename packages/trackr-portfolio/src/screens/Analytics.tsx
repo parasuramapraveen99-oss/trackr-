@@ -9,6 +9,11 @@
  * Performance. Basic = plain one-liners written by the model and checked by the server;
  * Advanced = the charts and tables. Each tab ends with a one-line coverage footer.
  *
+ * The Mutual funds side of the toggle is its own section, never blended with the equity
+ * board: its own header (FundKpiStrip: fund value, invested, unrealised, XIRR, "Mutual funds ·
+ * date") in place of the equity greeting and strip, FundAnalytics (five tabs over the same
+ * /funds/analytics response, with its own Basic / Advanced), then FundsCard (NAV allocation and dated CAS balances).
+ *
  * Moved off this page (review §10): data questions and history gaps (to /import, with a
  * banner here when one is outstanding), ledger figures (to Holdings). Removed: the Trust
  * tab, health evidence/sensitivity, method coverage, the one-day-moves timeline, the
@@ -24,16 +29,17 @@ import type { PortfolioScreenProps } from "../chrome";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useAuth, useFetch, usePortfolioRefresh, usePrivacy } from "@trackr/core";
-import type { AnalyticsResponse, BasicTab, ContributionResponse } from "@trackr/core";
+import type { AnalyticsResponse, BasicTab, ContributionResponse, FundAnalyticsOut } from "@trackr/core";
 import { IconButton, SegmentedControl, Skeleton, TabBar } from "@trackr/ui";
 import { ErrorState, NoInvestorState } from "../widgets/PageState";
 import { TipProvider } from "../analytics/visual";
 import { BOARD_CSS } from "../analytics/RiskBoard";
 import { FundsCard } from "../widgets/FundsCard";
+import { FundAnalytics } from "../analytics/FundAnalytics";
 import { BasicInsights } from "../widgets/BasicInsights";
 import { useIdentityReviews } from "../widgets/AnalyticsDataQuestions";
 import { CoverageFooter, Grid, RESPONSIVE_CSS } from "../analytics/revamp/common";
-import { Greeting, KpiStrip } from "../analytics/revamp/Header";
+import { FundKpiStrip, Greeting, KpiStrip } from "../analytics/revamp/Header";
 import { OverviewAdvanced, OverviewBasic } from "../analytics/revamp/Overview";
 import { FactorTab } from "../analytics/revamp/Factor";
 import { RiskAdvanced } from "../analytics/revamp/Risk";
@@ -101,19 +107,28 @@ export function AnalyticsScreen({ chrome }: PortfolioScreenProps) {
     { period_start: end ? oneYearBefore(end) : undefined, as_of: asOf, advised_only: advisedOnly || undefined, price_basis: "stored_close" },
     token,
   );
+  // Fetched here (only on the Mutual Funds side) so the header and the fund tabs share one
+  // replay of the fund ledger; FundAnalytics is handed the same result.
+  const funds = useFetch<FundAnalyticsOut>(
+    investorId && asset === "funds" ? `/investors/${investorId}/funds/analytics` : null,
+    { as_of: asOf, advised_only: advisedOnly || undefined },
+    token,
+  );
   const reviews = useIdentityReviews();
-  usePortfolioRefresh(() => { analytics.refetch(); contribution.refetch(); reviews.refetch(); });
+  usePortfolioRefresh(() => { analytics.refetch(); contribution.refetch(); reviews.refetch(); if (asset === "funds") funds.refetch(); });
 
   const header = (
     <Header
       title="Analytics"
-      subtitle={data ? `Equities · ${data.as_of} · ${data.benchmark.replace("_TRI", " TRI").replace("NIFTY50", "Nifty 50").replace("NIFTY500", "Nifty 500")}` : analytics.loading ? "…" : ""}
+      subtitle={asset === "funds"
+        ? (funds.data ? `Mutual funds · ${funds.data.as_of}` : funds.loading ? "…" : funds.error ? "Mutual funds · not available" : "Mutual funds")
+        : data ? `Equities · ${data.as_of} · ${data.benchmark.replace("_TRI", " TRI").replace("NIFTY50", "Nifty 50").replace("NIFTY500", "Nifty 500")}` : analytics.loading ? "…" : ""}
       action={<IconButton name="eye" label={masked ? "Show amounts" : "Hide amounts"} active={masked} onClick={toggleMask} />}
     />
   );
 
   if (!investorId) return <>{header}<Body><NoInvestorState /></Body></>;
-  if (analytics.error && !data) return <>{header}<Body><ErrorState message={analytics.error} /></Body></>;
+  if (asset === "stocks" && analytics.error && !data) return <>{header}<Body><ErrorState message={analytics.error} /></Body></>;
 
   const questions = (reviews.data?.items.filter((i) => !i.decision).length ?? 0) + (data?.advisor?.scope.health_window_gaps?.length ?? 0);
   const tab: Record<View, BasicTab | null> = { overview: "overview", factor: null, risk: "risk", diversification: "diversification", fundamentals: "fundamentals", performance: "performance" };
@@ -144,9 +159,10 @@ export function AnalyticsScreen({ chrome }: PortfolioScreenProps) {
         {chrome.banners}
         <TipProvider>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            {data && <Greeting data={data} />}
-            {data && <KpiStrip data={data} onHealth={() => { setView("overview"); setMode("advanced"); }} />}
-            {data?.coverage.basis === "priced_subset" && <div role="status" style={{ font: "500 12px var(--font-label)", color: "var(--warning)" }}>
+            {asset === "stocks" && data && <Greeting data={data} />}
+            {asset === "stocks" && data && <KpiStrip data={data} onHealth={() => { setView("overview"); setMode("advanced"); }} />}
+            {asset === "funds" && funds.data && <FundKpiStrip data={funds.data} />}
+            {asset === "stocks" && data?.coverage.basis === "priced_subset" && <div role="status" style={{ font: "500 12px var(--font-label)", color: "var(--warning)" }}>
               Priced subtotal · {data.coverage.priced_count}/{data.coverage.total_count} positions. Not valued: {data.unresolved.map((p) => p.symbol ?? p.isin).join(", ")}.
             </div>}
             {questions > 0 && <div role="status" style={{ font: "500 12.5px var(--font-label)", color: "var(--text-secondary)", padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 8 }}>
@@ -156,7 +172,7 @@ export function AnalyticsScreen({ chrome }: PortfolioScreenProps) {
               <SegmentedControl size="sm" value={asset} onChange={setAsset} options={[{ value: "stocks", label: "Stocks" }, { value: "funds", label: "Mutual Funds" }]} />
               {asset === "stocks" && view !== "factor" && <SegmentedControl size="sm" value={mode} onChange={setMode} options={[{ value: "basic", label: "Basic" }, { value: "advanced", label: "Advanced" }]} />}
             </div>
-            {asset === "funds" ? <FundsCard /> : <>
+            {asset === "funds" ? <><FundAnalytics result={funds} /><FundsCard /></> : <>
               <TabBar tabs={VIEWS.map((v) => ({ key: v.key, label: v.label }))} active={view} onChange={(k) => isView(k) && setView(k)} style={{ alignSelf: "flex-start" }} />
               {body()}
             </>}

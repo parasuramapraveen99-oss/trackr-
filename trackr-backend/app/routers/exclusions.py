@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Response
 
@@ -47,6 +47,33 @@ def mark(response: Response, skipped: list[SkippedHolding]) -> None:
 
 #: Reason code on a fund unit left out of a listed-securities figure.
 FUND_SCOPE_REASON = "MUTUAL_FUND_SCOPE"
+
+#: Which part of the ledger a figure covers. Owner amendment 26-Oct-2026: the Dashboard and
+#: Holdings show stocks and mutual funds together ("all", their default) or either one
+#: alone; returns are then computed over that scope. "listed" stays the default wherever a
+#: figure predates the amendment (/performance, analytics), so none of those moves.
+Scope = Literal["all", "listed", "mutual_fund"]
+
+
+def in_scope(
+    connection: Any, transactions: list[Transaction], scope: Scope
+) -> list[Transaction]:
+    """The ledger restricted to ``scope`` -- applied to the LEDGER, before holdings, FIFO
+    and cash flows, the same rule ``listed_scope`` follows (docs/MF_ETF_PLAN.md s.8).
+
+    A fund is a unit on the AMFI route; everything else (stocks, ETFs, units whose route
+    is unresolved) is listed. Out-of-scope rows are left out by the user's choice, so
+    unlike ``listed_scope`` this names nothing as excluded.
+    """
+    if scope == "all" or not transactions:
+        return transactions
+    from app.db.fund_reference import isins_on_route
+    from app.prices.routing import Route
+
+    funds = set(isins_on_route(connection, {t.isin for t in transactions}, Route.AMFI))
+    if scope == "mutual_fund":
+        return [t for t in transactions if t.isin in funds]
+    return [t for t in transactions if t.isin not in funds]
 
 
 def listed_scope(
@@ -91,8 +118,12 @@ def drop_unpriced(
     prices: dict[str, Decimal],
     on: date,
     skipped: list[SkippedHolding],
+    reasons: dict[str, str] | None = None,
 ) -> tuple[list[Transaction], list[str], list[SkippedHolding]]:
     """Leave out every held ISIN with no usable price on ``on``, and say so.
+
+    ``reasons`` (``CurrentPrices.unpriced_reasons``) replaces the generic message for an
+    ISIN whose route explains why it has no price, e.g. fund valuation switched off.
 
     CLAUDE.md rule 4 forbids VALUING a missing price at zero; it does not require one
     unpriced stock to blank the portfolio. Dropping the ISIN's rows entirely (buys and
@@ -106,7 +137,11 @@ def drop_unpriced(
         return transactions, isins, skipped
     gone = set(missing)
     skipped = skipped + [
-        SkippedHolding(isin=isin, message=f"No usable price for {isin} on {on}", as_of=on)
+        SkippedHolding(
+            isin=isin,
+            message=(reasons or {}).get(isin, f"No usable price for {isin} on {on}"),
+            as_of=on,
+        )
         for isin in missing
     ]
     return (
@@ -114,6 +149,59 @@ def drop_unpriced(
         [isin for isin in isins if isin not in gone],
         skipped,
     )
+
+
+def price_transfers(
+    connection: Any,
+    transactions: list[Transaction],
+    start: date,
+    end: date,
+    skipped: list[SkippedHolding],
+    *,
+    live: bool = False,
+    resolve: Any = None,
+) -> tuple[list[Transaction], dict[tuple[str, date], Decimal], list[SkippedHolding]]:
+    """Market prices for every TRANSFER_IN/OUT dated in ``(start, end]``, the input the
+    period bridge (ENGINE_SPEC s.16) and contribution (s.10, amendment 2026-10-30) value
+    transfers with: quantity x the Holdings price selection on the transfer date.
+
+    A transfer with no usable price there drops its ISIN's rows entirely and names it,
+    with the price lookup's own reason when it has one (a fund with valuation off was
+    never priced, which is not the same as "no close found"). Never valued at zero or at
+    recorded cost. Returns ``(transactions, transfer_prices, skipped)``.
+    """
+    from app.engine.types import TxnType
+    from app.prices.current import resolve_current_prices
+
+    resolve = resolve or resolve_current_prices  # a caller's own seam, else the default
+
+    kinds = (TxnType.TRANSFER_IN, TxnType.TRANSFER_OUT)
+    dates: dict[date, set[str]] = {}
+    for t in transactions:
+        if start < t.txn_date <= end and t.txn_type in kinds:
+            dates.setdefault(t.txn_date, set()).add(t.isin)
+    prices: dict[tuple[str, date], Decimal] = {}
+    reasons: dict[tuple[str, date], str] = {}
+    for on, isins in sorted(dates.items()):
+        quoted = resolve(connection, sorted(isins), on, live=live)
+        prices.update({(isin, on): price for isin, price in quoted.prices.items()})
+        reasons.update({(isin, on): why for isin, why in quoted.unpriced_reasons.items()})
+    unpriced: dict[str, date] = {}
+    for t in transactions:
+        if start < t.txn_date <= end and t.txn_type in kinds and (t.isin, t.txn_date) not in prices:
+            unpriced.setdefault(t.isin, t.txn_date)
+    if not unpriced:
+        return transactions, prices, skipped
+    skipped = skipped + [
+        SkippedHolding(
+            isin=isin,
+            message=reasons.get((isin, on))
+            or f"no usable price on or shortly before transfer date {on}",
+            as_of=on,
+        )
+        for isin, on in sorted(unpriced.items())
+    ]
+    return [t for t in transactions if t.isin not in unpriced], prices, skipped
 
 
 def missing_cas_history(

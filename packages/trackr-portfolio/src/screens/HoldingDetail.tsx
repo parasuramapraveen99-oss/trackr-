@@ -9,6 +9,7 @@ import { EMPTY_VALUE, formatDate, formatMoney, formatQuantity, signClass } from 
 import { Card, ErrorState, LoadingState, NoInvestorState } from "../widgets/PageState";
 import { ledgerHead } from "@trackr/ui";
 import { CorporateActionTimeline } from "../widgets/CorporateActionTimeline";
+import { FundInsight } from "../widgets/FundInsight";
 
 export function HoldingDetailScreen({ chrome }: PortfolioScreenProps) {
   const { Header, Body } = chrome;
@@ -49,6 +50,8 @@ export function HoldingDetailScreen({ chrome }: PortfolioScreenProps) {
         <h2 className="font-heading text-xl text-navy-900">{isin}</h2>
       </div>
 
+      {/* A fund's NAV history, fund returns and ELSS lock-in; renders nothing for a stock. */}
+      <FundInsight isin={isin} />
       <CorporateActionTimeline isin={isin} />
       <Card title="Open FIFO lots">
         {lots.loading ? (

@@ -8,6 +8,7 @@ import type { PortfolioScreenProps } from "../chrome";
 import { AccountOnboarding } from "../widgets/AccountOnboarding";
 import { ConsentCapture } from "../widgets/ConsentCapture";
 import { FileUploadStep } from "../widgets/FileUploadStep";
+import { MfStatementImport } from "../widgets/MfStatementImport";
 import { StagingBatch } from "../widgets/StagingBatch";
 
 function summaryFromBatchRow(row: BatchSummaryOut): StageResultOut {
@@ -163,6 +164,18 @@ function ImportPanel({ onGrantConsent }: { onGrantConsent: ImportScreenProps["on
             ))}
         </div>
       </Card>
+
+      {/* Mutual funds come from the registrar, not a broker: one CAMS statement covers every
+          fund house. Same page, its own step, because it needs the PDF's password and shows
+          what will be added before anything is saved. */}
+      {hasLiveConsent !== false && (
+        <Card
+          title="Mutual fund statement"
+          subtitle="One detailed CAMS statement covers every fund house, CAMS and KFintech."
+        >
+          <MfStatementImport onAdded={() => void refreshBatches()} />
+        </Card>
+      )}
 
       <Card title="Import history" subtitle="All saved files for this portfolio. CAS balances are processed on upload; trade files need review before entering the ledger.">
         <div style={{ display: "grid", gap: 12 }}>

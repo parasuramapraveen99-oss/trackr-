@@ -91,6 +91,7 @@ from app.routers import (
     jobs_ops,
     market,
     market_assistant,
+    market_ops,
     monitors,
     narrative,
     narrative_basic,
@@ -881,6 +882,7 @@ app.include_router(narrative.ops_router)
 app.include_router(narrative_basic.router)
 app.include_router(narrative_basic.ops_router)
 app.include_router(market.router)
+app.include_router(market_ops.router)
 # Workspace research. Registered unconditionally; every route is guarded by
 # require_workspace_enabled (WORKSPACE_ENABLED + a ready schema) and every WRITE by
 # require_research_writes_ready (BE-Q04/BE-Q05), so registration enables nothing by itself.

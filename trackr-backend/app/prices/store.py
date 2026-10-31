@@ -54,7 +54,8 @@ class StoreResult:
 
 
 def store_day(conn: Any, result: PipeResult) -> StoreResult:
-    """Upsert a day's prices for held + universe ISINs, and refresh their symbols.
+    """Keep the whole merged day in ``market_close``; upsert held + universe ISINs into
+    ``price`` and refresh their symbols.
 
     Idempotent. ``upsert_prices`` is ``ON CONFLICT DO UPDATE`` and ``refresh_symbols``
     no-ops when nothing moved, so a duplicate cron invocation -- which Vercel documents as
@@ -64,10 +65,14 @@ def store_day(conn: Any, result: PipeResult) -> StoreResult:
     the other 4,900 scrips have no ``security`` row, so refreshing them would be 4,900
     lookups that can only miss.
     """
+    from app.prices.market import record_market_day
+
     held = set(held_isins(conn))
     universe = set(current_universe_isins(conn))
     wanted = held | universe
 
+    # Every row of the file is kept in `market_close`; `price` stays held + universe.
+    record_market_day(conn, result)
     stored = upsert_prices(conn, [p for p in result.prices if p.isin in wanted])
     # A ledger fund unit an exchange has now printed has positive listing evidence; if
     # that changes its valuation route, the series cached under the old route are redone.

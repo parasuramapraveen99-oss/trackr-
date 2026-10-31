@@ -146,6 +146,8 @@ class DiscoverYfinanceOut(BaseModel):
     #: Candidates already on file from another path (or a prior run) -- the two discovery
     #: sources agreeing, which is the system working rather than anything to act on.
     duplicates: int = 0
+    #: NSE-listed securities not asked about: Yahoo split lookup is BSE-only (2026-10-31).
+    skipped_nse_listed: int = 0
 
 
 # ---------------------------------------------------------------------------

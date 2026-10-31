@@ -19,7 +19,7 @@ from app.engine.errors import (
     DemergerAdjustmentError,
     NegativeHoldingError,
 )
-from app.engine.ledger import ordered
+from app.engine.ledger import cash_paid, cash_received, ordered
 from app.engine.types import (
     ACQUIRING_TYPES,
     DISPOSING_TYPES,
@@ -118,7 +118,7 @@ def _replay(
 
         if txn.txn_type in ACQUIRING_TYPES:
             if txn.quantity > ZERO:
-                cost_total = txn.quantity * txn.price + txn.charges
+                cost_total = cash_paid(txn)
                 queue.append(
                     _OpenLot(
                         txn.txn_date,
@@ -212,7 +212,7 @@ def _consume(
 
     # Charges reduce proceeds, spread across the disposal rather than charged to the
     # first lot consumed.
-    proceeds_per_unit = (txn.quantity * txn.price - txn.charges) / txn.quantity
+    proceeds_per_unit = cash_received(txn) / txn.quantity
     # Same treatment, but for the STT embedded in proceeds_per_unit above -- Section 48
     # disallows netting this out for tax purposes; see engine/realised.py's
     # tax_proceeds. Computed once per disposal, same as proceeds_per_unit.

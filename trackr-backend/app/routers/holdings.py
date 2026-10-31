@@ -34,6 +34,7 @@ from app.engine.types import ZERO, Holding, Transaction, TxnType
 from app.engine.valuation import value_holdings
 from app.prices.current import SOURCE_NAV, resolve_current_prices
 from app.prices.live import ist_now
+from app.routers import exclusions
 from app.schemas.holdings import HoldingsResponse, SummaryResponse
 
 #: What an unclassified sector group is labelled. security.sector is NULL for any ISIN
@@ -78,7 +79,11 @@ def value_partition(
 
 
 def _portfolio(
-    connection: Any, investor_id: str, as_of: date, advised_only: bool = False
+    connection: Any,
+    investor_id: str,
+    as_of: date,
+    advised_only: bool = False,
+    scope: exclusions.Scope = "all",
 ) -> dict[str, Any]:
     """Holdings, valued where a price exists, with the unpriced ones kept separate.
 
@@ -96,9 +101,15 @@ def _portfolio(
     ``advised_only`` restricts the ledger to accounts flagged ``is_advised`` (docs/
     DATA_MODEL.md, contracts/openapi.yaml) -- so a SEBI-registered adviser can report on
     the mandated account only.
+
+    ``scope`` (owner amendment 26-Oct-2026) narrows the LEDGER to stocks and ETFs or to
+    mutual funds before anything is computed, so totals, weights and allocation all
+    describe the chosen scope. "all" -- the default, and the behaviour before ``scope``
+    existed -- keeps both.
     """
     transactions = load_transactions(connection, investor_id=investor_id,
                                      advised_only=advised_only, date_to=as_of)
+    transactions = exclusions.in_scope(connection, transactions, scope)
     holdings, skipped = compute_holdings_partitioned(transactions, as_of=as_of)
 
     isins = [h.isin for h in holdings]
@@ -318,9 +329,12 @@ def _classification_allocation(book: dict[str, Any], field: str) -> list[dict[st
     dependencies=[Depends(require_owned_investor)],
 )
 def summary(
-    investor_id: str, as_of: date | None = None, connection: Any = Depends(get_conn)
+    investor_id: str,
+    as_of: date | None = None,
+    scope: exclusions.Scope = "all",
+    connection: Any = Depends(get_conn),
 ) -> dict[str, Any]:
-    book = _portfolio(connection, investor_id, _as_of(as_of))
+    book = _portfolio(connection, investor_id, _as_of(as_of), scope=scope)
     return {
         "as_of": book["as_of"],
         **_totals(book),
@@ -343,6 +357,7 @@ def holdings(
     as_of: date | None = None,
     asset_class: str | None = Query(default=None),
     advised_only: bool = False,
+    scope: exclusions.Scope = "all",
     connection: Any = Depends(get_conn),
 ) -> dict[str, Any]:
     """Implements contracts/openapi.yaml's ``/investors/{id}/holdings``, plus an
@@ -350,7 +365,8 @@ def holdings(
 
     ``advised_only`` restricts to accounts flagged ``is_advised`` -- per
     contracts/openapi.yaml and docs/DATA_MODEL.md's account table."""
-    book = _portfolio(connection, investor_id, _as_of(as_of), advised_only=advised_only)
+    book = _portfolio(connection, investor_id, _as_of(as_of), advised_only=advised_only,
+                      scope=scope)
     rows = [
         h
         for h in book["valued"]

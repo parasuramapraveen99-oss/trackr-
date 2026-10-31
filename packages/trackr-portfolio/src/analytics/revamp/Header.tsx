@@ -9,7 +9,7 @@
  * portfolio's move to "markets"; keeping the two apart is the fix.
  */
 
-import type { AnalyticsResponse } from "@trackr/core";
+import type { AnalyticsResponse, FundAnalyticsOut } from "@trackr/core";
 import { formatDate } from "@trackr/core";
 import { slipFootLabel, slipFootRow, slipFootValue, slipLabel, slipNum, slipRule, slipShell } from "@trackr/ui";
 import { Info, Rs, fmtFrac, fmtPct, muted, reasonText } from "./common";
@@ -97,6 +97,37 @@ export function KpiStrip({ data, onHealth }: { data: AnalyticsResponse; onHealth
       footValue={grade != null ? `${score}/100` : undefined}>
       {grade != null ? grade
         : <span style={{ color: "var(--text-secondary)" }}>Withheld{bounds && <span style={{ fontSize: "0.5em" }}> · {bounds.lower.toFixed(0)}–{bounds.upper.toFixed(0)}</span>}</span>}
+    </Card>
+  </div>;
+}
+
+/**
+ * The Mutual Funds side's KPI strip: fund value, unrealised gain and XIRR from the same
+ * /funds/analytics response the fund tabs read, so the header and the tabs cannot disagree.
+ * The fund ledger's own figures, never blended with the equity strip. An unvalued fund is
+ * named and left out, so the value is then a priced subtotal; an undefined XIRR shows its
+ * reason, never zero.
+ */
+export function FundKpiStrip({ data }: { data: FundAnalyticsOut }) {
+  const subtotal = data.unvalued.length > 0;
+  const valued = data.funds.filter((f) => f.value != null).length;
+  return <div className="rv-kpis">
+    <Card label="Fund value" info={<Info title="Fund value">
+      Units held × the latest AMFI NAV (at most 7 days old). A fund without a usable NAV is named on the
+      page and left out, never valued at zero.
+    </Info>} foot={subtotal ? <span style={{ color: "var(--warning)" }}>Priced subtotal · {valued}/{data.funds.length} funds</span> : "At NAV"}
+      footValue={formatDate(data.as_of)}><Rs v={data.market_value} /></Card>
+    <Card label="Invested (current units)" info={<Info title="Invested (current units)">
+      Cost of the units you still hold, from your fund transactions. Units already redeemed are in realised gains.
+    </Info>} foot="Principal" footValue={`${data.funds.length} fund${data.funds.length === 1 ? "" : "s"}`}><Rs v={data.invested} /></Card>
+    <Card label="Unrealised gain" tone={signTone(data.unrealised)} info={<Info title="Unrealised gain">
+      Fund value minus the cost of the units you still hold. Redemptions already booked are not here.
+    </Info>} foot="Realised to date" footValue={<Rs v={data.realised_to_date} sign />}><Rs v={data.unrealised} sign /></Card>
+    <Card label="XIRR" tone={signTone(data.xirr)} info={<Info title="XIRR">
+      The annual rate that equates every fund purchase and redemption, by date, with today&apos;s value.
+      Your own money-weighted return on funds, separate from the stocks figure.
+    </Info>} foot="All fund transactions">
+      {data.xirr == null ? <span style={muted}>Not available: {data.xirr_reason ?? "no reason given"}</span> : fmtFrac(data.xirr, 1, true)}
     </Card>
   </div>;
 }

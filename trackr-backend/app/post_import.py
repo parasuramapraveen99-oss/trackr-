@@ -284,6 +284,7 @@ def _progress(out: dict) -> bool:
     snapshots = out.get("snapshots", {})
     return any(
         (
+            prices.get("hydrated_days", 0),
             prices.get("fetched_days", 0),
             prices.get("closed_days", 0),
             fno.get("healed", 0),

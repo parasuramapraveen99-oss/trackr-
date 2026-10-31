@@ -172,6 +172,28 @@ def fund_nav_dates(
         return out
 
 
+def nav_history(conn: Any, isin: str, start: date, end: date) -> list[tuple[date, Decimal]]:
+    """Observed NAVs for one ISIN in ``[start, end]``, ascending -- never a carried value.
+
+    Empty for an ISIN AMFI prints against several schemes, for the same reason
+    ``latest_fund_navs`` omits it: which scheme's history is "this fund" is unresolved.
+    """
+    if not fund_tables_present(conn):
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """WITH single AS (
+                   SELECT min(scheme_code) AS scheme_code FROM amfi_scheme_isin
+                   WHERE isin = %s HAVING count(DISTINCT scheme_code) = 1
+               )
+               SELECT n.nav_date, n.nav FROM single s
+               JOIN fund_nav n ON n.scheme_code = s.scheme_code
+               WHERE n.nav_date BETWEEN %s AND %s ORDER BY n.nav_date""",
+            (isin, start, end),
+        )
+        return [(on, nav) for on, nav in cur.fetchall()]
+
+
 def has_nav_after(conn: Any, isins: Sequence[str], on: date) -> set[str]:
     """ISINs with a NAV dated strictly after ``on``: evidence that AMFI has moved past it."""
     if not isins or not fund_tables_present(conn):

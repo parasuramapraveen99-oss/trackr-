@@ -45,7 +45,7 @@ from app.engine.fno_types import (
     FnoTotals,
 )
 from app.engine.types import ZERO
-from app.routers.transactions import _financial_year_bounds
+from app.routers.transactions import financial_year_bounds
 from app.schemas.fno import (
     FnoPositionsResponse,
     FnoRealisedResponse,
@@ -204,7 +204,7 @@ def realised_body(
     by_id = {c.id: c for c in contracts}
     matches = list(result.matches)
     if fy is not None:
-        start, end = _financial_year_bounds(fy)
+        start, end = financial_year_bounds(fy)
         matches = [m for m in matches if start <= m.close_date <= end]
     return {
         "as_of": as_of,
@@ -226,7 +226,7 @@ def tax_body(
     ``fy`` the report runs through the FY of ``as_of``, so a loss's expiry after the last
     match is still visible."""
     by_id = {c.id: c for c in contracts}
-    label = financial_year(_financial_year_bounds(fy)[0]) if fy is not None else None
+    label = financial_year(financial_year_bounds(fy)[0]) if fy is not None else None
     report: FnoTaxReport = compute_tax_report(
         result.matches, through_fy=label or financial_year(as_of)
     )

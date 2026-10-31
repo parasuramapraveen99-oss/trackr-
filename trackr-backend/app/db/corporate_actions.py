@@ -1250,6 +1250,11 @@ def discover_from_yfinance(
     writes ``corporate_action`` and nothing can be applied to a ledger; an issuer notice
     has to establish the event. The factor is stored as text, never rounded.
 
+    BSE-ONLY (owner decision 2026-10-31). For an NSE-listed security, NSE's notices and the
+    bhavcopy price check already find splits and bonuses, so Yahoo is asked only about
+    securities whose newest close is not NSE's; the rest are counted in
+    ``skipped_nse_listed``.
+
     ``isins`` defaults to every ISIN this system has ever held; the retired side of a
     VERIFIED alias is skipped silently (``current_identifiers``). An ISIN with no usable
     symbol, or whose lookup fails, is recorded REJECTED and the run continues with the
@@ -1259,7 +1264,7 @@ def discover_from_yfinance(
     """
     from app.config import get_settings
     from app.db.action_ingestion import payload_digest, record_observation
-    from app.db.prices import held_isins
+    from app.db.prices import held_isins, nse_listed_isins
     from app.ingest.action_source import PARSER_VERSION, ActionBatchFailed
     from app.ingest.corporate_action_yfinance import (
         YFINANCE_SOURCE_NAME,
@@ -1272,7 +1277,11 @@ def discover_from_yfinance(
     if yf_source is None:
         yf_source = YfinanceSource()
         rights_reference = get_settings().yahoo_data_rights_reference
-    target_isins = current_identifiers(conn, isins if isins is not None else held_isins(conn))
+    candidates_isins = current_identifiers(
+        conn, isins if isins is not None else held_isins(conn)
+    )
+    nse_listed = nse_listed_isins(conn, candidates_isins)
+    target_isins = [isin for isin in candidates_isins if isin not in nse_listed]
     meta = lookup(conn, target_isins)
     discovered = duplicates = 0
     rejected: list[str] = []
@@ -1317,4 +1326,5 @@ def discover_from_yfinance(
     if rejected:
         raise ActionBatchFailed(rejected, [])
     return {"isins_checked": len(target_isins), "discovered": discovered, "verified": 0,
-            "exceptions": discovered, "duplicates": duplicates, "errors": {}}
+            "exceptions": discovered, "duplicates": duplicates, "errors": {},
+            "skipped_nse_listed": len(nse_listed)}

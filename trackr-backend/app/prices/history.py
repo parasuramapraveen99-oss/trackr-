@@ -59,8 +59,12 @@ def store_backfilled_days(connection: Any, price_results: list[PipeResult]) -> i
     # "settled" would let a security nobody owns govern whether a real holding's price
     # is ever fetched again.
     wanted = held | set(current_universe_isins(connection))
+    from app.prices.market import record_market_day
+
     price_dates_fetched = 0
     for result in price_results:
+        # The whole merged file first, so no row of a fetched day is ever discarded again.
+        record_market_day(connection, result)
         stored = upsert_prices(connection, [p for p in result.prices if p.isin in wanted])
         if stored:
             price_dates_fetched += 1
@@ -132,19 +136,28 @@ def backfill_price_history(
     with connection.cursor() as cur:
         cur.execute("SELECT min(txn_date) FROM transaction")
         first = cur.fetchone()[0]
+    empty = {"pending": 0, "hydrated_days": 0, "fetched_days": 0, "closed_days": 0,
+             "failed_days": 0}
     if first is None:
-        return {"pending": 0, "fetched_days": 0, "closed_days": 0, "failed_days": 0}
+        return empty
 
     start = max(first, NSE_BHAVCOPY_EARLIEST)
     end = today - timedelta(days=1)
     if start > end:
-        return {"pending": 0, "fetched_days": 0, "closed_days": 0, "failed_days": 0}
+        return empty
 
     settled = price_dates_settled(connection, start, end)
     closed = _closed_days(connection, start, end)
     skip = settled | (closed or set())
     sessions = weekend_sessions(connection, start, end)
     pending = [d for d in reversed(trading_days(start, end, sessions)) if d not in skip]
+    # Days the full-market store already holds are answered in SQL, with no download --
+    # the path an import takes (docs/INSTANT_IMPORT_PLAN.md). Only what is left is fetched.
+    from app.prices.market import hydrate_prices
+
+    hydrated = hydrate_prices(connection, pending)
+    connection.commit()
+    pending = [d for d in pending if d not in hydrated["settled_days"]]
 
     fetched_days = closed_days = failed_days = 0
     began = time.monotonic()
@@ -172,6 +185,7 @@ def backfill_price_history(
             logger.warning("price backfill failed for %s", on, exc_info=True)
     return {
         "pending": len(pending),
+        "hydrated_days": len(hydrated["settled_days"]),
         "fetched_days": fetched_days,
         "closed_days": closed_days,
         "failed_days": failed_days,
@@ -211,6 +225,10 @@ def backfill_universe_prices(
             "pending": 0,
             "attempted": 0,
         }
+    from app.prices.market import hydrate_isins
+
+    hydrate_isins(connection, members, start, end)
+    connection.commit()
     with connection.cursor() as cur:
         cur.execute(
             "SELECT price_date, count(*) FROM price WHERE isin = ANY(%s) "

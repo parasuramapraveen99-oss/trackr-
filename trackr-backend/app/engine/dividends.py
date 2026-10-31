@@ -27,10 +27,10 @@ from app.engine.types import ZERO, DividendSummary, DividendYear, Transaction, T
 from app.engine.xirr import financial_year_start
 
 
-def _fy_label(fy_start: date) -> str:
+def fy_label(fy_start: date) -> str:
     """1 April YYYY -> ``"YYYY-YY+1"``, e.g. 2025-04-01 -> ``"2025-26"``.
 
-    The inverse of ``app.routers.transactions._financial_year_bounds``, which already
+    The inverse of ``app.routers.transactions.financial_year_bounds``, which already
     parses this exact label back into a date range for the ``/realised?fy=`` filter --
     same convention, opposite direction.
     """
@@ -55,7 +55,7 @@ def compute_dividends(transactions: list[Transaction]) -> list[DividendSummary]:
     for txn in transactions:
         if txn.txn_type is not TxnType.DIVIDEND:
             continue
-        fy = _fy_label(financial_year_start(txn.txn_date))
+        fy = fy_label(financial_year_start(txn.txn_date))
         totals[txn.isin] = totals.get(txn.isin, ZERO) + txn.dividend_amount
         year_totals = by_year.setdefault(txn.isin, {})
         year_totals[fy] = year_totals.get(fy, ZERO) + txn.dividend_amount

@@ -3,7 +3,7 @@
 import type { PortfolioScreenProps } from "../chrome";
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { useAuth } from "@trackr/core";
+import { useAssetScope, useAuth } from "@trackr/core";
 import { useFetch } from "@trackr/core";
 import { usePortfolioRefresh } from "@trackr/core";
 import {
@@ -17,7 +17,8 @@ import type { HoldingOut, HoldingsResponse } from "@trackr/core";
 import { ErrorState, NoInvestorState } from "../widgets/PageState";
 import { UnpricedBanner } from "../widgets/UnpricedBanner";
 import { SkippedHoldingsBanner } from "../widgets/SkippedHoldingsBanner";
-import { LedgerFiguresCard } from "../widgets/LedgerFiguresCard";
+import { InvestmentSummary } from "../widgets/InvestmentSummary";
+import { AssetScopeSelect } from "../widgets/AssetScopeSelect";
 import {
   Card,
   EmptyState,
@@ -26,10 +27,14 @@ import {
   LedgerGridSkeleton,
   LedgerSecurity,
   LedgerSigned,
+  LedgerTag,
   type LedgerColumn,
 } from "@trackr/ui";
 
 type SortKey = "symbol" | "invested" | "market_value" | "unrealised" | "weight_pct";
+
+/** What a row is, from the server's own valuation route (`instrument_kind`). */
+const KIND_LABEL: Record<string, string> = { STOCK: "Stock", ETF: "ETF", MUTUAL_FUND: "Fund" };
 
 /**
  * Is this exact rate negative? Null when there is no rate -- the chrome header's `negative`
@@ -51,13 +56,16 @@ export function HoldingsScreen({ chrome }: PortfolioScreenProps) {
   const { investorId, token, asOf, advisedOnly } = useAuth();
   const [q, setQ] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("weight_pct");
+  // Shared with the Dashboard. The server narrows the ledger to this scope, so the Total
+  // line and every weight below describe exactly the rows shown.
+  const [scope] = useAssetScope();
 
   // Same live cadence as the Dashboard, and for the same reason: these are marked-to-market
   // figures, and only today's move. See lib/use-fetch.ts's FetchOptions.
   const isToday = asOf === new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
   const holdings = useFetch<HoldingsResponse>(
     investorId ? `/investors/${investorId}/holdings` : null,
-    { as_of: asOf, advised_only: advisedOnly || undefined },
+    { as_of: asOf, advised_only: advisedOnly || undefined, scope },
     token,
     { refreshMs: isToday ? 120_000 : 0 }
   );
@@ -137,6 +145,17 @@ export function HoldingsScreen({ chrome }: PortfolioScreenProps) {
         </Link>
       ),
     },
+    {
+      key: "instrument_kind",
+      label: "Type",
+      figure: false,
+      width: "minmax(56px, 0.5fr)",
+      render: (r) => (
+        <LedgerTag tone={r.instrument_kind === "MUTUAL_FUND" ? "accent" : undefined}>
+          {KIND_LABEL[r.instrument_kind ?? ""] ?? "Stock"}
+        </LedgerTag>
+      ),
+    },
     { key: "quantity", label: "Qty", align: "right", render: (r) => formatQuantity(r.quantity) },
     { key: "avg_cost", label: "Avg cost", align: "right", render: (r) => formatMoney(r.avg_cost, true) },
     { key: "last_price", label: "LTP", align: "right", render: (r) => formatMoney(r.last_price, true) },
@@ -176,6 +195,7 @@ export function HoldingsScreen({ chrome }: PortfolioScreenProps) {
         title="Holdings"
         subtitle="Average cost basis, computed on read from the ledger and never stored."
         headline={formatMoney(totals?.market_value)}
+        action={<AssetScopeSelect />}
         changes={[
           {
             key: "unrealised",
@@ -190,14 +210,21 @@ export function HoldingsScreen({ chrome }: PortfolioScreenProps) {
       <Body>
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--gap-section)" }}>
           {holdings.data && <UnpricedBanner unpriced={holdings.data.unpriced} />}
-          {holdings.data && <SkippedHoldingsBanner skipped={holdings.data.skipped} onFixed={holdings.refetch} />}
-          <LedgerFiguresCard />
+          {holdings.data && holdings.data.skipped.length > 0 && (
+            <div id="data-gaps">
+              <SkippedHoldingsBanner skipped={holdings.data.skipped} onFixed={holdings.refetch} />
+            </div>
+          )}
+          <InvestmentSummary />
 
+          {/* On a phone the card header wraps, so Sort and Search drop below the title instead
+              of squeezing it to one word per line and pushing the page sideways. */}
+          <div className="hold-card">
           <Card
             title="Holdings"
             subtitle={`${rows.length} priced position${rows.length === 1 ? "" : "s"} · average cost basis`}
             action={
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div className="hold-tools" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ font: "var(--type-body-sm)", color: "var(--text-tertiary)" }}>Sort</span>
                 <select
                   value={sortKey}
@@ -220,7 +247,7 @@ export function HoldingsScreen({ chrome }: PortfolioScreenProps) {
                   <option value="unrealised">Unrealised</option>
                   <option value="symbol">Security</option>
                 </select>
-                <div style={{ width: 200 }}>
+                <div className="hold-search" style={{ width: 200 }}>
                   <Input icon="search" placeholder="Search" value={q} onChange={setQ} />
                 </div>
               </div>
@@ -245,7 +272,15 @@ export function HoldingsScreen({ chrome }: PortfolioScreenProps) {
               <LedgerGrid stickyHeader gap={18} rows={rows} columns={columns} total={totalRow} />
             )}
           </Card>
+          </div>
         </div>
+        <style jsx>{`
+          @media (max-width: 620px) {
+            .hold-card :global(header) { flex-wrap: wrap; }
+            .hold-tools { flex-wrap: wrap; width: 100%; }
+            .hold-search { flex: 1 1 160px; width: auto !important; }
+          }
+        `}</style>
       </Body>
     </>
   );

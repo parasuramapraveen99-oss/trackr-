@@ -30,7 +30,7 @@ from time import monotonic
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app import securities
 from app.auth.dependencies import require_owned_investor
@@ -55,10 +55,11 @@ from app.engine.benchmark import (
     required_index_dates,
     required_series_index_dates,
 )
-from app.engine.contribution import compute_contribution
+from app.engine.contribution import compute_contribution, compute_period_bridge, period_line
 from app.engine.errors import MissingIndexLevelError, MissingPriceError, NegativeHoldingError
 from app.engine.holdings import (
     MAX_PRICE_STALENESS_DAYS,
+    SkippedHolding,
     compute_holdings,
     compute_holdings_partitioned,
     exclude_unreconciled,
@@ -66,18 +67,28 @@ from app.engine.holdings import (
 from app.engine.returns import compute_absolute_return, compute_net_invested
 from app.engine.snapshot import compute_snapshot
 from app.engine.twrr import compute_twrr
-from app.engine.types import ZERO, Snapshot, Transaction
+from app.engine.types import (
+    ACQUIRING_TYPES,
+    DISPOSING_TYPES,
+    FREE_SHARE_TYPES,
+    ZERO,
+    Snapshot,
+    Transaction,
+    TxnType,
+)
+from app.engine.valuation import value_holdings
 from app.engine.xirr import (
     compute_period_xirr,
     compute_xirr,
     compute_xirr_holdings,
     financial_year_start,
+    financial_years,
     period_warning,
     years_before,
 )
-from app.exchange_reference import MissingExchangeReference
+from app.exchange_reference import MissingExchangeReference, archive_collection
 from app.prices.alerts import Notifier, get_notifier
-from app.prices.current import resolve_current_prices
+from app.prices.current import CurrentPrices, resolve_current_prices
 from app.prices.history import backfill_price_history, store_backfilled_days
 from app.prices.index_sources import (
     TRI_INDICES,
@@ -91,6 +102,7 @@ from app.routers import exclusions
 from app.schemas.analytical import (
     BenchmarkSeriesResponse,
     ContributionResponse,
+    LedgerSummaryResponse,
     PerformanceResponse,
     PriceBackfillResponse,
     PriceRefreshResponse,
@@ -401,6 +413,7 @@ def performance(
     as_of: date | None = None,
     advised_only: bool = False,
     benchmark: BenchmarkName | None = None,
+    scope: exclusions.Scope = "listed",
     connection: Any = Depends(get_conn),
 ) -> dict[str, Any]:
     """Both XIRR variants, always together -- CLAUDE.md: reporting one alone leaves a
@@ -436,10 +449,18 @@ def performance(
     )
     transactions, skipped = exclude_unreconciled(transactions, resolved_as_of)
     skipped.extend(g for g in cas_gaps if g.isin not in {s.isin for s in skipped})
-    # Listed securities only: mutual funds have their own series (docs/MF_ETF_PLAN.md s.8).
-    transactions, skipped = exclusions.listed_scope(
-        connection, transactions, skipped, resolved_as_of
-    )
+    # Listed securities only by default: mutual funds have their own series (docs/
+    # MF_ETF_PLAN.md s.8). Owner amendment 26-Oct-2026: ``scope=all`` (the Dashboard's
+    # "All investments") solves ONE XIRR over the external cash flows of stocks and funds
+    # together -- the same compute_xirr, funds valued at their NAV by the shared price
+    # selection below -- and ``scope=mutual_fund`` over funds alone.
+    listed = scope == "listed"
+    if listed:
+        transactions, skipped = exclusions.listed_scope(
+            connection, transactions, skipped, resolved_as_of
+        )
+    else:
+        transactions = exclusions.in_scope(connection, transactions, scope)
 
     isins = [h.isin for h in compute_holdings(transactions, resolved_as_of)]
     # Same price selection as /holdings and /summary (audit D1): the XIRR terminal value
@@ -452,6 +473,16 @@ def performance(
     snapshot = compute_snapshot(transactions, prices, resolved_as_of)
     xirr_all = compute_xirr(transactions, prices, resolved_as_of)
     xirr_holdings = compute_xirr_holdings(transactions, prices, resolved_as_of)
+    # The combined figure's parts, so "All" can say what it blends. Each is the same
+    # ledger restricted again, solved with the same prices.
+    xirr_listed = xirr_funds = None
+    if scope == "all":
+        xirr_listed = compute_xirr(
+            exclusions.in_scope(connection, transactions, "listed"), prices, resolved_as_of
+        )
+        xirr_funds = compute_xirr(
+            exclusions.in_scope(connection, transactions, "mutual_fund"), prices, resolved_as_of
+        )
 
     # Fixed-calendar trailing windows -- FY-to-date plus 1/3/5 calendar years back.
     # years_before is real date arithmetic (Feb-29-aware), not days=365*n, which would
@@ -459,7 +490,7 @@ def performance(
     # all five _window_xirr calls below (including period_xirr) rather than recomputed
     # per window.
     earliest_txn = min((t.txn_date for t in transactions), default=None)
-    fy_xirr, _ = _window_xirr(
+    fy_xirr, _ = (None, None) if not listed else _window_xirr(
         request,
         connection,
         investor_id,
@@ -471,7 +502,7 @@ def performance(
         resolved_as_of,
         advised_only,
     )
-    xirr_1y, _ = _window_xirr(
+    xirr_1y, _ = (None, None) if not listed else _window_xirr(
         request,
         connection,
         investor_id,
@@ -483,7 +514,7 @@ def performance(
         resolved_as_of,
         advised_only,
     )
-    xirr_3y, _ = _window_xirr(
+    xirr_3y, _ = (None, None) if not listed else _window_xirr(
         request,
         connection,
         investor_id,
@@ -495,7 +526,7 @@ def performance(
         resolved_as_of,
         advised_only,
     )
-    xirr_5y, _ = _window_xirr(
+    xirr_5y, _ = (None, None) if not listed else _window_xirr(
         request,
         connection,
         investor_id,
@@ -510,7 +541,7 @@ def performance(
 
     # TWRR windows (docs/ENGINE_SPEC.md section 5) -- the adviser-skill companion to the
     # four XIRR windows above, same target_start dates, never shown alone.
-    fy_twrr = _window_twrr(
+    fy_twrr = None if not listed else _window_twrr(
         connection,
         investor_id,
         transactions,
@@ -520,7 +551,7 @@ def performance(
         advised_only,
         snapshot,
     )
-    twrr_1y = _window_twrr(
+    twrr_1y = None if not listed else _window_twrr(
         connection,
         investor_id,
         transactions,
@@ -530,7 +561,7 @@ def performance(
         advised_only,
         snapshot,
     )
-    twrr_3y = _window_twrr(
+    twrr_3y = None if not listed else _window_twrr(
         connection,
         investor_id,
         transactions,
@@ -540,7 +571,7 @@ def performance(
         advised_only,
         snapshot,
     )
-    twrr_5y = _window_twrr(
+    twrr_5y = None if not listed else _window_twrr(
         connection,
         investor_id,
         transactions,
@@ -568,7 +599,7 @@ def performance(
     period_xirr_value: Decimal | None = None
     period_start: date | None = None
     period_warn: str | None = None
-    if onboarding_date is not None and onboarding_date <= resolved_as_of:
+    if listed and onboarding_date is not None and onboarding_date <= resolved_as_of:
         period_xirr_value, actual_start = _window_xirr(
             request,
             connection,
@@ -588,7 +619,7 @@ def performance(
     # benchmark (section 6): computed only when asked for -- see _benchmark's docstring
     # for why SENSEX_TRI 400s here rather than degrading to null like a genuine data gap.
     benchmark_out: dict[str, Any] | None = None
-    if benchmark is not None:
+    if benchmark is not None and listed:
         benchmark_out = _benchmark(
             request, connection, investor_id, transactions, benchmark, resolved_as_of
         )
@@ -614,8 +645,14 @@ def performance(
         "unrealised": money(snapshot.unrealised),
         "realised_to_date": money(snapshot.realised_to_date),
         "benchmark": benchmark_out,
-        "warning": period_warn,
+        "warning": period_warn if listed else (
+            "Trailing XIRR windows, TWRR and the benchmark cover stocks and ETFs only, so "
+            "they are not shown for this view."
+        ),
         "excluded": exclusions.describe(connection, skipped),
+        "scope": scope,
+        "xirr_listed": rate(xirr_listed),
+        "xirr_funds": rate(xirr_funds),
     }
 
 
@@ -923,9 +960,15 @@ def build_contribution(
     transactions, end_isins, skipped = exclusions.drop_unpriced(
         transactions, end_isins, end_prices, resolved_as_of, skipped
     )
+    # Transfers flow at the market price on their date (s.10 amendment 2026-10-30): a
+    # price-0 correction leg no longer books a phantom gain or loss. Unpriced -> named.
+    transactions, transfer_prices, skipped = exclusions.price_transfers(
+        connection, transactions, period_start, resolved_as_of, skipped,
+        live=not cached_prices_only, resolve=resolve_current_prices,
+    )
 
     results = compute_contribution(
-        transactions, start_prices, end_prices, period_start, resolved_as_of
+        transactions, start_prices, end_prices, period_start, resolved_as_of, transfer_prices
     )
     meta = securities.lookup(connection, [c.isin for c in results])
     total_gain = sum((c.gain for c in results), ZERO)
@@ -963,6 +1006,445 @@ def build_contribution(
             reverse=True,
         ),
         "excluded": exclusions.describe(connection, skipped),
+    }
+
+
+def _fy_value(fy_start: date) -> str:
+    """The financial year as the query value ``/realised`` parses, e.g. ``"2024-25"`` --
+    the one convention ``app.engine.dividends.fy_label`` owns."""
+    from app.engine.dividends import fy_label
+
+    return fy_label(fy_start)
+
+
+def _fy_label(fy_start: date) -> str:
+    """Its display label, ``"FY 2024–25"`` with an en dash (ENGINE_SPEC s.16 rule 7)."""
+    return "FY " + _fy_value(fy_start).replace("-", "–")
+
+
+#: How a transfer figure is named in an exclusion's ``affects``.
+_AFFECTS_NAME = {"transfers_in": "transfers", "transfers_out": "transfers"}
+
+SHORT_PERIOD_NOTE = "Under one year: shown in rupees, not annualised"
+TRANSFERS_ZERO_CASH_NOTE = (
+    "Transfers move shares without cash, so XIRR counts them as zero cash (ENGINE_SPEC "
+    "section 4)"
+)
+
+
+def period_xirr_status(
+    value: Decimal | None,
+    *,
+    all_time: bool,
+    has_transfer: bool,
+    incomplete: bool,
+    start: date,
+    end: date,
+) -> dict[str, Any]:
+    """The summary's XIRR with its status, resolved in ENGINE_SPEC section 16 rule 5's
+    order: withheld_transfers, undefined, incomplete, short_period, ok. Pure."""
+    if has_transfer and not all_time:
+        return {
+            "value": None,
+            "status": "withheld_transfers",
+            "reason": (
+                "A transfer in this period moved shares without cash; XIRR would count it "
+                "as zero cash, so it is not shown"
+            ),
+        }
+    if value is None:
+        return {
+            "value": None,
+            "status": "undefined",
+            "reason": "XIRR is undefined for these cash flows (too few dates or no sign change)",
+        }
+    transfers_note = TRANSFERS_ZERO_CASH_NOTE if has_transfer else None
+    short = (end - start).days < 365
+    if incomplete:
+        reason = "Computed without the excluded securities named below"
+        # Incomplete outranks short_period, but a short window keeps its warnings: §4
+        # never presents an under-90-day rate unqualified, and D8 shows none under a year.
+        shorts = (period_warning(start, end), SHORT_PERIOD_NOTE) if short else ()
+        return {
+            # D8: no rate under one year, whatever else is wrong with the window.
+            "value": None if short else rate(value),
+            "status": "incomplete",
+            "reason": "; ".join(r for r in (reason, *shorts, transfers_note) if r),
+        }
+    if short:
+        parts = (period_warning(start, end), SHORT_PERIOD_NOTE, transfers_note)
+        return {
+            "value": rate(value),
+            "status": "short_period",
+            "reason": "; ".join(r for r in parts if r),
+        }
+    return {"value": rate(value), "status": "ok", "reason": transfers_note}
+
+
+def _net_quantity(rows: list[Transaction], on: date) -> Decimal:
+    """Ledger quantity of one ISIN at ``on`` by signed sum. Used ONLY to say whether an
+    excluded security touches an opening or closing figure -- never to value anything."""
+    total = ZERO
+    for t in rows:
+        if t.txn_date > on:
+            continue
+        if t.txn_type in ACQUIRING_TYPES or t.txn_type in FREE_SHARE_TYPES:
+            total += t.quantity
+        elif t.txn_type in DISPOSING_TYPES:
+            total -= t.quantity
+    return total
+
+
+@router.get(
+    "/investors/{investor_id}/ledger-summary",
+    response_model=LedgerSummaryResponse,
+    dependencies=[Depends(require_owned_investor)],
+)
+def ledger_summary(
+    investor_id: str,
+    fy: str | None = None,
+    from_: date | None = Query(default=None, alias="from"),
+    to: date | None = None,
+    scope: exclusions.Scope = "all",
+    advised_only: bool = False,
+    connection: Any = Depends(get_conn),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Opening value, purchases, proceeds, dividends, transfers, closing value, period
+    gain, FIFO realised and period XIRR over one window -- docs/ENGINE_SPEC.md section 16.
+    No ``fy``/``from``/``to`` is All time."""
+    return build_ledger_summary(
+        connection, investor_id, (fy, from_, to), scope, advised_only, settings
+    )
+
+
+def _summary_window(
+    window: tuple[str | None, date | None, date | None], first: date | None, today: date
+) -> tuple[date, date, str, str]:
+    """``(start, end, kind, label)`` for the request, or a 400. ENGINE_SPEC s.16 rule 1."""
+    from app.routers.transactions import financial_year_bounds
+
+    fy, from_, to = window
+    if fy is not None and (from_ is not None or to is not None):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "fy cannot be combined with from/to")
+    if (from_ is None) != (to is None):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "from and to must be given together")
+    if from_ is not None and to is not None:
+        if from_ > to:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "from must be on or before to")
+        if to > today:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "to cannot be after today")
+        return from_ - timedelta(days=1), to, "custom", "Custom"
+    if fy is not None:
+        fy_start, fy_end = financial_year_bounds(fy)
+        if fy_start > today:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"fy {fy} has not started yet")
+        end = min(fy_end, today)
+        label = _fy_label(fy_start) + (" to date" if end < fy_end else "")
+        return fy_start - timedelta(days=1), end, "fy", label
+    first_day = first if first is not None else today
+    return first_day - timedelta(days=1), today, "all", "All time"
+
+
+def build_ledger_summary(
+    connection: Any,
+    investor_id: str,
+    window: tuple[str | None, date | None, date | None],
+    scope: exclusions.Scope,
+    advised_only: bool,
+    settings: Settings,
+    today: date | None = None,
+    *,
+    xirr_only: bool = False,
+    preloaded: list[Transaction] | None = None,
+) -> dict[str, Any]:
+    """The period bridge, ENGINE_SPEC section 16, from one replay of the ledger.
+
+    ``xirr_only`` (with the caller's ``preloaded`` ledger) stops once the XIRR is known
+    and returns ``{"xirr": ...}`` -- how a bounded window gets the All-time XIRR without
+    a second full pipeline (realised, transfer prices, rows and holdings are skipped;
+    none of them changes the All-time XIRR or its status).
+
+    Scope is applied to the LEDGER first (``exclusions.in_scope``). Every security left
+    out -- unreconciled, unpriced at either end or on a transfer date, CAS holdings with
+    no acquisition history, or excluded by ``/realised`` -- is named in ``exclusions``
+    with the figures it ``affects`` (rule 16); nothing is valued at zero (rule 4).
+    ``build_contribution`` is deliberately not reused: it is listed-only and must not move.
+    """
+    from app.db.fund_reference import isins_on_route
+    from app.prices.routing import Route
+    from app.routers.holdings import AUTO_RESOLVED_PREFIX
+    from app.routers.transactions import realised_rows
+
+    today = today or date.today()
+    all_tx = (
+        preloaded
+        if preloaded is not None
+        else load_transactions(connection, investor_id=investor_id, advised_only=advised_only)
+    )
+    scoped = exclusions.in_scope(connection, all_tx, scope)
+    first = min((t.txn_date for t in scoped), default=None)
+    start, end, kind, label = _summary_window(window, first, today)
+    all_time = kind == "all"
+
+    # 3. The ledger to `end`, less what does not reconcile, plus CAS holdings in scope
+    # whose acquisition history is missing.
+    tx_before_drops = [t for t in scoped if t.txn_date <= end]
+    cas_gaps = exclusions.missing_cas_history(
+        connection, investor_id, [t for t in all_tx if t.txn_date <= end], [], end, advised_only
+    )
+    if scope != "all" and cas_gaps:
+        funds = set(isins_on_route(connection, {g.isin for g in cas_gaps}, Route.AMFI))
+        cas_gaps = [g for g in cas_gaps if (g.isin in funds) == (scope == "mutual_fund")]
+    tx, skipped = exclude_unreconciled(tx_before_drops, end)
+    skipped.extend(g for g in cas_gaps if g.isin not in {s.isin for s in skipped})
+
+    # 4-5. Price the start and the end with the Holdings price selection.
+    q0 = CurrentPrices()
+    unpriced_start: set[str] = set()
+    if first is not None and start >= first:
+        held0 = [h.isin for h in compute_holdings(tx, start)]
+        q0 = resolve_current_prices(connection, held0, start, live=False)
+        unpriced_start = {i for i in held0 if i not in q0.prices}
+        tx, _, skipped = exclusions.drop_unpriced(
+            tx, held0, q0.prices, start, skipped, q0.unpriced_reasons
+        )
+    held1 = [h.isin for h in compute_holdings(tx, end)]
+    # Stored closes only (no intraday quote): every figure here must replay from the
+    # ledger and stored prices (CLAUDE.md), so "worth now" is the last official close.
+    q1 = resolve_current_prices(connection, held1, end, live=False)
+    unpriced_end = {i for i in held1 if i not in q1.prices}
+    tx, _, skipped = exclusions.drop_unpriced(
+        tx, held1, q1.prices, end, skipped, q1.unpriced_reasons
+    )
+
+    # Transfers are valued at the close on their own date (Q1 (c), GIPS in-kind). A
+    # transfer with no close there drops its ISIN from every line, named. All-time XIRR
+    # never values a transfer (§4: zero cash), so it reads the ledger before that drop.
+    in_window = [t for t in tx_before_drops if start < t.txn_date <= end]
+    tx_all_time_xirr = tx
+    if xirr_only:
+        transfer_prices: dict[tuple[str, date], Decimal] = {}
+        unpriced_transfer: set[str] = set()
+    else:
+        named_before = {s.isin for s in skipped}
+        tx, transfer_prices, skipped = exclusions.price_transfers(
+            connection, tx, start, end, skipped, live=False, resolve=resolve_current_prices
+        )
+        unpriced_transfer = {s.isin for s in skipped} - named_before
+
+    # 6. The bridge.
+    bridge = (
+        None if xirr_only
+        else compute_period_bridge(tx, q0.prices, q1.prices, start, end, transfer_prices)
+    )
+
+    # 7. FIFO realised of sales in the window, exactly as /realised reports it.
+    realised_list, realised_skipped = (
+        ([], []) if xirr_only else realised_rows(
+            connection, investor_id, settings, start + timedelta(days=1), end, scope,
+            advised_only, ledger=all_tx,
+        )
+    )
+    realised = sum((Decimal(r["gain"]) for r in realised_list), ZERO)
+    realised_isins = {r.get("isin") for r in realised_list}
+
+    # 9a. Exclusions and what each affects.
+    final_isins = {t.isin for t in tx}
+    by_isin: dict[str, list[Transaction]] = {}
+    for t in scoped:
+        by_isin.setdefault(t.isin, []).append(t)
+    named = {s.isin for s in skipped}
+    skipped = skipped + [s for s in realised_skipped if s.isin not in named]
+    realised_out = {s.isin for s in realised_skipped}
+
+    def affects(entry: SkippedHolding) -> list[str]:
+        isin = entry.isin
+        rows = by_isin.get(isin, [])
+        window_rows = [t for t in rows if start < t.txn_date <= end]
+        found: set[str] = set()
+        if entry.reason_code == "CAS_HISTORY_MISSING":
+            return ["closing", "period_gain", "xirr"]
+        if isin in final_isins:
+            # Still in the bridge: only /realised left it out.
+            return ["realised"] if isin in realised_out and any(
+                t.txn_type in DISPOSING_TYPES for t in window_rows
+            ) else []
+        for t in window_rows:
+            figure = period_line(t, transfer_prices)[0]
+            if figure != "none":
+                found.add(_AFFECTS_NAME.get(figure, figure))
+        # Dropped from the bridge for any reason (unreconciled, unpriced at one end, or a
+        # transfer without a close): every rupee it would have added to opening or
+        # closing is gone, so both are named whenever the ledger held it then.
+        if _net_quantity(rows, start) != ZERO:
+            found.add("opening")
+        if _net_quantity(rows, end) != ZERO:
+            found.add("closing")
+        if isin in unpriced_start:
+            found.add("opening")
+        if isin in unpriced_end:
+            found.add("closing")
+        if found:
+            found.update({"period_gain", "xirr"})
+        if all_time and isin in unpriced_transfer:
+            # All-time XIRR never values a transfer, so it still includes this ISIN.
+            found.discard("xirr")
+        if isin in realised_out and any(t.txn_type in DISPOSING_TYPES for t in window_rows):
+            found.add("realised")
+        order = ("opening", "closing", "purchases", "proceeds", "dividends", "transfers",
+                 "period_gain", "realised", "xirr")
+        return [a for a in order if a in found]
+
+    def periods(isin: str) -> list[str]:
+        rows = by_isin.get(isin, [])
+        if not rows:
+            return []
+        last = today if _net_quantity(rows, today) != ZERO else max(t.txn_date for t in rows)
+        return [
+            _fy_label(fy_start)
+            for fy_start, _ in reversed(financial_years(min(t.txn_date for t in rows), last))
+        ]
+
+    # 8. XIRR (D4): All time is compute_xirr itself, so the golden figure is reproduced.
+    xirr_tx = tx_all_time_xirr if all_time else tx
+    if not xirr_tx:
+        xirr: dict[str, Any] = {
+            "value": None,
+            "status": "undefined",
+            "reason": "No transactions" if not scoped else "No transactions that can be valued",
+        }
+    else:
+        value = (
+            compute_xirr(xirr_tx, q1.prices, end)
+            if all_time
+            else compute_period_xirr(tx, q1.prices, start, bridge.opening, end)  # type: ignore[union-attr]
+        )
+        xirr = period_xirr_status(
+            value,
+            all_time=all_time,
+            has_transfer=any(
+                start < t.txn_date
+                and t.txn_type in (TxnType.TRANSFER_IN, TxnType.TRANSFER_OUT)
+                for t in xirr_tx
+            ),
+            incomplete=any("xirr" in affects(e) for e in skipped),
+            start=start,
+            end=end,
+        )
+    if xirr_only:
+        return {"xirr": xirr}
+
+    # 9b. Rows: every in-window row of the scoped ledger, the dropped ones tagged.
+    meta = securities.lookup(
+        connection, sorted({t.isin for t in in_window} | {s.isin for s in skipped} | set(held1))
+    )
+    rows_out = []
+    auto_resolved_count = 0
+    for t in sorted(in_window, key=lambda r: (r.txn_date, r.isin)):
+        figure, amount = period_line(t, transfer_prices)
+        auto = bool(t.source_ref and t.source_ref.startswith(AUTO_RESOLVED_PREFIX))
+        excluded = t.isin not in final_isins
+        if auto and not excluded and (
+            t.txn_type in ACQUIRING_TYPES or t.txn_type in FREE_SHARE_TYPES
+        ):
+            auto_resolved_count += 1
+        rows_out.append(
+            {
+                "date": t.txn_date,
+                "isin": t.isin,
+                "symbol": securities.describe(meta, t.isin)["symbol"],
+                "txn_type": str(t.txn_type),
+                "quantity": money(t.quantity),
+                "amount": money(amount),
+                "figure": figure,
+                "excluded": excluded,
+                "auto_resolved": auto,
+                "source_ref": t.source_ref,
+            }
+        )
+
+    # 9c. What is held at the end, priced.
+    end_holdings = value_holdings(compute_holdings(tx, end), q1.prices)
+    holdings_end = [
+        {
+            "isin": h.isin,
+            "symbol": securities.describe(meta, h.isin)["symbol"],
+            "quantity": money(h.quantity),
+            "price": money(h.last_price),
+            "price_date": q1.quotes[h.isin].price_date,
+            "price_source": q1.quotes[h.isin].source,
+            "market_value": money(h.market_value),
+        }
+        for h in end_holdings
+    ]
+    price_dates = [q1.quotes[h.isin].price_date for h in end_holdings]
+    valuation_date = max((d for d in price_dates if d is not None), default=None)
+
+    exclusions_out = [
+        {
+            "isin": s.isin,
+            "symbol": securities.describe(meta, s.isin)["symbol"],
+            "reason": s.message,
+            "reason_code": s.reason_code,
+            "as_of": s.as_of,
+            "affects": affects(s),
+            "periods": periods(s.isin),
+        }
+        for s in skipped
+    ]
+
+    xirr_all_time = (
+        xirr
+        if all_time
+        else build_ledger_summary(
+            connection, investor_id, (None, None, None), scope, advised_only, settings, today,
+            xirr_only=True, preloaded=all_tx,
+        )["xirr"]
+    )
+
+    return {
+        "period": {
+            "start": start,
+            "end": end,
+            "first_day": start + timedelta(days=1),
+            "label": label,
+            "kind": kind,
+            "valuation_date": valuation_date,
+        },
+        "scope": scope,
+        "available_fys": [
+            {
+                "fy": _fy_value(fy_start),
+                "label": _fy_label(fy_start),
+                "start": fy_start,
+                "end": fy_end,
+            }
+            for fy_start, fy_end in (financial_years(first, today) if first else [])
+        ],
+        "opening": money(bridge.opening),
+        "purchases": money(bridge.purchases),
+        "proceeds": money(bridge.proceeds),
+        "dividends": money(bridge.dividends),
+        "transfers_in": money(bridge.transfers_in),
+        "transfers_out": money(bridge.transfers_out),
+        "closing": money(bridge.closing),
+        "period_gain": money(bridge.gain),
+        "sales_and_dividends": money(bridge.proceeds + bridge.dividends),
+        "realised": money(realised),
+        # /realised returns one row per FIFO lot slice; count the sales themselves.
+        "realised_sales": sum(
+            1 for t in scoped
+            if start < t.txn_date <= end and t.txn_type in DISPOSING_TYPES
+            and t.txn_type is not TxnType.TRANSFER_OUT
+            and t.isin in realised_isins
+        ),
+        "xirr": xirr,
+        "xirr_all_time": xirr_all_time,
+        "exclusions": exclusions_out,
+        "rows": rows_out,
+        "holdings_end": holdings_end,
+        "auto_resolved_count": auto_resolved_count,
     }
 
 
@@ -1066,8 +1548,12 @@ def refresh_prices(
     """Gated by ``X-Ops-Key`` (``app.auth.ops``), not a user login: this mutates stored
     prices for every investor, not just one caller's own view, and per the
     pre-deployment audit (2026-08-30) any signed-up alpha user could otherwise reach it
-    with nothing more than a valid session."""
-    return _refresh_prices(connection, settings)
+    with nothing more than a valid session.
+
+    Scheduled archive collection (owner amendment 2026-10-31): may fetch the published
+    bhavcopy and niftyindices files only, never the NSE API."""
+    with archive_collection(connection):
+        return _refresh_prices(connection, settings)
 
 
 @router.get("/ops/cron/live-prices-refresh", dependencies=[Depends(require_cron_secret)])
@@ -1104,8 +1590,10 @@ def refresh_prices_cron(
     """Same job as ``refresh_prices``, reachable by Vercel Cron specifically: GET,
     gated by ``CRON_SECRET`` (``app.auth.ops.require_cron_secret``) rather than
     ``X-Ops-Key``, since that is the only credential Vercel's scheduler sends and the
-    only HTTP method it calls with. See docs/DEPLOYMENT.md."""
-    return _refresh_prices(connection, settings)
+    only HTTP method it calls with. See docs/DEPLOYMENT.md. Archive-scoped collection,
+    as ``refresh_prices``."""
+    with archive_collection(connection):
+        return _refresh_prices(connection, settings)
 
 
 #: How far back the daily F&O refresh looks for exchange-days not yet stored.
@@ -1128,17 +1616,18 @@ def refresh_fno_prices_cron(
     from app.db.fno_reference import backfill_expiry_settlements, backfill_fno_prices
 
     today = date.today()
-    days = backfill_fno_prices(
-        connection,
-        today - timedelta(days=FNO_REFRESH_LOOKBACK_DAYS),
-        today,
-        notifier=get_notifier(settings),
-    )
-    # Plus any older expiry day a traded contract still has no price for: the 7-day
-    # window above can never reach one, and its settlement price exists only there.
-    expiries = backfill_expiry_settlements(
-        connection, notifier=get_notifier(settings), time_budget_seconds=150.0
-    )
+    with archive_collection(connection):
+        days = backfill_fno_prices(
+            connection,
+            today - timedelta(days=FNO_REFRESH_LOOKBACK_DAYS),
+            today,
+            notifier=get_notifier(settings),
+        )
+        # Plus any older expiry day a traded contract still has no price for: the 7-day
+        # window above can never reach one, and its settlement price exists only there.
+        expiries = backfill_expiry_settlements(
+            connection, notifier=get_notifier(settings), time_budget_seconds=150.0
+        )
     return {"days": days, "expiry_settlements": expiries}
 
 
@@ -1151,8 +1640,9 @@ def backfill_prices(
     connection: Any = Depends(get_conn),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    """``X-Ops-Key``-gated run of the automatic price-history backfill."""
-    return backfill_price_history(connection, notifier=get_notifier(settings))
+    """``X-Ops-Key``-gated run of the automatic price-history backfill. Archive-scoped."""
+    with archive_collection(connection):
+        return backfill_price_history(connection, notifier=get_notifier(settings))
 
 
 @router.get(
@@ -1166,8 +1656,9 @@ def backfill_prices_cron(
 ) -> dict[str, Any]:
     """Vercel Cron counterpart. Runs often and is bounded per run, so a new user's
     imported history is priced within hours with no human step; once history is
-    complete each run is one query and returns ``pending: 0``."""
-    return backfill_price_history(connection, notifier=get_notifier(settings))
+    complete each run is one query and returns ``pending: 0``. Archive-scoped."""
+    with archive_collection(connection):
+        return backfill_price_history(connection, notifier=get_notifier(settings))
 
 
 def _run_snapshots(connection: Any, start: date, end: date, notifier: Notifier) -> dict[str, Any]:

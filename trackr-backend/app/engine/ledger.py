@@ -9,8 +9,31 @@ on a portfolio large enough to be painful to debug.
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 
 from app.engine.types import Transaction, TxnType
+
+
+def cash_paid(txn: Transaction) -> Decimal:
+    """Rupees an acquisition cost: the printed amount when a statement gave one
+    (``Transaction.cash_amount``), else quantity x price + charges.
+
+    ONE DEFINITION for every reader -- XIRR, TWRR, the cost pool, FIFO lots, contribution
+    and the cash bridge. Units x NAV is a check on a registrar's amount, not a substitute
+    for it: units are rounded to 3 decimals, so the product misses by a fraction of a
+    paisa (docs/MF_ETF_PLAN.md section 6).
+    """
+    if txn.cash_amount is not None:
+        return txn.cash_amount
+    return txn.quantity * txn.price + txn.charges
+
+
+def cash_received(txn: Transaction) -> Decimal:
+    """Rupees a disposal returned: the printed net amount when a statement gave one,
+    else quantity x price - charges. See ``cash_paid``."""
+    if txn.cash_amount is not None:
+        return txn.cash_amount
+    return txn.quantity * txn.price - txn.charges
 
 #: The one same-date tiebreak this module applies on top of insertion order -- see
 #: ``ordered``'s docstring. Deliberately narrower than ``DISPOSING_TYPES``/

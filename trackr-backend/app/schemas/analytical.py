@@ -1,9 +1,11 @@
 """DTOs for GET /investors/{id}/performance, GET /investors/{id}/contribution,
+GET /investors/{id}/ledger-summary,
 POST /ops/prices/refresh, and POST /ops/snapshots/run."""
 
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -73,6 +75,12 @@ class PerformanceResponse(BaseModel):
     realised_to_date: str | None = None
     benchmark: BenchmarkOut | None = None
     warning: str | None = None
+    #: Which ledger these figures cover (owner amendment 26-Oct-2026): "listed" (default,
+    #: stocks and ETFs), "all" (stocks and mutual funds together), or "mutual_fund".
+    scope: str = "listed"
+    #: Only for scope "all": the combined XIRR's two parts, each solved over its own flows.
+    xirr_listed: str | None = None
+    xirr_funds: str | None = None
     #: Securities left out of EVERY figure above because their history does not reconcile
     #: yet. Empty when the whole ledger reconciles.
     excluded: list[ExcludedOut] = Field(default_factory=list)
@@ -99,6 +107,97 @@ class ContributionResponse(BaseModel):
     excluded: list[ExcludedOut] = Field(default_factory=list)
     benchmark: str | None = None
     performance: PerformanceWindowOut | None = None
+
+
+class LedgerSummaryPeriod(BaseModel):
+    """The window ``(start, end]``; ``first_day`` is ``start`` + 1 (ENGINE_SPEC s.16)."""
+
+    start: date
+    end: date
+    first_day: date
+    label: str
+    kind: Literal["all", "fy", "custom"]
+    #: Newest price date behind the closing value; null when nothing is held at ``end``.
+    valuation_date: date | None = None
+
+
+class LedgerSummaryFy(BaseModel):
+    fy: str
+    label: str
+    start: date
+    end: date
+
+
+class PeriodXirrOut(BaseModel):
+    value: str | None = None
+    status: Literal["ok", "short_period", "withheld_transfers", "undefined", "incomplete"]
+    reason: str | None = None
+
+
+class LedgerSummaryExclusion(BaseModel):
+    """A security left out of some or all figures. An empty ``affects`` means it is
+    listed for completeness and does not make this window's figures incomplete."""
+
+    isin: str
+    symbol: str | None = None
+    reason: str
+    reason_code: str | None = None
+    as_of: date | None = None
+    affects: list[str] = Field(default_factory=list)
+    periods: list[str] = Field(default_factory=list)
+
+
+class LedgerSummaryRow(BaseModel):
+    date: date
+    isin: str
+    symbol: str | None = None
+    txn_type: str
+    quantity: str
+    #: The engine figure this row adds to ``figure``; null for a type with no flow, or a
+    #: transfer with no close on its date.
+    amount: str | None = None
+    figure: Literal[
+        "purchases", "proceeds", "dividends", "transfers_in", "transfers_out", "none"
+    ]
+    excluded: bool = False
+    auto_resolved: bool = False
+    source_ref: str | None = None
+
+
+class LedgerSummaryHolding(BaseModel):
+    isin: str
+    symbol: str | None = None
+    quantity: str
+    price: str
+    price_date: date | None = None
+    price_source: str
+    market_value: str
+
+
+class LedgerSummaryResponse(BaseModel):
+    """GET /investors/{id}/ledger-summary -- ENGINE_SPEC section 16. Every money value is
+    a Decimal string; the client does no arithmetic on them."""
+
+    period: LedgerSummaryPeriod
+    scope: Literal["all", "listed", "mutual_fund"]
+    available_fys: list[LedgerSummaryFy]
+    opening: str
+    purchases: str
+    proceeds: str
+    dividends: str
+    transfers_in: str
+    transfers_out: str
+    closing: str
+    period_gain: str
+    sales_and_dividends: str
+    realised: str
+    realised_sales: int
+    xirr: PeriodXirrOut
+    xirr_all_time: PeriodXirrOut
+    exclusions: list[LedgerSummaryExclusion] = Field(default_factory=list)
+    rows: list[LedgerSummaryRow] = Field(default_factory=list)
+    holdings_end: list[LedgerSummaryHolding] = Field(default_factory=list)
+    auto_resolved_count: int = 0
 
 
 class SymbolChangeOut(BaseModel):
@@ -178,10 +277,12 @@ class SkippedSnapshotOut(BaseModel):
 
 class PriceBackfillResponse(BaseModel):
     """One bounded price-history backfill run -- see ``app.prices.history``. ``pending`` is
-    how many trading days in the ledger's history still lacked an answer when the run
-    started; it reaches 0 once history is complete."""
+    how many trading days in the ledger's history still lacked an answer after
+    ``hydrated_days`` were answered from the full-market store (``market_close``); it
+    reaches 0 once history is complete."""
 
     pending: int
+    hydrated_days: int = 0
     fetched_days: int
     closed_days: int
     failed_days: int

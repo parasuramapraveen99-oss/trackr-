@@ -15,6 +15,7 @@ from app.database import get_conn, money
 from app.db.consent import require_consent
 from app.db.fund_reference import valuation_routes
 from app.db.fund_tax import facts_by_isin, facts_on, taxpayer_profile
+from app.db.imports import RTA_FUND_CONFLICT, rta_fund_isins
 from app.db.repository import account_belongs_to, load_transactions, save_transactions
 from app.engine.dividends import compute_dividends, compute_expected_dividends
 from app.engine.fund_tax import classify_fund_slice
@@ -22,7 +23,7 @@ from app.engine.holdings import exclude_unreconciled
 from app.engine.lots import compute_lots
 from app.engine.realised import compute_realised
 from app.engine.tax_classification import classification_sensitive
-from app.engine.types import ZERO, Transaction
+from app.engine.types import ZERO, Source, Transaction
 from app.prices.fund_category import InstrumentKind
 from app.prices.routing import Route
 from app.routers import exclusions
@@ -76,6 +77,7 @@ def transactions(
             "dividend_amount": money(t.dividend_amount),
             "tds_amount": money(t.tds_amount),
             "cost_transfer": money(t.cost_transfer),
+            "cash_amount": money(t.cash_amount) if t.cash_amount is not None else None,
             "source": str(t.source) if t.source else None,
             "source_ref": t.source_ref,
             "created_at": t.created_at,
@@ -106,8 +108,11 @@ def create_transactions(
     path-level ``require_owned_investor`` guard would authorise the URL while the body
     let an authenticated user append ledger rows to a stranger's account.
 
-    All logic lives in ``app.db.repository.save_transactions``; this handler only
-    translates between the wire shape and ``Transaction``.
+    Two refusals before anything is written (docs/MF_ETF_PLAN.md P5b): a row claiming
+    ``source = RTA_STATEMENT`` (422 -- only the statement import writes those), and a row
+    for a fund a registrar statement already recorded, alias-resolved (409 -- it would
+    count twice). Everything else lives in ``app.db.repository.save_transactions``; this
+    handler only translates between the wire shape and ``Transaction``.
     """
     require_consent(connection, investor_id)
     for account_id in {t.account_id for t in body}:
@@ -116,6 +121,19 @@ def create_transactions(
                 status.HTTP_404_NOT_FOUND,
                 f"no such account for this investor: {account_id}",
             )
+    # A registrar-statement row is written only by the statement import, with its
+    # mf_transaction_detail; a hand-entered one would be a statement nobody uploaded.
+    if any(t.source is Source.RTA_STATEMENT for t in body):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "source RTA_STATEMENT is set only by a mutual fund statement import",
+        )
+    # ...and a fund that statement recorded is its record: another row would double count.
+    held = rta_fund_isins(connection, investor_id, {t.isin for t in body})
+    if held:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"{RTA_FUND_CONFLICT} ({', '.join(sorted(held))})"
+        )
     transactions = [
         Transaction(
             isin=t.isin,
@@ -175,16 +193,17 @@ def lots(
     ]
 
 
-def _financial_year_bounds(fy: str) -> tuple[date, date]:
+def financial_year_bounds(fy: str) -> tuple[date, date]:
     """``"2025-26"`` -> (2025-04-01, 2026-03-31). April-to-March, the same boundary
     ``app.engine.xirr.financial_year_start`` documents -- this only applies that existing
     rule as a filter, it does not define a new one."""
     try:
         start_year_str, end_suffix = fy.split("-", 1)
         start_year = int(start_year_str)
+        # A two-digit suffix names the following year, across a century too ("1999-00").
         end_year = (
-            start_year // 100 * 100 + int(end_suffix) if len(end_suffix) == 2 else int(end_suffix)
-        )
+            start_year + 1 if int(end_suffix) == (start_year + 1) % 100 else -1
+        ) if len(end_suffix) == 2 else int(end_suffix)
     except (ValueError, IndexError) as exc:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, f"fy must look like '2025-26', got {fy!r}"
@@ -205,17 +224,57 @@ def realised(
     response: Response,
     investor_id: str,
     fy: str | None = None,
+    from_: date | None = Query(default=None, alias="from"),
+    to: date | None = None,
+    scope: exclusions.Scope = "all",
+    advised_only: bool = False,
     connection: Any = Depends(get_conn),
     settings: Settings = Depends(get_settings),
 ) -> list[dict[str, Any]]:
     """Realised gains, FIFO-matched, short/long classified. ``fy`` filters to one
-    Indian financial year, e.g. ``2025-26``.
+    Indian financial year, e.g. ``2025-26``; ``from``/``to`` (both inclusive) to any sale
+    dates instead, and may not be combined with ``fy``. ``scope`` narrows the ledger the
+    same way ``/holdings`` does.
 
     ``classification_sensitive`` flags a slice drawn from a provisionally dated bonus lot
     whose classification could change once the allotment date is known (ENGINE_SPEC
     section 3); the window is ``BONUS_ALLOTMENT_SENSITIVITY_DAYS``."""
+    if fy is not None and (from_ is not None or to is not None):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "fy cannot be combined with from/to")
+    if from_ is not None and to is not None and from_ > to:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "from must be on or before to")
+    start, end = financial_year_bounds(fy) if fy is not None else (from_, to)
+    out, skipped = realised_rows(
+        connection, investor_id, settings, start, end, scope, advised_only
+    )
+    exclusions.mark(response, skipped)
+    return out
+
+
+def realised_rows(
+    connection: Any,
+    investor_id: str,
+    settings: Settings,
+    start: date | None = None,
+    end: date | None = None,
+    scope: exclusions.Scope = "all",
+    advised_only: bool = False,
+    ledger: list[Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    """The body of ``/realised``: every realised slice sold in ``[start, end]`` (either
+    bound optional) within ``scope``, and the securities left out because they do not
+    reconcile. Shared with ``/ledger-summary`` so its realised figure is this list's sum;
+    ``ledger`` is that caller's already-loaded ledger (same investor and advised_only),
+    so it is not read twice."""
+    ledger = exclusions.in_scope(
+        connection,
+        ledger
+        if ledger is not None
+        else load_transactions(connection, investor_id=investor_id, advised_only=advised_only),
+        scope,
+    )
     # Unreconciled securities are left out and named in X-Trackr-Excluded (2026-10-08).
-    rows, skipped = exclude_unreconciled(load_transactions(connection, investor_id=investor_id))
+    rows, skipped = exclude_unreconciled(ledger)
 
     # Fund units (docs/MF_ETF_PLAN.md section 5) never take the equity-share path: an ETF
     # or mutual fund classified on the 365-day equity rule would get a confidently wrong
@@ -226,14 +285,18 @@ def realised(
     gains = compute_realised(stock_rows)
     fund_slices, fund_skipped = _fund_realised([t for t in rows if t.isin in fund_isins], routes)
     skipped = skipped + fund_skipped
-    exclusions.mark(response, skipped)
 
-    if fy is not None:
-        start, end = _financial_year_bounds(fy)
-        gains = [g for g in gains if g.sell_date is not None and start <= g.sell_date <= end]
-        fund_slices = [
-            f for f in fund_slices if f[1].sell_date is not None and start <= f[1].sell_date <= end
-        ]
+    def sold_in_window(sell_date: date | None) -> bool:
+        if start is None and end is None:
+            return True
+        return (
+            sell_date is not None
+            and (start is None or start <= sell_date)
+            and (end is None or sell_date <= end)
+        )
+
+    gains = [g for g in gains if sold_in_window(g.sell_date)]
+    fund_slices = [f for f in fund_slices if sold_in_window(f[1].sell_date)]
 
     out = [
         {
@@ -308,7 +371,7 @@ def realised(
                     **tax,
                 }
             )
-    return out
+    return out, skipped
 
 
 def _fair_values_31jan2018(connection: Any, routes: dict[str, Any], isins: list[str]) -> dict:

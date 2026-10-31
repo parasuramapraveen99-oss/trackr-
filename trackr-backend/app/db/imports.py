@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from time import monotonic
@@ -508,6 +509,7 @@ def stage_batch(
     # caught -- once, rather than in each parser with a different idea of what an ISIN is.
     # Must precede the import_batch insert below, which reads its counts off this result.
     result = _screen_isins(conn, result)
+    result = _screen_rta_funds(conn, investor_id, result)
 
     folios = []
     parse_declared_folios = getattr(adapter, "parse_declared_folios", None)
@@ -710,6 +712,7 @@ def reparse_batch(
     # batch's rows, so an unscreened reparse would be a way to land a damaged identifier
     # that the original staging had already refused.
     result = _screen_isins(conn, result)
+    result = _screen_rta_funds(conn, str(investor_id), result)
     # Re-resolved too: an F&O row rejected because the contract master lacked that day
     # resolves once it has been backfilled -- the recovery path _stage_fno names.
     fno_staged, fno_rejected = _stage_fno(conn, result.fno_rows, str(account_id))
@@ -918,6 +921,10 @@ def promote_batch(
         account_row = cur.fetchone()
         if account_row and account_row[0]:
             lock_promotion_account(conn, str(account_row[0]))
+        # A fund statement batch spans one account per folio; lock each, in a fixed order,
+        # before the batch lock -- the same order every other promotion takes.
+        for mf_account in _mf_account_ids(cur, batch_id):
+            lock_promotion_account(conn, mf_account)
         # FOR UPDATE: a concurrent F&O heal (or a second promote) waits for this one, so
         # no row turns STAGED inside a batch that is being promoted (2026-10-08 race).
         cur.execute(
@@ -952,6 +959,14 @@ def promote_batch(
             (batch_id,),
         )
         fno_staged = cur.fetchall()
+        cur.execute(
+            "SELECT id, dedupe_key, payload FROM import_row "
+            "WHERE batch_id = %s AND status = 'STAGED' AND segment = 'MF' ORDER BY row_number",
+            (batch_id,),
+        )
+        mf_staged = cur.fetchall()
+        cur.execute("SELECT investor_id FROM import_batch WHERE id = %s", (batch_id,))
+        batch_investor = str(cur.fetchone()[0])
 
     candidates = [(row_id, _payload_to_txn(p["transaction"])) for row_id, p in staged]
 
@@ -965,8 +980,19 @@ def promote_batch(
     to_insert: list[Transaction] = []
     excluded: list[tuple[str, str]] = []
     superseded: list[tuple[str, str, str]] = []
+    # Rows refused for a double count across sources (below and ``_promote_mf``): turned
+    # EXCLUDED like a precedence loss, and named in the result's ``rejected``.
+    blocked_rows: list[tuple[str, str]] = []
+    rejected: list[dict[str, Any]] = []
 
+    # A fund a registrar statement recorded is that statement's (re-checked here, not only
+    # at staging: the statement may have been promoted since this batch was staged).
+    rta_held = rta_fund_isins(conn, batch_investor, {t.isin for _, t in candidates})
     for row_id, txn in candidates:
+        if txn.isin in rta_held:
+            blocked_rows.append((str(row_id), RTA_FUND_CONFLICT))
+            rejected.append({"isin": txn.isin, "reason": RTA_FUND_CONFLICT, "rows": 1})
+            continue
         identity = precedence.trade_identity(txn)
         existing = known.get(identity) if identity else None
         decision = precedence.decide(
@@ -1010,14 +1036,23 @@ def promote_batch(
 
     summary = repository.save_transactions(conn, transactions, actor_uid=actor_uid)
     fno_inserted = _promote_fno(conn, fno_staged)
+    mf_inserted, mf_blocked_rows, mf_blocked = _promote_mf(
+        conn, mf_staged, batch_investor, batch_id, actor_uid
+    )
+    blocked_rows.extend(mf_blocked_rows)
     summary = replace(
         summary,
-        inserted=summary.inserted + fno_inserted,
-        skipped_duplicates=summary.skipped_duplicates + len(fno_staged) - fno_inserted,
+        inserted=summary.inserted + fno_inserted + mf_inserted,
+        skipped_duplicates=summary.skipped_duplicates
+        + len(fno_staged) - fno_inserted
+        + len(mf_staged) - mf_inserted - len(mf_blocked_rows),
+        # Named, never silently dropped: a fund blocked here, or a broker row for a fund a
+        # statement recorded. Their import_row rows turn EXCLUDED with the same reason.
+        rejected=summary.rejected + rejected + mf_blocked,
     )
 
     with conn.cursor() as cur:
-        for row_id, reason in excluded:
+        for row_id, reason in excluded + blocked_rows:
             cur.execute(
                 "UPDATE import_row SET status = 'EXCLUDED', reason = %s WHERE id = %s",
                 (reason, row_id),
@@ -1044,7 +1079,7 @@ def promote_batch(
             (actor_uid, batch_id),
         )
 
-    if excluded or superseded:
+    if excluded or superseded or blocked_rows:
         # Logged as its own audit event, not folded into the promotion summary. Somebody
         # asking "why is this trade not in the ledger?" must be able to find the answer.
         audit.record(
@@ -1056,6 +1091,7 @@ def promote_batch(
             {
                 "excluded": [{"row": r, "reason": why} for r, why in excluded],
                 "superseded": [{"row": r, "reason": why} for r, why, _ in superseded],
+                "blocked": [{"row": r, "reason": why} for r, why in blocked_rows],
             },
         )
 
@@ -1070,6 +1106,7 @@ def promote_batch(
             "skipped_duplicates": summary.skipped_duplicates,
             "excluded_by_precedence": len(excluded),
             "superseded": len(superseded),
+            "blocked_double_count": len(blocked_rows),
             # A COUNT, never a value -- audit.py: "diff must never contain a PAN, a demat
             # number or ciphertext". This is also the record that answers, later, whether
             # a human was told these rows came from a parser that could not verify them:
@@ -1078,6 +1115,8 @@ def promote_batch(
             # Already inside inserted/skipped_duplicates; named so the F&O share of a
             # promotion is answerable later (fno_trade, never transaction).
             "fno_inserted": fno_inserted,
+            # Likewise for registrar statement rows (segment MF, migration 095).
+            "mf_inserted": mf_inserted,
         },
     )
 
@@ -1593,3 +1632,555 @@ def discard_batch(conn: Any, batch_id: str, reason: str, actor_uid: str | None =
         actor_uid,
         {"reason": reason},
     )
+
+
+# ---------------------------------------------------------------------------
+# Mutual-fund registrar statements (segment 'MF', migration 095)
+# ---------------------------------------------------------------------------
+#
+# A CAMS/KFintech detailed statement covers every folio an investor holds, so one batch
+# spans several destination accounts: one ``account`` per AMC-scoped folio (broker
+# MF_FOLIO, client_id = the hashed folio key). The batch itself is investor-scoped
+# (account_id NULL). Same two-step boundary as every other import: staging here writes
+# nothing to the ledger; ``promote_batch`` -> ``_promote_mf`` is the attributed write.
+
+ADAPTER_MF_STATEMENT = "mf_cas_pdf"
+MF_FOLIO_BROKER = "MF_FOLIO"
+
+
+class StatementChangedError(ValueError):
+    """The uploaded statement does not parse to the preview the user reviewed."""
+
+
+#: The cross-source guard's reason, in both directions: a statement fund that another source
+#: already recorded, and (``RTA_FUND_CONFLICT``) another source for a fund a statement
+#: recorded.
+_MF_OTHER_SOURCE = (
+    "Your portfolio already has transactions for this fund from another source "
+    "(a manual entry or a broker file). Importing them again would count them twice."
+)
+RTA_FUND_CONFLICT = (
+    "This fund is already in your portfolio from a mutual fund statement (CAMS/KFintech), "
+    "which is its record. Adding it from another source would count it twice."
+)
+
+
+def rta_fund_isins(conn: Any, investor_id: str, isins: set[str]) -> set[str]:
+    """Which of ``isins`` -- alias-resolved -- this investor's ledger already holds from a
+    registrar statement. Manual entry and broker-file staging and promotion refuse these
+    (``RTA_FUND_CONFLICT``), the reverse of the guard a statement fund meets."""
+    if not isins:
+        return set()
+    from app.db.security_alias import verified_map
+
+    aliases = verified_map(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT DISTINCT t.isin FROM transaction t JOIN account a ON a.id = t.account_id
+               WHERE a.investor_id = %s AND t.source = 'RTA_STATEMENT'
+                 AND t.reverses_id IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM transaction r WHERE r.reverses_id = t.id)""",
+            (investor_id,),
+        )
+        recorded = {aliases.get(row[0], row[0]) for row in cur.fetchall()}
+    return {isin for isin in isins if aliases.get(isin, isin) in recorded}
+
+
+def _screen_rta_funds(conn: Any, investor_id: str, result: ParseResult) -> ParseResult:
+    """Refuse, at staging, a broker-file row for a fund a registrar statement recorded."""
+    held = rta_fund_isins(conn, investor_id, {s.transaction.isin for s in result.rows})
+    if not held:
+        return result
+    rows = [s for s in result.rows if s.transaction.isin not in held]
+    rejections = list(result.rejections) + [
+        Rejection(s.row_number, RTA_FUND_CONFLICT, s.raw)
+        for s in result.rows if s.transaction.isin in held
+    ]
+    return ParseResult(
+        rows=rows, rejections=rejections, notes=result.notes, fno_rows=result.fno_rows
+    )
+
+
+@dataclass(frozen=True)
+class _MfLedger:
+    """What the ledger already says, read once per staging or promotion of a statement."""
+
+    #: VERIFIED aliases, collapsed (app.db.security_alias.verified_map).
+    aliases: dict[str, str]
+    #: The investor's live ledger, alias-resolved (``repository.load_transactions``).
+    rows: list[Transaction]
+    #: MF_FOLIO account id -> (folio key, label).
+    folios: dict[str, tuple[str, str]]
+    #: transaction id -> (statement kind, printed amount, batch id), mf_transaction_detail.
+    detail: dict[str, tuple[str, Decimal, str]]
+
+    def folio_account(self, key: str) -> str | None:
+        return next((a for a, (k, _) in self.folios.items() if k == key), None)
+
+
+def _mf_ledger(conn: Any, investor_id: str) -> _MfLedger:
+    from app.db.security_alias import verified_map
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, client_id, label FROM account WHERE investor_id = %s AND broker = %s",
+            (investor_id, MF_FOLIO_BROKER),
+        )
+        folios = {str(a): (key, label or "") for a, key, label in cur.fetchall()}
+        cur.execute(
+            "SELECT transaction_id, statement_kind, printed_amount, batch_id "
+            "FROM mf_transaction_detail WHERE investor_id = %s",
+            (investor_id,),
+        )
+        detail = {str(t): (kind, amount, str(batch)) for t, kind, amount, batch in cur.fetchall()}
+    return _MfLedger(
+        verified_map(conn), repository.load_transactions(conn, investor_id=investor_id),
+        folios, detail,
+    )
+
+
+def _units_held(rows: list[Transaction], isin: str, on: date) -> tuple[Decimal, str | None]:
+    """Units of ``isin`` held at the end of ``on`` by replaying ``rows``, or why not."""
+    from app.engine.holdings import compute_holdings_partitioned
+    from app.engine.types import ZERO
+
+    held, skipped = compute_holdings_partitioned(rows, on)
+    broken = next((s.message for s in skipped if s.isin == isin), None)
+    return next((h.quantity for h in held if h.isin == isin), ZERO), broken
+
+
+def _mf_blocked_by_ledger(
+    conn: Any, ledger: _MfLedger, investor_id: str, *, isin: str, folio_key: str,
+    period: tuple[date, date] | None, closing: Decimal,
+    candidates: list[tuple[tuple[str, ...], str | None, Transaction]],
+    printed_folios: frozenset[str] = frozenset(),
+) -> str | None:
+    """Reasons only the database can give for not importing a fund section.
+
+    ``candidates`` are the section's rows: (identity, dedupe key or None when no folio
+    account exists yet, transaction). ``printed_folios`` are the folio keys this same
+    statement prints for this fund. Run at preview, at staging and again inside
+    promotion, under its locks, so the ledger cannot change between the check and the
+    write. In order:
+
+    1. the fund is on the AMFI route;
+    2. no other source recorded it (manual entry, a broker file);
+    3. no other folio account recorded it, unless this statement prints that folio too --
+       one statement listing two folios is evidence they are two; a folio it does not
+       print may be this one printed differently, which would open a parallel account,
+       so it blocks rather than guesses;
+    4. the ledger's units in this folio at the statement's end, plus the rows that would
+       actually be inserted after dedupe, equal the statement's printed closing units;
+    5. every row already in the ledger for this folio and fund, dated inside the
+       statement's period, appears in the statement (by ``row_identity``).
+
+    4 and 5 catch a re-issued or corrected statement, and any other duplicate: the
+    statement disagrees with the ledger, and Trackr+ names it rather than merging.
+    """
+    from app.db import fund_reference
+    from app.ingest.mf_statement_rows import canonical, row_identity
+    from app.prices.routing import Route
+
+    decision = fund_reference.valuation_routes(conn, [isin]).get(isin)
+    if decision is None or decision.route is not Route.AMFI:
+        return (
+            "This fund is not in the AMFI scheme list on this deployment, so it cannot be "
+            "valued or tracked yet."
+        )
+    target = ledger.aliases.get(isin, isin)
+    fund = [t for t in ledger.rows if t.isin == target]
+    if any(t.account_id not in ledger.folios or t.source is not Source.RTA_STATEMENT
+           for t in fund):
+        return _MF_OTHER_SOURCE
+    others = sorted({ledger.folios[str(t.account_id)][1] for t in fund
+                     if ledger.folios[str(t.account_id)][0] not in {folio_key, *printed_folios}})
+    if others:
+        return (
+            f"This fund is already recorded under another folio ({'; '.join(others)}). The "
+            "two may be the same folio printed differently, so it is not imported as a "
+            "second one."
+        )
+    if period is None:
+        return "The statement period could not be read, so it cannot be checked."
+    start, end = period
+    # Checks 4 and 5 are per folio: another folio this statement prints has its own section.
+    fund = [t for t in fund if ledger.folios[str(t.account_id)][0] == folio_key]
+
+    batches = ", ".join(sorted({ledger.detail[str(t.id)][2] for t in fund
+                                if str(t.id) in ledger.detail})) or "none"
+    keys = [key for _, key, _ in candidates if key]
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.dedupe_key FROM transaction t JOIN account a ON a.id = t.account_id "
+            "WHERE a.investor_id = %s AND t.dedupe_key = ANY(%s)",
+            (investor_id, keys),
+        )
+        present = {row[0] for row in cur.fetchall()}
+    new = [replace(txn, isin=target) for _, key, txn in candidates if key not in present]
+    before, broken = _units_held(fund, target, end)
+    after, broken_after = _units_held(fund + new, target, end)
+    if broken or broken_after:
+        return (f"The rows already in Trackr for this fund (import batch {batches}) do not "
+                f"replay with this statement: {broken or broken_after}")
+    if after != closing:
+        gap = after - closing
+        return (
+            f"This statement disagrees with rows already in Trackr from import batch "
+            f"{batches}: Trackr holds {canonical(before)} units in this folio at {end}, this "
+            f"statement would add {canonical(after - before)}, and its closing balance is "
+            f"{canonical(closing)} -- {canonical(abs(gap))} units "
+            f"{'more' if gap > 0 else 'fewer'} than the statement. A re-issued or corrected "
+            "statement is not merged into the existing rows."
+        )
+
+    def ledger_identity(t: Transaction) -> tuple[str, ...]:
+        found = ledger.detail.get(str(t.id))
+        if found is None:  # no statement facts: it can match no printed row
+            return (str(t.id),)
+        kind, amount, _ = found
+        return row_identity(t.txn_date, kind, t.txn_type, t.quantity, t.price, amount)
+
+    printed = Counter(identity for identity, _, _ in candidates)
+    recorded = Counter(ledger_identity(t) for t in fund if start <= t.txn_date <= end)
+    missing = sum((recorded - printed).values())
+    if missing:
+        return (
+            f"{missing} transaction(s) already in Trackr for this fund from import batch "
+            f"{batches}, dated inside this statement's period, are not in this statement. A "
+            "re-issued or corrected statement is not merged into the existing rows."
+        )
+    return None
+
+
+def _mf_transaction(section: Any, row: Any, account_id: str | None) -> Transaction:
+    return Transaction(
+        isin=section.isin,
+        txn_date=row.txn_date,
+        txn_type=row.txn_type,
+        quantity=row.quantity,
+        price=row.price,
+        charges=row.charges,
+        stt=row.stt,
+        dividend_amount=row.dividend_amount,
+        tds_amount=row.tds_amount,
+        account_id=account_id,
+        source=Source.RTA_STATEMENT,
+        source_ref=row.source_ref,
+    )
+
+
+def mf_sections(conn: Any, investor_id: str, preview: Any) -> list[Any]:
+    """Every fund section of a checked preview, mapped or blocked -- the statement's own
+    reasons first (app.ingest.mf_statement_rows), then the ledger's. The preview screen
+    and staging both call this, so what the user is told will import is what stages."""
+    from app.ingest.mf_statement_rows import row_identity, statement_rows
+
+    ledger = _mf_ledger(conn, investor_id)
+    sections = []
+    parsed = statement_rows(preview, investor_id)
+    printed: dict[str, set[str]] = {}
+    for section in parsed:
+        if section.isin:
+            printed.setdefault(section.isin, set()).add(section.folio_key)
+    for section in parsed:
+        if section.importable and section.isin:
+            account_id = ledger.folio_account(section.folio_key)
+            candidates = []
+            for row in section.rows:
+                txn = _mf_transaction(section, row, account_id)
+                identity = row_identity(row.txn_date, row.statement_kind, row.txn_type,
+                                        row.quantity, row.price, row.printed_amount)
+                candidates.append((identity, make_dedupe_key(txn) if account_id else None, txn))
+            reason = _mf_blocked_by_ledger(
+                conn, ledger, investor_id, isin=section.isin, folio_key=section.folio_key,
+                period=section.period, closing=section.closing_units, candidates=candidates,
+                printed_folios=frozenset(printed[section.isin]),
+            )
+            if reason:
+                section = replace(section, rows=[], blocked_reason=reason)
+        sections.append(section)
+    return sections
+
+
+def _mf_folio_account(cur: Any, investor_id: str, key: str, label: str) -> str:
+    cur.execute(
+        """INSERT INTO account (investor_id, broker, client_id, label)
+           VALUES (%s, %s, %s, %s)
+           ON CONFLICT (investor_id, client_id) WHERE broker = 'MF_FOLIO'
+           DO UPDATE SET label = EXCLUDED.label
+           RETURNING id""",
+        (investor_id, MF_FOLIO_BROKER, key, label),
+    )
+    return str(cur.fetchone()[0])
+
+
+def _mf_txn_payload(txn: Transaction) -> dict[str, Any]:
+    return {
+        **_txn_to_payload(txn),
+        "dividend_amount": str(txn.dividend_amount),
+        "tds_amount": None if txn.tds_amount is None else str(txn.tds_amount),
+    }
+
+
+def stage_mf_statement(
+    conn: Any,
+    *,
+    investor_id: str,
+    content: bytes,
+    preview: Any,
+    reviewed_digest: str,
+    filename: str = "",
+    store: Any = None,
+    investor_code: str = "",
+    actor_uid: str | None = None,
+) -> dict[str, Any]:
+    """Stage a checked CAMS/KFintech preview. Writes NOTHING to ``transaction``.
+
+    ``preview`` is ``app.ingest.mf_cas_pdf.parse_statement``'s result for ``content``,
+    parsed again by the caller; ``reviewed_digest`` is the digest the user saw on the
+    preview screen. A mismatch raises ``StatementChangedError`` -- what is staged is
+    exactly what was reviewed, or nothing.
+
+    Every fund section is staged whole or rejected whole with its reason
+    (app.ingest.mf_statement_rows). Rejected sections are kept as REJECTED rows, so the
+    review screen and a later investigation both see what was left out and why.
+
+    Raises:
+        StatementChangedError: the file no longer parses to the reviewed preview.
+        DuplicateUploadError: this exact file is already staged or imported for this
+            investor (a DISCARDED batch does not block it, as for every other import).
+    """
+    from app.ingest.mf_statement_rows import MAPPING_VERSION, statement_digest
+
+    if statement_digest(preview) != reviewed_digest:
+        raise StatementChangedError(
+            "This statement does not match the preview you reviewed. Check it again."
+        )
+    digest = content_hash(content)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, status FROM import_batch WHERE sha256 = %s AND investor_id = %s "
+            "AND adapter = %s AND status <> 'DISCARDED'",
+            (digest, investor_id, ADAPTER_MF_STATEMENT),
+        )
+        existing = cur.fetchall()
+    for batch, status in existing:
+        if status == STATUS_PROMOTED:
+            raise DuplicateUploadError(digest, str(batch))
+        # Staged earlier and never confirmed (the user left the screen). Re-uploading the
+        # same file replaces it, on the record, rather than blocking the file forever.
+        discard_batch(conn, str(batch), "replaced by a new upload of the same statement",
+                      actor_uid=actor_uid)
+
+    sections = mf_sections(conn, investor_id, preview)
+
+    document_id = None
+    if store is not None:
+        stored = documents.store_document(
+            conn,
+            store,
+            investor_id=investor_id,
+            investor_code=investor_code or "UNKNOWN",
+            doctype="RTA_STATEMENT",
+            content=content,
+            received=date.today(),
+            filename=filename,
+            content_type="application/pdf",
+            account_id=None,
+            actor_uid=actor_uid,
+        )
+        document_id = str(stored["id"])
+
+    staged: list[tuple[Any, ...]] = []
+    rejected: list[tuple[Any, ...]] = []
+    row_number = 0
+    with conn.cursor() as cur:
+        for section in sections:
+            raw = {
+                "scheme": section.scheme,
+                "amc": section.amc,
+                "isin": section.isin,
+                "folio_label": section.folio_label,
+                "section": section.index,
+                # What promotion reconciles the ledger against again, under its locks.
+                "period": None if section.period is None
+                else [section.period[0].isoformat(), section.period[1].isoformat()],
+                "closing_units": str(section.closing_units),
+            }
+            if not section.importable:
+                row_number += 1
+                rejected.append((row_number, json.dumps({"raw": raw}), section.blocked_reason))
+                continue
+            account_id = _mf_folio_account(
+                cur, investor_id, section.folio_key, f"{section.amc} · {section.folio_label}"
+            )
+            for row in section.rows:
+                row_number += 1
+                txn = _mf_transaction(section, row, account_id)
+                detail = {
+                    "folio_key": section.folio_key,
+                    "registrar": section.registrar,
+                    "statement_kind": row.statement_kind,
+                    "printed_amount": str(row.printed_amount),
+                    "cash_amount": None if row.cash_amount is None else str(row.cash_amount),
+                    "stamp_duty": None if row.stamp_duty is None else str(row.stamp_duty),
+                    "stt": str(row.stt) if row.stt else None,
+                    "tds": None if row.tds is None else str(row.tds),
+                    "source_sequence": row.source_sequence,
+                }
+                staged.append((
+                    row_number,
+                    make_dedupe_key(txn),
+                    json.dumps({"transaction": _mf_txn_payload(txn), "mf_detail": detail,
+                                "raw": {**raw, "symbol": None}}),
+                ))
+
+        notes = [f"mapping {MAPPING_VERSION}", f"statement {reviewed_digest[:16]}"]
+        cur.execute(
+            """INSERT INTO import_batch (investor_id, account_id, adapter, filename, sha256,
+                                         document_id, row_count, rejected_count, notes)
+               VALUES (%s, NULL, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+            (investor_id, ADAPTER_MF_STATEMENT, filename or None, digest, document_id,
+             len(staged), len(rejected), json.dumps(notes)),
+        )
+        batch_id = str(cur.fetchone()[0])
+        if staged:
+            cur.executemany(
+                """INSERT INTO import_row (batch_id, row_number, confidence, dedupe_key,
+                                           payload, segment)
+                   VALUES (%s, %s, 1, %s, %s, 'MF')""",
+                [(batch_id, *values) for values in staged],
+            )
+        if rejected:
+            cur.executemany(
+                """INSERT INTO import_row (batch_id, row_number, status, payload, reason,
+                                           segment)
+                   VALUES (%s, %s, 'REJECTED', %s, %s, 'MF')""",
+                [(batch_id, *values) for values in rejected],
+            )
+
+    audit.record(
+        conn,
+        ACTION_BATCH_STAGED,
+        "import_batch",
+        batch_id,
+        actor_uid,
+        {"adapter": ADAPTER_MF_STATEMENT, "parsed": len(staged), "rejected": len(rejected),
+         "funds_importable": sum(1 for s in sections if s.importable),
+         "funds_blocked": sum(1 for s in sections if not s.importable)},
+    )
+    return {
+        "batch_id": batch_id,
+        "staged_rows": len(staged),
+        "sections": sections,
+        "document_id": document_id,
+    }
+
+
+def _mf_account_ids(cur: Any, batch_id: str) -> list[str]:
+    cur.execute(
+        "SELECT DISTINCT payload->'transaction'->>'account_id' FROM import_row "
+        "WHERE batch_id = %s AND segment = 'MF' AND status = 'STAGED'",
+        (batch_id,),
+    )
+    return sorted(str(row[0]) for row in cur.fetchall() if row[0])
+
+
+def _promote_mf(
+    conn: Any, staged: list[tuple[str, str, dict[str, Any]]], investor_id: str,
+    batch_id: str, actor_uid: str,
+) -> tuple[int, list[tuple[str, str]], list[dict[str, Any]]]:
+    """Append staged fund rows to ``transaction`` and their statement facts to
+    ``mf_transaction_detail`` -- in the caller's database transaction, so a fund row never
+    lands without its authoritative amount. A duplicate (``dedupe_key`` already in the
+    ledger) adds neither row.
+
+    Every fund section is checked against the ledger again first (``_mf_blocked_by_ledger``)
+    under the account locks ``promote_batch`` holds: a manual row or another statement
+    that landed after staging blocks the whole section here, never a partial import.
+
+    Returns (rows inserted, (import_row id, reason) for each row of a blocked section,
+    one ``{"isin", "scheme", "reason", "rows"}`` per blocked section)."""
+    from app.ingest.mf_statement_rows import row_identity
+
+    if not staged:
+        return 0, [], []
+    ledger = _mf_ledger(conn, investor_id)
+    groups: dict[tuple[str, int], list[tuple[str, str, dict[str, Any], Transaction]]] = {}
+    for row_id, dedupe_key, payload in staged:
+        p = payload["transaction"]
+        txn = replace(
+            _payload_to_txn(p),
+            dividend_amount=Decimal(p.get("dividend_amount") or "0"),
+            tds_amount=None if p.get("tds_amount") is None else Decimal(p["tds_amount"]),
+            dedupe_key=dedupe_key,
+        )
+        key = (str(p["account_id"]), int(payload["raw"]["section"]))
+        groups.setdefault(key, []).append((str(row_id), dedupe_key, payload, txn))
+
+    # Folios this batch's statement prints, per fund (only staged sections are known here).
+    printed: dict[str, set[str]] = {}
+    for rows in groups.values():
+        printed.setdefault(rows[0][2]["raw"]["isin"], set()).add(
+            rows[0][2]["mf_detail"]["folio_key"])
+
+    accepted: list[tuple[dict[str, Any], Transaction]] = []
+    blocked_rows: list[tuple[str, str]] = []
+    blocked: list[dict[str, Any]] = []
+    for rows in groups.values():
+        raw, detail = rows[0][2]["raw"], rows[0][2]["mf_detail"]
+        if raw.get("closing_units") is None or raw.get("period") is None:
+            reason = ("This fund was staged before statements were checked against the "
+                      "ledger. Import the statement again.")
+        else:
+            reason = _mf_blocked_by_ledger(
+                conn, ledger, investor_id, isin=raw["isin"], folio_key=detail["folio_key"],
+                period=(date.fromisoformat(raw["period"][0]),
+                        date.fromisoformat(raw["period"][1])),
+                closing=Decimal(raw["closing_units"]),
+                candidates=[
+                    (row_identity(txn.txn_date, payload["mf_detail"]["statement_kind"],
+                                  txn.txn_type, txn.quantity, txn.price,
+                                  Decimal(payload["mf_detail"]["printed_amount"])),
+                     key, txn)
+                    for _, key, payload, txn in rows
+                ],
+                printed_folios=frozenset(printed[raw["isin"]]),
+            )
+        if reason:
+            blocked_rows.extend((row_id, reason) for row_id, *_ in rows)
+            blocked.append({"isin": raw["isin"], "scheme": raw["scheme"], "reason": reason,
+                            "rows": len(rows)})
+        else:
+            accepted.extend((payload, txn) for _, _, payload, txn in rows)
+
+    if not accepted:
+        return 0, blocked_rows, blocked
+    ids: list[str | None] = []
+    summary = repository.save_transactions(
+        conn, [txn for _, txn in accepted], actor_uid=actor_uid, ids_out=ids
+    )
+    with conn.cursor() as cur:
+        for txn_id, (payload, _) in zip(ids, accepted, strict=True):
+            if txn_id is None:
+                continue
+            d = payload["mf_detail"]
+            cash = d["cash_amount"]
+            if cash is None:  # a DIVIDEND row: its cash is dividend_amount already
+                cash = payload["transaction"]["dividend_amount"]
+            cur.execute(
+                """INSERT INTO mf_transaction_detail
+                   (transaction_id, investor_id, folio_key, registrar, statement_kind,
+                    printed_amount, cash_amount, stamp_duty, stt, tds, source_sequence,
+                    batch_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    txn_id, investor_id, d["folio_key"], d["registrar"], d["statement_kind"],
+                    Decimal(d["printed_amount"]), Decimal(cash),
+                    None if d["stamp_duty"] is None else Decimal(d["stamp_duty"]),
+                    None if d["stt"] is None else Decimal(d["stt"]),
+                    None if d["tds"] is None else Decimal(d["tds"]),
+                    d["source_sequence"], batch_id,
+                ),
+            )
+    return summary.inserted, blocked_rows, blocked

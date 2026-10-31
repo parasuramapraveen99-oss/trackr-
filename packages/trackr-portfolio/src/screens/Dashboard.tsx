@@ -2,7 +2,7 @@
 
 import type { PortfolioScreenProps } from "../chrome";
 import { useCallback, useState } from "react";
-import { useAuth } from "@trackr/core";
+import { useAssetScope, useAuth } from "@trackr/core";
 import { useFetch } from "@trackr/core";
 import { usePortfolioRefresh } from "@trackr/core";
 import {
@@ -29,6 +29,7 @@ import { FnoCard, useFnoPositions } from "../widgets/FnoCard";
 import { FundsCard } from "../widgets/FundsCard";
 import { EmailImportNotification } from "../widgets/EmailAutomation";
 import { CapitalGainsCard } from "../widgets/CapitalGainsCard";
+import { AssetScopeSelect } from "../widgets/AssetScopeSelect";
 import {
   AllocationDonut,
   AllocationDonutSkeleton,
@@ -135,7 +136,9 @@ export function DashboardScreen({ chrome }: PortfolioScreenProps) {
   const [groupBy, setGroupBy] = useState<GroupBy>("sector");
   const [basis, setBasis] = useState<ValueBasis>("current");
 
-  const query = { as_of: asOf, advised_only: advisedOnly || undefined };
+  // The "Show" choice (All / Stocks and ETFs / Mutual funds), sent to the server as `scope`.
+  const [scope] = useAssetScope();
+  const query = { as_of: asOf, advised_only: advisedOnly || undefined, scope };
 
   /**
    * How often the valued figures re-fetch while the dashboard is open.
@@ -160,7 +163,7 @@ export function DashboardScreen({ chrome }: PortfolioScreenProps) {
   );
   const performance = useFetch<PerformanceResponse>(
     investorId ? `/investors/${investorId}/performance` : null,
-    { as_of: asOf },
+    { as_of: asOf, scope },
     token,
     live
   );
@@ -446,6 +449,7 @@ export function DashboardScreen({ chrome }: PortfolioScreenProps) {
               : "Marked to the last published bhavcopy close"
         }
         headline={formatMoney(s?.market_value)}
+        action={<AssetScopeSelect />}
         changes={[
           {
             key: "unrealised",

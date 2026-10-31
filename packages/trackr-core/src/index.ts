@@ -31,6 +31,9 @@ export { Figure, PrivacyProvider, usePrivacy } from "./privacy-context";
 
 export { broadcastPortfolioRefresh, usePortfolioRefresh } from "./refresh";
 
+export { ASSET_SCOPE_LABEL, useAssetScope } from "./asset-scope";
+export type { AssetScope } from "./asset-scope";
+
 export { nextSyncDelay, useReferenceSync } from "./use-reference-sync";
 export type { ReferenceSyncState } from "./use-reference-sync";
 

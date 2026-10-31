@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from app.engine.ledger import ordered
+from app.engine.ledger import cash_paid, cash_received, ordered
 from app.engine.types import ZERO, Transaction
 from app.engine.xirr import CASH_IN_TYPES, CASH_OUT_TYPES
 
@@ -22,9 +22,9 @@ def compute_net_invested(transactions: list[Transaction], as_of: date) -> Decima
     invested = ZERO
     for txn in rows:
         if txn.txn_type in CASH_OUT_TYPES:
-            invested += txn.quantity * txn.price + txn.charges
+            invested += cash_paid(txn)
         elif txn.txn_type in CASH_IN_TYPES:
-            invested -= txn.quantity * txn.price - txn.charges
+            invested -= cash_received(txn)
     return invested
 
 

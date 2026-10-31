@@ -1,7 +1,9 @@
-"""Public exchange transport: database reads on hosted processes; explicit local collection.
+"""Public exchange transport: database reads on hosted processes; explicit collection.
 
-No setting in an HTTP request can enable network access. Only the collector enters
-``reference_context(..., collect=True)``. Existing parsers consume real captured bytes,
+No setting in an HTTP request can enable network access. Only the local collector enters
+``reference_context(..., collect=True)``. Scheduled cron/ops endpoints may enter
+``archive_collection()``, which can fetch only ``ARCHIVE_LOCATIONS`` (owner amendment
+2026-10-31, docs/INSTANT_IMPORT_PLAN.md). Existing parsers consume real captured bytes,
 so IPO/rights/identity trust rules remain unchanged. Misses are durable work intent,
 not fabricated responses. Task dependencies allow a later collection to wake only work
 that asked for that evidence.
@@ -30,7 +32,22 @@ logger = logging.getLogger(__name__)
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 _scope: ContextVar[ReferenceScope | None] = ContextVar("exchange_reference_scope", default=None)
 _task: ContextVar[tuple[str, str] | None] = ContextVar("exchange_reference_task", default=None)
+_probing: ContextVar[bool] = ContextVar("exchange_reachability_probe", default=False)
 PUBLIC_DOMAINS = ("nseindia.com", "bseindia.com", "niftyindices.com", "nsdl.com")
+#: (host, path prefix) pairs scheduled hosted collection may fetch. Published files only:
+#: bhavcopies, F&O bhavcopies, index constituent lists and niftyindices series. The NSE
+#: API (``www.nseindia.com/api``) is deliberately absent; it stays with the laptop.
+ARCHIVE_LOCATIONS = (
+    ("nsearchives.nseindia.com", "/content/"),
+    ("archives.nseindia.com", "/content/historical/"),
+    ("www.bseindia.com", "/download/"),
+    ("niftyindices.com", "/BackPage/"),
+    ("www.niftyindices.com", "/BackPage/"),
+    ("niftyindices.com", "/reports/"),
+    ("www.niftyindices.com", "/reports/"),
+)
+#: Exact (host, path) pairs: the homepage request whose cookie NSE's legacy archive needs.
+ARCHIVE_EXACT = frozenset({("www.nseindia.com", "/")})
 SAFE_HEADERS = frozenset(
     {"accept", "content-type", "referer", "origin", "user-agent", "x-requested-with"}
 )
@@ -39,6 +56,25 @@ SAFE_HEADERS = frozenset(
 def is_exchange_url(url: str) -> bool:
     host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
     return any(host == domain or host.endswith("." + domain) for domain in PUBLIC_DOMAINS)
+
+
+def is_archive_url(url: str) -> bool:
+    """True only for an HTTPS URL inside ``ARCHIVE_LOCATIONS`` / ``ARCHIVE_EXACT``."""
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.hostname or "").lower().rstrip(".")
+    path = parts.path or "/"
+    if parts.scheme != "https" or parts.username or parts.password:
+        return False
+    if (host, path) in ARCHIVE_EXACT:
+        return True
+    return any(host == h and path.startswith(prefix) for h, prefix in ARCHIVE_LOCATIONS)
+
+
+def _archive_host(host: str) -> bool:
+    host = host.lower().rstrip(".")
+    return any(host == h for h, _ in ARCHIVE_LOCATIONS) or any(
+        host == h for h, _ in ARCHIVE_EXACT
+    )
 
 
 def _request(value: Any) -> urllib.request.Request:
@@ -80,7 +116,7 @@ def _guard_exchange_network(event, args):
         return
     if isinstance(host, bytes):
         host = host.decode("ascii", errors="replace")
-    if isinstance(host, str) and is_exchange_url(f"https://{host}") and not collecting():
+    if isinstance(host, str) and is_exchange_url(f"https://{host}") and not _may_connect(host):
         raise ExchangeNetworkDisabled(f"Exchange network access is disabled on hosted work: {host}")
 
 
@@ -91,6 +127,8 @@ sys.addaudithook(_guard_exchange_network)
 class ReferenceScope:
     conn: Any
     collect: bool = False
+    #: Collection limited to ``ARCHIVE_LOCATIONS``; every other exchange URL is a DB read.
+    archive_only: bool = False
     pending: dict = field(default_factory=dict)
 
     def persist(self) -> None:
@@ -120,11 +158,18 @@ class ReferenceScope:
 
 @contextmanager
 def reference_context(
-    conn: Any, *, collect: bool | None = None, task: tuple[str, str] | None = None
+    conn: Any,
+    *,
+    collect: bool | None = None,
+    task: tuple[str, str] | None = None,
+    archive_only: bool | None = None,
 ):
     previous = _scope.get()
+    inherit = collect is None and previous is not None
     scope = ReferenceScope(
-        conn, previous.collect if collect is None and previous else bool(collect)
+        conn,
+        previous.collect if inherit else bool(collect),
+        previous.archive_only if inherit and archive_only is None else bool(archive_only),
     )
     if previous is not None and previous.conn is conn:
         scope.pending = previous.pending
@@ -162,9 +207,55 @@ def reference_task(kind: str, key: str):
         _task.reset(token)
 
 
+@contextmanager
+def archive_collection(conn: Any):
+    """Scheduled hosted collection of published archive files only.
+
+    For cron (``CRON_SECRET``) and ops (``X-Ops-Key``) endpoints. Never enter this from an
+    import, sync or investor request: user-triggered work reads the database only. A URL
+    outside ``ARCHIVE_LOCATIONS`` is answered from the database or raises
+    ``MissingExchangeReference``, exactly as on any hosted read.
+    """
+    with reference_context(conn, collect=True, archive_only=True) as scope:
+        yield scope
+
+
 def collecting() -> bool:
+    """Full collection (the local collector). False inside ``archive_collection``."""
     scope = _scope.get()
-    return scope is not None and scope.collect
+    return scope is not None and scope.collect and not scope.archive_only
+
+
+def may_fetch(url: str) -> bool:
+    """Whether the current scope may send this exchange request to the network."""
+    scope = _scope.get()
+    if scope is None or not scope.collect:
+        return False
+    return not scope.archive_only or is_archive_url(url)
+
+
+@contextmanager
+def reachability_probe():
+    """Let ``/ops/exchange/reachability`` open exchange sockets to MEASURE access.
+
+    Only that ops-key endpoint enters this. Its requests bypass ``urlopen``: nothing is
+    stored, archived or treated as evidence, so a probe can never feed financial work.
+    """
+    token = _probing.set(True)
+    try:
+        yield
+    finally:
+        _probing.reset(token)
+
+
+def _may_connect(host: str) -> bool:
+    """Socket-level counterpart of ``may_fetch``. Paths are enforced in ``urlopen``."""
+    if _probing.get():
+        return True
+    scope = _scope.get()
+    if scope is None or not scope.collect:
+        return False
+    return not scope.archive_only or _archive_host(host)
 
 
 def _immutable(req: urllib.request.Request) -> bool:
@@ -198,7 +289,8 @@ def _immutable(req: urllib.request.Request) -> bool:
 def needs_warmup(opener: Any) -> bool:
     """SQL reads need no HTTP cookie handshake; custom injected sources keep their contract."""
     owner = getattr(opener, "__self__", opener)
-    return collecting() or not isinstance(owner, ReferenceOpener)
+    scope = _scope.get()
+    return (scope is not None and scope.collect) or not isinstance(owner, ReferenceOpener)
 
 
 def _register(conn: Any, req: urllib.request.Request) -> None:
@@ -322,15 +414,16 @@ def urlopen(value: Any, *, network=None, refresh: bool = False, **kwargs):
     if not is_exchange_url(req.full_url):
         return network(req, **kwargs)
     scope = _scope.get()
+    fetch = may_fetch(req.full_url)
     row = _read(scope.conn, req) if scope is not None else None
     fresh = (
         row is not None
         and row[3].astimezone(ZoneInfo("Asia/Kolkata")).date()
         == datetime.now(ZoneInfo("Asia/Kolkata")).date()
     )
-    if row is not None and (not scope.collect or (not refresh and (_immutable(req) or fresh))):
+    if row is not None and (not fetch or (not refresh and (_immutable(req) or fresh))):
         return _response(req, row)
-    if scope is None or not scope.collect:
+    if not fetch:
         if scope is not None:
             key = request_key(req)
             entry = scope.pending.setdefault(key, (req, set(), None))

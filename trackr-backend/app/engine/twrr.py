@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
+from app.engine.ledger import cash_paid, cash_received
 from app.engine.types import ZERO, Snapshot, Transaction, TxnType
 from app.engine.valuation import DAYS_PER_YEAR
 
@@ -40,9 +41,9 @@ def _period_flow(transactions: list[Transaction], after: Snapshot, through: Snap
         if not (after.as_of < txn.txn_date <= through.as_of):
             continue
         if txn.txn_type in PORTFOLIO_IN_TYPES:
-            total += txn.quantity * txn.price + txn.charges
+            total += cash_paid(txn)
         elif txn.txn_type in PORTFOLIO_OUT_TYPES:
-            total -= txn.quantity * txn.price - txn.charges
+            total -= cash_received(txn)
         elif txn.txn_type is TxnType.DIVIDEND and txn.dividend_amount != ZERO:
             total -= txn.dividend_amount
     return total

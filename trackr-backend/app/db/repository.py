@@ -51,6 +51,7 @@ def save_transactions(
     conn: Any,
     transactions: list[Transaction],
     actor_uid: str | None = None,
+    ids_out: list[str | None] | None = None,
 ) -> ImportSummary:
     """Append transactions, skipping duplicates.
 
@@ -72,6 +73,10 @@ def save_transactions(
     add a bare placeholder, never overwrite one.
 
     The audit row shares this transaction. If it fails, the inserts roll back with it.
+
+    ``ids_out``, when given, receives one entry per offered transaction: the new row's id,
+    or None when it was a duplicate -- for a caller that writes a dependent row (the fund
+    statement detail, app.db.imports._promote_mf) in the same database transaction.
     """
     inserted = 0
     skipped = 0
@@ -105,7 +110,10 @@ def save_transactions(
                     json.dumps(txn.raw_payload) if txn.raw_payload else None,
                 ),
             )
-            if cur.fetchone() is None:
+            row = cur.fetchone()
+            if ids_out is not None:
+                ids_out.append(str(row[0]) if row else None)
+            if row is None:
                 skipped += 1
             else:
                 inserted += 1
@@ -201,9 +209,13 @@ def load_transactions(
             SELECT t.id, t.account_id, t.isin, t.txn_date, t.txn_type, t.quantity,
                    t.price, t.charges, t.stt, t.dividend_amount, t.tds_amount,
                    t.cost_transfer,
-                   t.source, t.source_ref, t.dedupe_key, t.raw_payload, t.created_at
+                   t.source, t.source_ref, t.dedupe_key, t.raw_payload, t.created_at,
+                   d.cash_amount
             FROM transaction t
             JOIN account a ON a.id = t.account_id
+            -- A registrar statement's authoritative amount (migration 095). NULL for every
+            -- other row, which keeps its quantity x price +/- charges cash.
+            LEFT JOIN mf_transaction_detail d ON d.transaction_id = t.id
             {where}
             ORDER BY t.txn_date, t.seq
             """,
@@ -215,7 +227,7 @@ def load_transactions(
     # collapsed to its terminal ISIN, so this is a single dict lookup below and can never
     # hand the engine a half-resolved identity.
     aliases = _alias_map(conn, date_to) if apply_aliases else {}
-    transactions = [_transaction_from_row(row) for row in rows]
+    transactions = [_transaction_from_row(row, row[17]) for row in rows]
     actions = None
     if apply_aliases and any(
         (t.raw_payload or {}).get("auto_corporate_action_id") for t in transactions
@@ -234,7 +246,7 @@ def load_transactions(
     ]
 
 
-def _transaction_from_row(row) -> Transaction:
+def _transaction_from_row(row, cash_amount=None) -> Transaction:
     return Transaction(
         id=str(row[0]),
         account_id=str(row[1]),
@@ -253,6 +265,7 @@ def _transaction_from_row(row) -> Transaction:
         dedupe_key=row[14],
         raw_payload=row[15],
         created_at=row[16],
+        cash_amount=cash_amount,
     )
 
 
@@ -270,15 +283,16 @@ def load_snapshot_ledgers(conn: Any, scopes: set[tuple[str, bool]]) -> dict:
             """SELECT t.id,t.account_id,t.isin,t.txn_date,t.txn_type,t.quantity,
                       t.price,t.charges,t.stt,t.dividend_amount,t.tds_amount,
                       t.cost_transfer,t.source,t.source_ref,t.dedupe_key,t.raw_payload,
-                      t.created_at,a.investor_id::text,a.is_advised
+                      t.created_at,a.investor_id::text,a.is_advised,d.cash_amount
                FROM transaction t JOIN account a ON a.id=t.account_id
+               LEFT JOIN mf_transaction_detail d ON d.transaction_id=t.id
                WHERE a.investor_id=ANY(%s::uuid[]) AND t.reverses_id IS NULL
                  AND NOT EXISTS (SELECT 1 FROM transaction r WHERE r.reverses_id=t.id)
                ORDER BY t.txn_date,t.seq""",
             (sorted({investor for investor, _ in scopes}),),
         )
         for row in cur.fetchall():
-            transaction = _transaction_from_row(row)
+            transaction = _transaction_from_row(row, row[19])
             for advised in (False, True):
                 key = (row[17], advised)
                 if key in result and (not advised or row[18]):

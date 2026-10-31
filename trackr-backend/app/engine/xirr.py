@@ -12,7 +12,7 @@ from decimal import Decimal
 import pyxirr
 
 from app.engine.holdings import compute_holdings
-from app.engine.ledger import ordered
+from app.engine.ledger import cash_paid, cash_received, ordered
 from app.engine.types import (
     ACQUIRING_TYPES,
     ZERO,
@@ -54,9 +54,9 @@ def _transaction_flows(
     flows: list[tuple[date, Decimal]] = []
     for txn in transactions:
         if txn.txn_type in CASH_OUT_TYPES:
-            flows.append((txn.txn_date, -(txn.quantity * txn.price + txn.charges)))
+            flows.append((txn.txn_date, -cash_paid(txn)))
         elif txn.txn_type in CASH_IN_TYPES:
-            flows.append((txn.txn_date, txn.quantity * txn.price - txn.charges))
+            flows.append((txn.txn_date, cash_received(txn)))
         elif txn.txn_type is TxnType.DIVIDEND and txn.dividend_amount != ZERO:
             flows.append((txn.txn_date, txn.dividend_amount))
     return flows
@@ -206,6 +206,17 @@ def financial_year_start(as_of: date) -> date:
     return date(year, 4, 1)
 
 
+def financial_years(first: date, today: date) -> list[tuple[date, date]]:
+    """Every Indian financial year from the one containing ``first`` through the one
+    containing ``today``, as (1 April, 31 March) pairs, newest first. Empty when
+    ``first`` is after ``today``. ENGINE_SPEC section 16 rule 7."""
+    oldest = financial_year_start(first).year
+    return [
+        (date(year, 4, 1), date(year + 1, 3, 31))
+        for year in range(financial_year_start(today).year, oldest - 1, -1)
+    ]
+
+
 def compute_fy_xirr(
     transactions: list[Transaction],
     prices: dict[str, Decimal],
@@ -254,6 +265,7 @@ __all__ = [
     "ACQUIRING_TYPES",
     "compute_fy_xirr",
     "financial_year_start",
+    "financial_years",
     "years_before",
     "CASH_IN_TYPES",
     "CASH_OUT_TYPES",
